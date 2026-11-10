@@ -1,0 +1,139 @@
+name: Fork Android APK
+
+# Fork-only: builds a sideloadable APK on a GitHub-hosted runner, without EAS.
+# See FORK.md for the version rules and the secrets this reads.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "App version (MAJOR.MINOR.PATCH)"
+        required: true
+        type: string
+      variant:
+        description: "preview: test build; production: daily build. Both install side by side."
+        required: true
+        type: choice
+        default: preview
+        options:
+          - preview
+          - production
+      abi:
+        description: "arm64-v8a for phones, x86_64 for emulators"
+        required: true
+        type: choice
+        default: arm64-v8a
+        options:
+          - arm64-v8a
+          - x86_64
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-android-apk-${{ inputs.variant }}
+  cancel-in-progress: false
+
+jobs:
+  apk:
+    name: Build ${{ inputs.variant }} ${{ inputs.version }}
+    if: github.repository != 'pingdotgg/t3code'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      APP_VARIANT: ${{ inputs.variant }}
+      T3CODE_MOBILE_VERSION: ${{ inputs.version }}
+      T3CODE_ANDROID_PACKAGE: ${{ vars.T3CODE_ANDROID_PACKAGE }}
+      # The official EAS project would otherwise replace this build's JS with upstream's.
+      T3CODE_MOBILE_UPDATES_ENABLED: "0"
+      MOBILE_VERSION_POLICY: appVersion
+      ABI: ${{ inputs.abi }}
+    steps:
+      - name: Validate inputs
+        run: |
+          if ! [[ "$T3CODE_MOBILE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::version must be MAJOR.MINOR.PATCH, got '$T3CODE_MOBILE_VERSION'"
+            exit 1
+          fi
+          if [ -z "$T3CODE_ANDROID_PACKAGE" ]; then
+            echo "::error::Set the repository variable T3CODE_ANDROID_PACKAGE (for example dev.yourname.t3code)."
+            exit 1
+          fi
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: package.json
+
+      - name: Enable corepack
+        run: |
+          npm install --global corepack@latest
+          corepack enable
+          pnpm --version
+
+      - name: Install mobile dependencies
+        run: pnpm install --frozen-lockfile --filter=@t3tools/mobile...
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Prebuild
+        working-directory: apps/mobile
+        run: pnpm exec expo prebuild --clean --platform android --no-install
+
+      - name: Set versionCode
+        working-directory: apps/mobile/android
+        env:
+          VERSION_CODE: ${{ github.run_number }}
+        run: |
+          sed -i -E "s/versionCode [0-9]+/versionCode $VERSION_CODE/" app/build.gradle
+          grep -E "applicationId|versionCode|versionName" app/build.gradle
+
+      - name: Build
+        working-directory: apps/mobile/android
+        run: ./gradlew app:assembleRelease "-PreactNativeArchitectures=$ABI" --no-daemon
+
+      - name: Sign
+        working-directory: apps/mobile/android
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          apk=app/build/outputs/apk/release/app-release.apk
+          out="$RUNNER_TEMP/t3code-$APP_VARIANT-$T3CODE_MOBILE_VERSION-$ABI.apk"
+          apksigner="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -n 1)apksigner"
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+            "$apksigner" sign --ks "$RUNNER_TEMP/release.keystore" --ks-pass env:KEYSTORE_PASSWORD \
+              --ks-key-alias "$KEY_ALIAS" --key-pass env:KEY_PASSWORD --out "$out" "$apk"
+            rm -f "$RUNNER_TEMP/release.keystore"
+          else
+            echo "::warning::ANDROID_KEYSTORE_BASE64 is not set; the APK is signed with the public React Native debug key."
+            cp "$apk" "$out"
+          fi
+          "$apksigner" verify --print-certs "$out" | head -n 3
+          echo "APK_PATH=$out" >> "$GITHUB_ENV"
+          {
+            echo "### $T3CODE_ANDROID_PACKAGE $APP_VARIANT $T3CODE_MOBILE_VERSION"
+            echo "- versionCode: ${{ github.run_number }}"
+            echo "- ABI: $ABI"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: t3code-${{ inputs.variant }}-${{ inputs.version }}-${{ inputs.abi }}
+          path: ${{ env.APK_PATH }}
+          if-no-files-found: error
