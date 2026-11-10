@@ -6,7 +6,12 @@ import assetLinks from "../web/public/.well-known/assetlinks.json";
 
 // Keep config parsing independent of local env files and build credentials.
 vi.mock("../../scripts/lib/public-config.ts", () => ({
-  loadRepoEnv: () => ({ APP_VARIANT: process.env.APP_VARIANT }),
+  loadRepoEnv: () => ({
+    APP_VARIANT: process.env.APP_VARIANT,
+    ...(process.env.T3CODE_ANDROID_PACKAGE
+      ? { T3CODE_ANDROID_PACKAGE: process.env.T3CODE_ANDROID_PACKAGE }
+      : {}),
+  }),
 }));
 
 afterEach(() => {
@@ -44,4 +49,14 @@ it.each([
     { scheme: "https", host, pathPrefix: "/threads/" },
   ]);
   expect(assetLinks.map((link) => link.target.package_name)).toContain(identifier);
+});
+
+it.each([
+  ["preview", "dev.example.t3code.preview", "com.t3tools.t3code.preview"],
+  ["production", "dev.example.t3code", "com.t3tools.t3code"],
+])("uses T3CODE_ANDROID_PACKAGE for APP_VARIANT=%j", async (value, identifier, iosIdentifier) => {
+  vi.stubEnv("T3CODE_ANDROID_PACKAGE", "dev.example.t3code");
+  const config = await loadConfig(value);
+  expect(config.android?.package).toBe(identifier);
+  expect(config.ios?.bundleIdentifier).toBe(iosIdentifier);
 });

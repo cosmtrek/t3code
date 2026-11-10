@@ -124,6 +124,17 @@ const iosBundleIdentifier = isIosPersonalTeamBuild
   ? personalTeamBundleIdentifier!
   : variant.iosBundleIdentifier;
 
+// Forks install beside the official app under their own package; variant suffixes are kept.
+const androidPackageOverride = repoEnv.T3CODE_ANDROID_PACKAGE?.trim();
+if (androidPackageOverride && !IOS_BUNDLE_IDENTIFIER_PATTERN.test(androidPackageOverride)) {
+  throw new Error(
+    "T3CODE_ANDROID_PACKAGE must be a reverse-DNS identifier such as com.example.t3code.",
+  );
+}
+const androidPackage = androidPackageOverride
+  ? variant.androidPackage.replace(VARIANT_CONFIG.production.androidPackage, androidPackageOverride)
+  : variant.androidPackage;
+
 const dmSansFonts = {
   regular: "@expo-google-fonts/dm-sans/400Regular/DMSans_400Regular.ttf",
   medium: "@expo-google-fonts/dm-sans/500Medium/DMSans_500Medium.ttf",
@@ -296,7 +307,7 @@ const config: ExpoConfig = {
   },
   android: {
     icon: variant.assets.appIcon,
-    package: variant.androidPackage,
+    package: androidPackage,
     ...(repoEnv.T3CODE_ANDROID_GOOGLE_SERVICES_FILE
       ? { googleServicesFile: repoEnv.T3CODE_ANDROID_GOOGLE_SERVICES_FILE }
       : {}),
