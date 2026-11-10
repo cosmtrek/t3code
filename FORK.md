@@ -110,11 +110,12 @@ gh run download --name t3code-preview-1.0.0-arm64-v8a
 
 Repository settings it reads (Settings → Secrets and variables → Actions):
 
-| Kind     | Name                                                                       | Notes                                                                                           |
-| -------- | -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| Variable | `T3CODE_ANDROID_PACKAGE`                                                   | **Required.** Package prefix such as `dev.cosmtrek.t3code`. Preview adds `.preview`, dev `.dev` |
-| Secret   | `ANDROID_KEYSTORE_BASE64`                                                  | Base64 of the signing keystore                                                                  |
-| Secret   | `ANDROID_KEYSTORE_PASSWORD` / `ANDROID_KEY_ALIAS` / `ANDROID_KEY_PASSWORD` | Keystore password, key alias, and key password                                                  |
+| Kind     | Name                                                 | Notes                                                                                    |
+| -------- | ---------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| Variable | `T3CODE_ANDROID_PACKAGE`                             | **Required.** Package prefix, `com.rickoyu.t3code`. Preview adds `.preview`, dev `.dev`  |
+| Secret   | `ANDROID_KEYSTORE_BASE64`                            | Base64 of the signing keystore                                                           |
+| Secret   | `ANDROID_KEYSTORE_PASSWORD` / `ANDROID_KEY_PASSWORD` | Keystore password and key password                                                       |
+| Variable | `ANDROID_KEY_ALIAS`                                  | Key alias. A variable, because a secret would mask every occurrence of its value in logs |
 
 Without a keystore the build still runs, signed with the public React Native debug key. That is fine
 for a quick try only: once an app is installed with one key, a build signed with another cannot
@@ -125,9 +126,9 @@ keytool -genkeypair -v -keystore t3code-release.keystore -alias t3code \
   -keyalg RSA -keysize 4096 -validity 36500
 base64 -w0 t3code-release.keystore | gh secret set ANDROID_KEYSTORE_BASE64 -R cosmtrek/t3code
 gh secret set ANDROID_KEYSTORE_PASSWORD -R cosmtrek/t3code
-gh secret set ANDROID_KEY_ALIAS -R cosmtrek/t3code --body t3code
+gh variable set ANDROID_KEY_ALIAS -R cosmtrek/t3code --body t3code
 gh secret set ANDROID_KEY_PASSWORD -R cosmtrek/t3code
-gh variable set T3CODE_ANDROID_PACKAGE -R cosmtrek/t3code --body dev.cosmtrek.t3code
+gh variable set T3CODE_ANDROID_PACKAGE -R cosmtrek/t3code --body com.rickoyu.t3code
 ```
 
 Current limits:
