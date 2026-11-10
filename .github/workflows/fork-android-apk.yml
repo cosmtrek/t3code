@@ -87,6 +87,10 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      # Public identifiers official builds ship with; they enable T3 Connect against upstream's relay.
+      - name: Enable T3 Connect
+        run: cp .env.example .env
+
       - name: Prebuild
         working-directory: apps/mobile
         run: pnpm exec expo prebuild --clean --platform android --no-install
