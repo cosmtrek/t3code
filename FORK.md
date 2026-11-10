@@ -138,8 +138,11 @@ Current limits:
   `updates.url` and `extra.eas.projectId` in `app.config.ts` replaced.
 - No `google-services.json`, so push notifications do not arrive.
 - `app.t3.codes` thread links verify only the official packages, so they open in the browser.
-- T3 Connect / Clerk sign-in uses upstream's configuration and may not work under another package.
-  Connect to the server directly over the LAN or Tailscale.
+- T3 Connect uses upstream's public Clerk instance and relay (`.env.example`). The relay accepts
+  any valid Clerk session, but Clerk ties some sign-in methods to the official app identities:
+  passkeys and native Google sign-in fail under this package, and OAuth (GitHub, Apple, Microsoft)
+  may be rejected as an unlisted redirect. Sign in with an email code, using the email of your
+  existing account. LAN or Tailscale direct connections always work.
 
 ## GitHub Actions in the fork
 
