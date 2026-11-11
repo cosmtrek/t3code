@@ -17,6 +17,7 @@ import { sanitizeAntigravityToolPayload } from "./AntigravityProtocol.ts";
 import {
   autoApproved,
   CHILD,
+  genericToolStep,
   invokeStep,
   LAUNCH,
   makeProfile,
@@ -65,6 +66,51 @@ it.layer(NodeServices.layer)("readAntigravityChildWork", (it) => {
         "marker 4242 found",
       ]);
       expect(child?.steps?.[0]?.toolCalls[0]?.input).toBe('{"AbsolutePath":"/project/README.md"}');
+    }),
+  );
+
+  it.effect("finds an agy 1.5.5 record by the call id it streamed", () =>
+    Effect.gen(function* () {
+      const callId = "call_14159057062253093858";
+      const invoke = "type.googleapis.com/exa.cortex.core.tools.InvokeSubagent";
+      const { profile } = yield* makeProfile({
+        steps: (logUri) => [
+          [1, 15, plannerStep([callId])],
+          // Other tools share the generic step type and may echo the call id.
+          [
+            2,
+            132,
+            genericToolStep({
+              callId: "call_1",
+              typeUrl: "type.googleapis.com/exa.cortex.core.tools.SendMessage",
+              launch: { role: callId, prompt: callId },
+              child: { id: CHILD, logUri },
+            }),
+          ],
+          [
+            3,
+            132,
+            genericToolStep({
+              callId,
+              typeUrl: invoke,
+              launch: LAUNCH,
+              child: { id: CHILD, logUri },
+            }),
+          ],
+        ],
+      });
+      const [child, ...rest] = yield* read(profile, callId);
+      expect(rest).toEqual([]);
+      expect(child).toMatchObject({
+        conversationId: CHILD,
+        role: LAUNCH.role,
+        prompt: LAUNCH.prompt,
+      });
+      expect(child?.steps?.at(-1)?.text).toBe("marker 4242 found");
+      expect(yield* read(profile, "call_2")).toEqual([]);
+      expect(
+        antigravitySubagentLaunches({ Prompt: LAUNCH.prompt, Role: LAUNCH.role, TypeName: "self" }),
+      ).toEqual([LAUNCH]);
     }),
   );
 
