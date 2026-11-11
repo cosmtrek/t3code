@@ -264,7 +264,12 @@ const linkAntigravityUserConfig = Effect.fn("linkAntigravityUserConfig")(functio
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const userGemini = path.join(input.userHome, ".gemini");
-  const links = antigravityUserSkillDirectories(path, input.profileDirectory);
+  const [configSkills] = antigravityUserSkillDirectories(path, input.profileDirectory);
+  // agy reads app-data skills from its `--app-data-dir`, which T3 sets to antigravity-acp.
+  const links = [
+    configSkills,
+    path.join(input.profileDirectory, "antigravity-acp", "skills"),
+  ] as const;
   const targets = antigravityUserSkillDirectories(path, userGemini);
   const directoryType = input.platform === "win32" ? "junction" : "dir";
   for (const [link, target, type] of [

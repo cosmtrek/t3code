@@ -657,7 +657,7 @@ it.layer(NodeServices.layer)("Antigravity profile preparation", (it) => {
 
         yield* prepareAntigravityProfile({ profileDirectory, userHome });
         const configLink = path.join(profileDirectory, "config", "skills");
-        const cliLink = path.join(profileDirectory, "antigravity-cli", "skills");
+        const cliLink = path.join(profileDirectory, "antigravity-acp", "skills");
         expect(yield* fs.readLink(configLink)).toBe(configSkills);
         expect(yield* isLink(cliLink)).toBe(false);
         expect(yield* fs.exists(path.join(configLink, "review"))).toBe(true);
