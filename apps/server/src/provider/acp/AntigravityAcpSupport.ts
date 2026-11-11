@@ -12,6 +12,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Predicate from "effect/Predicate";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
@@ -90,11 +91,18 @@ const OPEN_MODEL_ACCESS_RELEASE = [1, 5, 1] as const;
 
 /**
  * 1.4.5 appends `systemPrompt.append` to its system instructions on new, load and resume, and
- * keeps none of it between processes, so every activation sends it again.
+ * keeps none of it between processes, so every activation sends it again. agy 1.5.5 advertises it.
  */
 export const antigravityAppendsSystemPrompt = (
   initializeResult: EffectAcpSchema.InitializeResponse,
-) => isQualifiedAntigravityRelease(initializeResult.agentInfo?.version);
+) => {
+  const antigravity = initializeResult.agentCapabilities?._meta?.antigravity;
+  const systemPrompt = Predicate.isObject(antigravity) ? antigravity.systemPrompt : undefined;
+  return (
+    (Predicate.isObject(systemPrompt) && systemPrompt.append === true) ||
+    isQualifiedAntigravityRelease(initializeResult.agentInfo?.version)
+  );
+};
 
 export function antigravitySessionMeta(
   initializeResult: EffectAcpSchema.InitializeResponse,
