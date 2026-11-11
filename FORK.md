@@ -23,17 +23,18 @@ git config rerere.enabled true  # resolve a repeated conflict once
 ## Syncing upstream
 
 ```bash
-git fetch upstream
+git fetch upstream --tags
 git push origin upstream/main:main      # update the mirror
 git switch r/main
-git rebase upstream/main                # move the patch stack onto the new base
+git rebase v0.1.9                       # the new upstream stable tag, not upstream/main
 git range-diff ORIG_HEAD...HEAD         # check that no patch changed unexpectedly
 git push --force-with-lease origin r/main
 ```
 
 Then run `git rebase r/main` on any personal branch that has not landed yet.
 
-Sync after an upstream stable release so the version base stays clear (see Versions).
+Sync to an upstream stable tag so `X.Y.Z-r.N` means exactly that release plus the patches (see
+Versions). upstream/main runs ahead of its latest stable tag.
 
 ## Sending a PR upstream
 
@@ -144,6 +145,26 @@ Current limits:
   may be rejected as an unlisted redirect. Sign in with an email code, using the email of your
   existing account. LAN or Tailscale direct connections always work.
 
+## Server CLI builds (GitHub Actions)
+
+Workflow: `.github/workflows/fork-cli-release.yml`, manual trigger only. It builds the Linux x64
+`t3` archive and publishes it as release `vX.Y.Z-r.N` with a `SHA256SUMS` file, the layout
+`t3 update` expects.
+
+```bash
+gh workflow run fork-cli-release.yml -R cosmtrek/t3code --ref r/main -f version=0.1.9-r.1
+gh run watch -R cosmtrek/t3code
+```
+
+Switch a machine's `t3` service to a fork release, or roll back to upstream:
+
+```bash
+T3CODE_RELEASE_BASE_URL=https://github.com/cosmtrek/t3code/releases/download t3 update 0.1.9-r.1
+t3 update 0.1.9                         # back to upstream's build
+```
+
+Always pass a version. A bare `t3 update` installs upstream's latest release over the fork build.
+
 ## GitHub Actions in the fork
 
 Most upstream workflows run on Blacksmith runners, which a fork does not have, so their jobs stay
@@ -171,3 +192,9 @@ Review this list after every sync, and upstream whatever upstream would take.
 | Fork maintenance guide                                 | `FORK.md`                                | No                             |
 | Android APK build workflow                             | `.github/workflows/fork-android-apk.yml` | No                             |
 | `T3CODE_ANDROID_PACKAGE` overrides the Android package | `apps/mobile/app.config.ts` and its test | Yes, as a fork-friendly option |
+| Server CLI release workflow                            | `.github/workflows/fork-cli-release.yml` | No                             |
+| agy CLI state stays in the instance profile            | `antigravityAuthSupport.ts`, driver      | Yes                            |
+| Antigravity subagent continuation                      | `AntigravityTurnOutcome.ts`, adapter     | Upstream PR #30083             |
+| agy 1.5.5 subagents and transcripts                    | `AntigravityChildWork.ts`, protocol      | Yes                            |
+| System prompt append from agy's advertised capability  | `AntigravityAcpSupport.ts`               | Yes                            |
+| Quota from agy's own sign-in                           | `antigravityUsageLimits.ts`              | Yes                            |

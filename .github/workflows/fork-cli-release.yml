@@ -1,0 +1,111 @@
+name: Fork CLI release
+
+# Fork-only: builds the Linux x64 `t3` CLI archive on a GitHub-hosted runner and
+# publishes it as a GitHub release that `t3 update <version>` can install.
+# Upstream's release workflows run on Blacksmith runners the fork cannot use.
+# See FORK.md for the version rules and how to switch a machine to this build.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (X.Y.Z-r.N); the tag is vX.Y.Z-r.N"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fork-cli-release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  cli:
+    name: Build t3 ${{ inputs.version }} (linux-x64)
+    if: github.repository != 'pingdotgg/t3code'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ inputs.version }}
+      # Builds outside pingdotgg/t3code report "dev" telemetry, as upstream's release does.
+      T3CODE_TELEMETRY_CHANNEL: dev
+    steps:
+      - name: Validate version
+        run: |
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-r\.[0-9]+$ ]]; then
+            echo "::error::version must be X.Y.Z-r.N, got '$VERSION'"
+            exit 1
+          fi
+          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::release v$VERSION already exists"
+            exit 1
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup dependencies
+        uses: ./.github/actions/setup-ci-deps
+        with:
+          install-args: --filter=@t3tools/desktop... --filter=t3... --filter=@t3tools/scripts...
+
+      # Public identifiers official builds ship with; they enable T3 Connect against upstream's relay.
+      - name: Enable T3 Connect
+        run: cp .env.example .env
+
+      - name: Align package versions to release version
+        run: node scripts/update-release-package-versions.ts "$VERSION"
+
+      - name: Build JS bundle
+        run: vp run build:desktop:bundle
+
+      - name: Apply web client branding
+        run: node scripts/apply-web-brand-assets.ts production apps/server/dist/client
+
+      - name: Build CLI single-executable
+        run: node apps/server/scripts/cli.ts build-exe --verbose
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Build resource monitor
+        run: |
+          cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target x86_64-unknown-linux-gnu
+          mkdir -p "$RUNNER_TEMP/cli-resource-monitor/linux-x64"
+          cp native/resource-monitor/target/x86_64-unknown-linux-gnu/release/t3-resource-monitor "$RUNNER_TEMP/cli-resource-monitor/linux-x64/"
+
+      # The Linux archive ships libatomic.so.1 and points t3's RUNPATH at it.
+      - name: Install patchelf
+        run: command -v patchelf || { sudo apt-get update && sudo apt-get install -y patchelf; }
+
+      - name: Build CLI archive
+        run: |
+          node scripts/build-cli-archive.ts \
+            --platform linux \
+            --arch x64 \
+            --version "$VERSION" \
+            --resource-monitor-dir "$RUNNER_TEMP/cli-resource-monitor" \
+            --output-dir release-cli
+
+      - name: Smoke-test CLI archive
+        run: node scripts/smoke-cli-archive.ts --archive release-cli/* --expect-version "$VERSION"
+
+      # `t3 update` verifies the archive against this file next to it.
+      - name: Write checksums
+        working-directory: release-cli
+        run: sha256sum -- * > SHA256SUMS && cat SHA256SUMS
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v$VERSION" release-cli/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "t3 $VERSION" \
+            --notes "Fork build of upstream $(echo "$VERSION" | sed 's/-r\..*//') plus the patches on r/main at $GITHUB_SHA. Install with \`T3CODE_RELEASE_BASE_URL=https://github.com/$GITHUB_REPOSITORY/releases/download t3 update $VERSION\`."
