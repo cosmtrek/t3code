@@ -118,7 +118,13 @@ describe("Antigravity process environment", () => {
     });
 
     expect(spawn.command).toBe("/usr/bin/agy");
-    expect(spawn.args).toEqual(["acp"]);
+    expect(spawn.args).toEqual([
+      "acp",
+      "--gemini-dir",
+      profile.geminiHome,
+      "--app-data-dir",
+      "antigravity-acp",
+    ]);
     expect(spawn.env).not.toHaveProperty("ANTIGRAVITY_HARNESS_PATH");
     expect(spawn.env).toMatchObject({ GEMINI_HOME: profile.geminiHome, PATH: "/usr/bin" });
   });
@@ -646,6 +652,47 @@ it.layer(NodeServices.layer)("Antigravity profile preparation", (it) => {
         yield* fs.remove(cliSkills, { recursive: true });
         yield* prepareAntigravityProfile({ profileDirectory, userHome });
         expect(yield* isLink(cliLink)).toBe(false);
+      }),
+  );
+
+  it.effect.skipIf(!symlinksSupported)(
+    "points an agy CLI profile at its app-data skills and seeds the global sign-in once",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const temporaryDirectory = yield* fs.makeTempDirectoryScoped();
+        const userHome = path.join(temporaryDirectory, "home");
+        const profileDirectory = path.join(temporaryDirectory, "profile");
+        const cliHome = path.join(userHome, ".gemini", "antigravity-cli");
+        yield* fs.makeDirectory(path.join(cliHome, "skills"), { recursive: true });
+        yield* fs.writeFileString(path.join(cliHome, "antigravity-oauth-token"), "global");
+
+        const profile = yield* prepareAntigravityProfile({ profileDirectory, userHome, cli: true });
+        const seeded = path.join(profile.acpDirectory, "antigravity-oauth-token");
+        expect(yield* fs.readLink(path.join(profile.acpDirectory, "skills"))).toBe(
+          path.join(cliHome, "skills"),
+        );
+        expect(yield* fs.readFileString(seeded)).toBe("global");
+        if ((yield* HostProcess.Platform) !== "win32") {
+          expect((yield* fs.stat(seeded)).mode & 0o777).toBe(0o600);
+        }
+
+        // The profile's own sign-in, refreshed by agy or another account, is never overwritten.
+        yield* fs.writeFileString(seeded, "profile");
+        yield* prepareAntigravityProfile({ profileDirectory, userHome, cli: true });
+        expect(yield* fs.readFileString(seeded)).toBe("profile");
+
+        const apiKeyProfile = path.join(temporaryDirectory, "api-key");
+        const apiKey = yield* prepareAntigravityProfile({
+          profileDirectory: apiKeyProfile,
+          userHome,
+          cli: true,
+          auth: { authMethod: "gemini-api-key", apiKey: "key", gcpProject: "", gcpLocation: "" },
+        });
+        expect(yield* fs.exists(path.join(apiKey.acpDirectory, "antigravity-oauth-token"))).toBe(
+          false,
+        );
       }),
   );
 

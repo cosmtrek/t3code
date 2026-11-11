@@ -246,10 +246,16 @@ const linkAntigravityUserSkills = Effect.fn("linkAntigravityUserSkills")(functio
   readonly profileDirectory: string;
   readonly userHome: string;
   readonly platform: NodeJS.Platform;
+  readonly cli: boolean;
 }): Effect.fn.Return<void, never, FileSystem.FileSystem | Path.Path> {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const links = antigravityUserSkillDirectories(path, input.profileDirectory);
+  const [configSkills, cliSkills] = antigravityUserSkillDirectories(path, input.profileDirectory);
+  // The agy CLI reads app-data skills from its `--app-data-dir`, which T3 sets to antigravity-acp.
+  const links = [
+    configSkills,
+    input.cli ? path.join(input.profileDirectory, "antigravity-acp", "skills") : cliSkills,
+  ] as const;
   const targets = antigravityUserSkillDirectories(path, path.join(input.userHome, ".gemini"));
   for (const [link, target] of [
     [links[0], targets[0]],
@@ -301,6 +307,37 @@ const linkAntigravityUserSkills = Effect.fn("linkAntigravityUserSkills")(functio
   }
 });
 
+const ANTIGRAVITY_CLI_TOKEN_FILE = "antigravity-oauth-token";
+
+/**
+ * agy signs in through xdg-open and ignores BROWSER, so T3 cannot capture its sign-in URL. Start a
+ * new CLI profile from the account `agy` already signed in globally; agy refreshes its own copy.
+ */
+const seedAntigravityCliSignIn = Effect.fn("seedAntigravityCliSignIn")(function* (input: {
+  readonly acpDirectory: string;
+  readonly userHome: string;
+}): Effect.fn.Return<void, never, FileSystem.FileSystem | Path.Path> {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const destination = path.join(input.acpDirectory, ANTIGRAVITY_CLI_TOKEN_FILE);
+  const source = path.join(
+    input.userHome,
+    ".gemini",
+    "antigravity-cli",
+    ANTIGRAVITY_CLI_TOKEN_FILE,
+  );
+  yield* Effect.gen(function* () {
+    if (yield* fs.exists(destination)) return;
+    if (!(yield* fs.exists(source))) return;
+    const token = yield* fs.readFileString(source);
+    yield* fs.writeFileString(destination, token, { flag: "wx", mode: 0o600 });
+  }).pipe(
+    Effect.catch((error) =>
+      Effect.logWarning("Could not copy the agy sign-in into the Antigravity profile.", { error }),
+    ),
+  );
+});
+
 export const prepareAntigravityProfile = Effect.fn("prepareAntigravityProfile")(function* (input: {
   readonly profileDirectory: string;
   readonly baseEnv?: NodeJS.ProcessEnv;
@@ -309,8 +346,11 @@ export const prepareAntigravityProfile = Effect.fn("prepareAntigravityProfile")(
   readonly auth?: AntigravityAuthConfig;
   readonly userHome?: string;
   readonly tempDirectory?: string;
+  /** The standalone agy CLI, which keeps its Google sign-in in `antigravity-oauth-token`. */
+  readonly cli?: boolean;
 }) {
   const auth = input.auth ?? ANTIGRAVITY_PERSONAL_AUTH;
+  const cli = input.cli === true;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -447,7 +487,10 @@ export const prepareAntigravityProfile = Effect.fn("prepareAntigravityProfile")(
         authSupportError("The Antigravity profile settings could not be written."),
       ),
     );
-  yield* linkAntigravityUserSkills({ profileDirectory: geminiHome, userHome, platform });
+  yield* linkAntigravityUserSkills({ profileDirectory: geminiHome, userHome, platform, cli });
+  if (cli && antigravityAuthUsesBrowser(auth.authMethod)) {
+    yield* seedAntigravityCliSignIn({ acpDirectory, userHome });
+  }
   return profile;
 });
 
@@ -464,10 +507,11 @@ export function buildAntigravityAcpSpawnInput(input: {
 }): AcpSessionRuntime.AcpSpawnInput {
   return {
     command: input.installation.executablePath,
-    // The agy CLI has no harness sibling and serves ACP through its `acp` subcommand.
+    // The agy CLI has no harness sibling and serves ACP through its `acp` subcommand. It ignores
+    // GEMINI_HOME, so point its data at the same per-instance folder the managed runtime uses.
     args:
       input.installation.harnessPath === null
-        ? ["acp"]
+        ? ["acp", "--gemini-dir", input.profile.geminiHome, "--app-data-dir", "antigravity-acp"]
         : input.profile.platform === "linux"
           ? ["--uid="]
           : [],
