@@ -1068,6 +1068,85 @@ describe("AcpAdapterV2", () => {
       assert.equal(watchedSessions[0], watchedSessions[1]);
     }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
+  it.live("restarts the runtime before a turn whose policy changes the process key", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const instanceId = ProviderInstanceId.make("acp-test-process-policy");
+      const threadId = ThreadId.make("thread-acp-process-policy");
+      const promptRuntimes: Array<number> = [];
+      const spawnedModes: Array<string> = [];
+      const mockRuntime = makeMockRuntime({
+        childProcessSpawner: yield* ChildProcessSpawner.ChildProcessSpawner,
+        mockAgentPath: yield* path.fromFileUrl(
+          new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+        ),
+        wrapRuntime: (runtime, runtimeOrdinal) => ({
+          ...runtime,
+          prompt: () =>
+            Effect.sync(() => {
+              promptRuntimes.push(runtimeOrdinal);
+              return { stopReason: "end_turn" as const };
+            }),
+        }),
+      });
+      const adapter = yield* makeAcpAdapterV2({
+        instanceId,
+        selfInvocation: yield* resolveSelfInvocation(),
+        flavor: {
+          driver: ACP_TEST_DRIVER,
+          capabilities: AcpProviderCapabilitiesV2,
+          runtimeProcessPolicyKey: (policy) => String(policy.runtimeMode === "full-access"),
+          makeRuntime: (input) => {
+            spawnedModes.push(input.runtimePolicy.runtimeMode);
+            return mockRuntime(input);
+          },
+        },
+      });
+      const policy = (runtimeMode: "full-access" | "auto-accept-edits" | "approval-required") =>
+        ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode,
+          interactionMode: "default",
+          cwd: process.cwd(),
+        });
+      const modelSelection = { instanceId, model: "default" } as const;
+      const runtime = yield* adapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make("provider-session-acp-process-policy"),
+        modelSelection,
+        runtimePolicy: policy("full-access"),
+      });
+      const providerThread = yield* runtime.ensureThread({
+        threadId,
+        modelSelection,
+        runtimePolicy: policy("full-access"),
+      });
+      const runTurn = (ordinal: number, runtimePolicy: ReturnType<typeof policy>) =>
+        Effect.gen(function* () {
+          yield* runtime.startTurn(
+            makeTurnInput({
+              threadId,
+              providerThread,
+              instanceId,
+              runtimePolicy,
+              now: yield* DateTime.now,
+              ordinal,
+            }),
+          );
+          yield* runtime.events.pipe(
+            Stream.takeUntil((event) => event.type === "turn.terminal"),
+            Stream.runDrain,
+          );
+        });
+
+      yield* runTurn(1, policy("full-access"));
+      yield* runTurn(2, policy("full-access"));
+      yield* runTurn(3, policy("approval-required"));
+      yield* runTurn(4, policy("auto-accept-edits"));
+      yield* runTurn(5, policy("full-access"));
+      assert.deepEqual(promptRuntimes, [1, 1, 2, 2, 3]);
+      assert.deepEqual(spawnedModes, ["full-access", "approval-required", "full-access"]);
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
+  );
   it.live("retains returned usage when Stop finalizes before the prompt callback", () =>
     Effect.gen(function* () {
       const path = yield* Path.Path;

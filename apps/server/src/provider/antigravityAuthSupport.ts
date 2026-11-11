@@ -504,6 +504,7 @@ export function buildAntigravityAcpSpawnInput(input: {
   readonly baseEnv?: NodeJS.ProcessEnv;
   readonly auth?: AntigravityAuthConfig;
   readonly runtimeTempDirectory?: string;
+  readonly skipPermissions?: boolean;
 }): AcpSessionRuntime.AcpSpawnInput {
   return {
     command: input.installation.executablePath,
@@ -511,7 +512,15 @@ export function buildAntigravityAcpSpawnInput(input: {
     // GEMINI_HOME, so point its data at the same per-instance folder the managed runtime uses.
     args:
       input.installation.harnessPath === null
-        ? ["acp", "--gemini-dir", input.profile.geminiHome, "--app-data-dir", "antigravity-acp"]
+        ? [
+            "acp",
+            "--gemini-dir",
+            input.profile.geminiHome,
+            "--app-data-dir",
+            "antigravity-acp",
+            // Subagents' permission prompts never reach the ACP client, so full access is a flag.
+            ...(input.skipPermissions === true ? ["--dangerously-skip-permissions"] : []),
+          ]
         : input.profile.platform === "linux"
           ? ["--uid="]
           : [],

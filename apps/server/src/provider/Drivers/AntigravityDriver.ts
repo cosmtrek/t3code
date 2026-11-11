@@ -280,12 +280,25 @@ export const AntigravityDriver: ProviderDriver<
           baseEnv: processEnvironment,
           auth,
           runtimeTempDirectory,
+          skipPermissions: input.skipPermissions === true,
         }),
       }).pipe(Effect.provideService(SecureRandom.SecureRandom, random));
       return {
         ...runtime,
         ...(executable.harnessPath === null
-          ? { setMode: (modeId: string) => runtime.setMode(antigravityCliSessionMode(modeId)) }
+          ? {
+              setMode: (modeId: string) =>
+                runtime.getModeState.pipe(
+                  Effect.flatMap((state) =>
+                    runtime.setMode(
+                      antigravityCliSessionMode(
+                        modeId,
+                        state?.availableModes.map((mode) => mode.id) ?? [],
+                      ),
+                    ),
+                  ),
+                ),
+            }
           : {}),
         start: () =>
           runtime

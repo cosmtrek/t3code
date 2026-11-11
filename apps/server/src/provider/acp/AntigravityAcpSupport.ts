@@ -50,6 +50,8 @@ export interface AntigravityAcpRuntimeInput extends Omit<
   /** Conversational sessions only; helpers and probes leave the system prompt untouched. */
   readonly sessionSystemPromptAppend?: string;
   readonly authMethod?: AntigravityAuthMethod;
+  /** Launch the agy CLI auto-approving every tool call, its subagents' included. */
+  readonly skipPermissions?: boolean;
 }
 
 function parseAntigravityVersion(version: string | null | undefined) {
@@ -183,12 +185,17 @@ export function antigravityPermissionMode(runtimeMode: RuntimeMode): string {
 }
 
 /**
- * The agy CLI rejects the managed runtime's `yolo` and `auto_edit`. It stays in `default`, where
- * it asks before acting and T3 answers from the live runtime policy, so permission changes apply
- * on the next turn without a restart.
+ * The agy CLI rejects the managed runtime's `yolo` and `auto_edit`. Full access is its launch
+ * flag instead, so `yolo` stays in `default`; `auto_edit` is `accept-edits` where advertised.
  */
-export function antigravityCliSessionMode(modeId: string): string {
-  return modeId === "yolo" || modeId === "auto_edit" ? "default" : modeId;
+export function antigravityCliSessionMode(
+  modeId: string,
+  availableModes: ReadonlyArray<string>,
+): string {
+  if (modeId === "yolo") return "default";
+  if (modeId === "auto_edit")
+    return availableModes.includes("accept-edits") ? "accept-edits" : "default";
+  return modeId;
 }
 
 /** The runtime mode an Antigravity session mode grants; the inverse of `antigravityPermissionMode`. */
@@ -197,6 +204,7 @@ export function antigravityRuntimeModeForSessionMode(modeId: string): RuntimeMod
     case "yolo":
       return "full-access";
     case "auto_edit":
+    case "accept-edits":
       return "auto-accept-edits";
     case "default":
       return "approval-required";

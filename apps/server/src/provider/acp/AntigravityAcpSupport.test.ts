@@ -16,7 +16,9 @@ import type * as EffectAcpSchema from "effect-acp/compat";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import {
   applyAntigravityAcpModelSelection,
+  antigravityCliSessionMode,
   antigravityClientInfo,
+  antigravityRuntimeModeForSessionMode,
   antigravitySessionMeta,
   buildAntigravityPrompt,
   isQualifiedAntigravityRelease,
@@ -96,6 +98,22 @@ describe("Antigravity release gates", () => {
       expect(antigravityClientInfo(version).name).toBe(ownName ? "t3-code" : "zed");
     },
   );
+});
+
+describe("antigravityCliSessionMode", () => {
+  const agy155 = ["default", "accept-edits", "auto", "plan"];
+  it.each([
+    ["yolo", agy155, "default"],
+    ["auto_edit", agy155, "accept-edits"],
+    ["auto_edit", ["default", "plan"], "default"],
+    ["plan", agy155, "plan"],
+  ])("maps %s to the agy CLI mode", (modeId, available, expected) => {
+    expect(antigravityCliSessionMode(modeId, available)).toBe(expected);
+  });
+
+  it("reads agy's accept-edits back as auto-accept-edits", () => {
+    expect(antigravityRuntimeModeForSessionMode("accept-edits")).toBe("auto-accept-edits");
+  });
 });
 
 describe("applyAntigravityAcpModelSelection", () => {

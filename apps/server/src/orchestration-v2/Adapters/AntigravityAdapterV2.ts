@@ -147,6 +147,7 @@ export function makeAntigravityAcpAdapterFlavor(
             clientFileReads: true,
             sessionSystemPromptAppend: PULL_REQUEST_LINKING_INSTRUCTIONS,
             additionalDirectories: [options.host.paths.attachmentsDir],
+            skipPermissions: input.runtimePolicy.runtimeMode === "full-access",
           }),
         )
         .pipe(Effect.provideService(Scope.Scope, scope));
@@ -248,6 +249,8 @@ export function makeAntigravityAcpAdapterFlavor(
       });
     }),
     sessionModeForPolicy: (policy) => antigravityPermissionMode(policy.runtimeMode),
+    runtimeProcessPolicyKey: (policy) =>
+      policy.runtimeMode === "full-access" ? "skip-permissions" : "ask",
     runtimeModeForSessionMode: antigravityRuntimeModeForSessionMode,
     clientFileSystem: {
       readTextFile: (request, cwd) =>
