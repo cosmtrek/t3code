@@ -198,3 +198,4 @@ Review this list after every sync, and upstream whatever upstream would take.
 | agy 1.5.5 subagents and transcripts                    | `AntigravityChildWork.ts`, protocol      | Yes                            |
 | System prompt append from agy's advertised capability  | `AntigravityAcpSupport.ts`               | Yes                            |
 | Quota from agy's own sign-in                           | `antigravityUsageLimits.ts`              | Yes                            |
+| agy full access and accept-edits modes                 | Antigravity support, ACP adapter         | Yes                            |
