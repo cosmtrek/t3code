@@ -65,6 +65,8 @@ const fixture = Effect.fn("AntigravityUsageTest.fixture")(function* (
     userId?: string;
     userInfoAt?: number;
     missingToken?: boolean;
+    /** agy's own sign-in, which carries no Code Assist project. */
+    cliTokenExpiry?: string;
     authMethod?: "oauth-personal" | "oauth-business" | "gemini-api-key";
   } = {},
 ) {
@@ -84,6 +86,20 @@ const fixture = Effect.fn("AntigravityUsageTest.fixture")(function* (
       }),
     );
   if (!options.missingToken) yield* writeToken(options.refreshToken ?? "refresh-a");
+  if (options.cliTokenExpiry !== undefined) {
+    yield* fs.writeFileString(
+      path.join(profileDirectory, "antigravity-acp", "antigravity-oauth-token"),
+      JSON.stringify({
+        token: {
+          access_token: "access-token",
+          token_type: "Bearer",
+          refresh_token: "refresh-cli",
+          expiry: options.cliTokenExpiry,
+        },
+        auth_method: "consumer",
+      }),
+    );
+  }
   const requests: Array<{ url: string; body: string }> = [];
   const http = HttpClient.make((request, url, _signal, fiber) =>
     Effect.sync(() => {
@@ -109,6 +125,13 @@ const fixture = Effect.fn("AntigravityUsageTest.fixture")(function* (
           options.userId
             ? Response.json({ id: options.userId, email: "someone@example.com" })
             : Response.json({}, { status: 403 }),
+        );
+      }
+      if (request.url.endsWith(":loadCodeAssist")) {
+        expect(JSON.parse(body)).toEqual({ metadata: { ideType: "ANTIGRAVITY" } });
+        return HttpClientResponse.fromWeb(
+          request,
+          Response.json({ cloudaicompanionProject: "project-id" }),
         );
       }
       expect(JSON.parse(body)).toEqual({ project: "project-id" });
@@ -651,6 +674,29 @@ describe("Antigravity subscription limits", () => {
       expect(limits.windows).toEqual([]);
       expect(limits.unavailable?.reason).toBe("probeFailed");
       expect(JSON.stringify(limits)).not.toMatch(/client-secret|refresh-a|access-token/);
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+  );
+
+  it.effect("reads agy's own sign-in until it expires and resolves its Code Assist project", () =>
+    Effect.gen(function* () {
+      const fresh = yield* fixture({
+        missingToken: true,
+        cliTokenExpiry: "1970-01-01T01:00:00Z",
+        userId: "google-user",
+      });
+      const limits = yield* fresh.probe;
+      expect(limits.windows.length).toBeGreaterThan(0);
+      expect(fresh.requests.some((request) => request.url.endsWith("/token"))).toBe(false);
+      expect(
+        fresh.requests.filter((request) => request.url.endsWith(":loadCodeAssist")),
+      ).toHaveLength(1);
+
+      const expired = yield* fixture({
+        missingToken: true,
+        cliTokenExpiry: "1970-01-01T00:00:30Z",
+      });
+      expect((yield* expired.probe).unavailable?.reason).toBe("probeFailed");
+      expect(expired.requests).toEqual([]);
     }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
   );
 
