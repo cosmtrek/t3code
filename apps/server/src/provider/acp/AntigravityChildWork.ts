@@ -24,7 +24,15 @@ const PLANNER_TOOL_CALLS = 7;
 const STEP_INVOKE_SUBAGENT = 143;
 const INVOKE_SPECS = 9;
 const INVOKE_RESULTS = 10;
-const INVOKE_SUBAGENT_STEP_TYPE = 127;
+// 1.5.5 (agy CLI) records every tool as a generic step: 140{2: result{6: Any{1 url, 2 value}}},
+// where an InvokeSubagent value holds 1: specs and 2: results shaped like 1.4.5's.
+const STEP_GENERIC_TOOL = 140;
+const GENERIC_RESULT = 2;
+const GENERIC_RESULT_ANY = 6;
+const GENERIC_SPECS = 1;
+const GENERIC_RESULTS = 2;
+const INVOKE_SUBAGENT_TYPE_URL = "type.googleapis.com/exa.cortex.core.tools.InvokeSubagent";
+const INVOKE_STEP_TYPES = "(127, 132)";
 
 // One open reads at most this much; past any bound the batch view stays as it was.
 const MAX_STEP_BYTES = 1024 * 1024;
@@ -44,10 +52,13 @@ interface AntigravityChildLaunch {
   readonly prompt: string;
 }
 
+const LaunchInput = Schema.Struct({ Role: Schema.String, Prompt: Schema.String });
 const decodeLaunchInput = Schema.decodeUnknownOption(
-  Schema.Struct({
-    Subagents: Schema.NonEmptyArray(Schema.Struct({ Role: Schema.String, Prompt: Schema.String })),
-  }),
+  Schema.Union([
+    Schema.Struct({ Subagents: Schema.NonEmptyArray(LaunchInput) }),
+    // agy 1.5.5 launches one subagent per call.
+    LaunchInput,
+  ]),
 );
 
 /** `invoke_subagent` arguments, from the permission prompt or the persisted record. */
@@ -56,7 +67,10 @@ export function antigravitySubagentLaunches(
 ): ReadonlyArray<AntigravityChildLaunch> | undefined {
   return Option.getOrUndefined(
     Option.map(decodeLaunchInput(input), (decoded) =>
-      decoded.Subagents.map((entry) => ({ role: entry.Role, prompt: entry.Prompt })),
+      ("Subagents" in decoded ? decoded.Subagents : [decoded]).map((entry) => ({
+        role: entry.Role,
+        prompt: entry.Prompt,
+      })),
     ),
   );
 }
@@ -136,17 +150,33 @@ const safely =
     }
   };
 
-const decodeInvokeRecord = safely((payload): InvokeRecord | undefined => {
+const invokeFields = (payload: Uint8Array) => {
   const invoke = message(payload, STEP_INVOKE_SUBAGENT);
-  if (invoke === undefined) return undefined;
-  const children = messages(invoke, INVOKE_RESULTS).map((result) => ({
+  if (invoke !== undefined) {
+    return { specs: messages(invoke, INVOKE_SPECS), results: messages(invoke, INVOKE_RESULTS) };
+  }
+  const any = message(
+    message(message(payload, STEP_GENERIC_TOOL), GENERIC_RESULT),
+    GENERIC_RESULT_ANY,
+  );
+  const value = text(any, 1) === INVOKE_SUBAGENT_TYPE_URL ? message(any, 2) : undefined;
+  return value === undefined
+    ? undefined
+    : { specs: messages(value, GENERIC_SPECS), results: messages(value, GENERIC_RESULTS) };
+};
+
+/** Null for a readable step that records another tool. */
+const decodeInvokeRecord = safely((payload): InvokeRecord | null | undefined => {
+  const invoke = invokeFields(payload);
+  if (invoke === undefined) return null;
+  const children = invoke.results.map((result) => ({
     conversationId: text(result, 1) ?? "",
     logUri: text(result, 2) ?? "",
   }));
   if (!children.every((child) => NATIVE_ID.test(child.conversationId))) return undefined;
   return {
     toolCallId: text(message(message(payload, STEP_METADATA), METADATA_TOOL_CALL), 1),
-    launches: messages(invoke, INVOKE_SPECS).map((spec) => ({
+    launches: invoke.specs.map((spec) => ({
       role: text(spec, 2) ?? "",
       prompt: text(spec, 3) ?? "",
     })),
@@ -187,6 +217,23 @@ const plannerCallIdsAt = (database: NodeSqlite.DatabaseSync, plannerIdx: number)
   return planner === undefined ? undefined : plannerInvokeCallIds(planner);
 };
 
+/** agy 1.5.5 streams the call id the record keeps, so the id alone proves the link. */
+function findRecordByCallId(database: NodeSqlite.DatabaseSync, callId: string) {
+  let found: InvokeRecord | undefined;
+  for (const row of database
+    .prepare(
+      `SELECT step_payload FROM steps WHERE step_type IN ${INVOKE_STEP_TYPES} AND step_format = 0 AND length(step_payload) <= ? AND instr(step_payload, ?) > 0 LIMIT ?`,
+    )
+    .iterate(MAX_STEP_BYTES, new TextEncoder().encode(callId), MAX_INVOKE_ROWS)) {
+    const payload = payloadOf(row);
+    const record = payload === undefined ? undefined : decodeInvokeRecord(payload);
+    if (record?.toolCallId !== callId) continue;
+    if (found !== undefined) return undefined;
+    found = record;
+  }
+  return found === undefined ? undefined : complete(found);
+}
+
 /**
  * Auto-approved calls carry `<sessionId>:<plannerStep>`; the record with that planner call's id
  * is the proof. Permission prompts carry a random id, so the launch text must match one record
@@ -217,9 +264,9 @@ function findInvokeRecord(
     for (const row of database
       .prepare(
         // SQLite returns only in-bound payloads, so an oversized row never reaches this process.
-        "SELECT length(step_payload) AS size, CASE WHEN length(step_payload) <= ? THEN step_payload END AS step_payload FROM steps WHERE step_type = ? AND step_format = 0 AND idx > ? ORDER BY idx",
+        `SELECT length(step_payload) AS size, CASE WHEN length(step_payload) <= ? THEN step_payload END AS step_payload FROM steps WHERE step_type IN ${INVOKE_STEP_TYPES} AND step_format = 0 AND idx > ? ORDER BY idx`,
       )
-      .iterate(MAX_STEP_BYTES, INVOKE_SUBAGENT_STEP_TYPE, plannerIdx)) {
+      .iterate(MAX_STEP_BYTES, plannerIdx)) {
       const size = row !== null && typeof row === "object" && "size" in row ? Number(row.size) : 0;
       rows += 1;
       bytes += size;
@@ -227,15 +274,17 @@ function findInvokeRecord(
         return undefined;
       const payload = payloadOf(row);
       const record = payload === undefined ? undefined : decodeInvokeRecord(payload);
-      if (record !== undefined && record.toolCallId === callId) return complete(record);
+      if (record && record.toolCallId === callId) return complete(record);
     }
     return undefined;
   }
+  const direct = findRecordByCallId(database, input.nativeTaskId);
+  if (direct !== undefined) return direct;
   const totals = database
     .prepare(
-      "SELECT count(*) AS rows, coalesce(sum(length(step_payload)), 0) AS bytes, coalesce(max(length(step_payload)), 0) AS largest, sum(step_format != 0) AS other FROM steps WHERE step_type = ?",
+      `SELECT count(*) AS rows, coalesce(sum(length(step_payload)), 0) AS bytes, coalesce(max(length(step_payload)), 0) AS largest, sum(step_format != 0) AS other FROM steps WHERE step_type IN ${INVOKE_STEP_TYPES}`,
     )
-    .get(INVOKE_SUBAGENT_STEP_TYPE);
+    .get();
   const total = (key: string) =>
     totals !== undefined && key in totals ? Number(totals[key as keyof typeof totals] ?? 0) : 0;
   const sameText = (launch: BatchLaunch) =>
@@ -271,12 +320,13 @@ function findInvokeRecord(
   }
   const matches: Array<InvokeRecord> = [];
   for (const row of database
-    .prepare("SELECT step_payload FROM steps WHERE step_type = ? ORDER BY idx")
-    .iterate(INVOKE_SUBAGENT_STEP_TYPE)) {
+    .prepare(`SELECT step_payload FROM steps WHERE step_type IN ${INVOKE_STEP_TYPES} ORDER BY idx`)
+    .iterate()) {
     const payload = payloadOf(row);
     const record = payload === undefined ? undefined : decodeInvokeRecord(payload);
     // An unreadable record could be an identical launch, so uniqueness is unproven.
     if (record === undefined) return undefined;
+    if (record === null) continue;
     if (record.toolCallId !== undefined && claimed.has(record.toolCallId)) continue;
     // T3 stored the launch from the bounded tool payload, so bound the record the same way.
     const described = describeAntigravitySubagentLaunches(

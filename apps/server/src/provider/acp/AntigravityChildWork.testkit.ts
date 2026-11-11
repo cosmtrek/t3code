@@ -47,6 +47,48 @@ export const invokeStep = (input: {
       ),
     ),
   );
+// Mirrors agy 1.5.5: Step{5: metadata{4: tool call}, 140: generic tool{2: result{6: Any{1 url,
+// 2 value{1: spec{1 type, 2 role, 3 prompt}, 2: result{1 conversation, 2 log uri}}}}}}.
+export const genericToolStep = (input: {
+  readonly callId: string;
+  readonly typeUrl: string;
+  readonly launch: typeof LAUNCH;
+  readonly child: { readonly id: string; readonly logUri: string };
+}) =>
+  proto(
+    [...varint(1 * 8), ...varint(132)],
+    field(5, proto(field(4, toolCall(input.callId)))),
+    field(
+      140,
+      proto(
+        field(
+          2,
+          proto(
+            field(
+              6,
+              proto(
+                field(1, input.typeUrl),
+                field(
+                  2,
+                  proto(
+                    field(
+                      1,
+                      proto(
+                        field(1, "self"),
+                        field(2, input.launch.role),
+                        field(3, input.launch.prompt),
+                      ),
+                    ),
+                    field(2, proto(field(1, input.child.id), field(2, input.child.logUri))),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
 export const plannerStep = (callIds: ReadonlyArray<string>) =>
   proto(field(20, proto(...callIds.map((id) => field(7, toolCall(id))))));
 
