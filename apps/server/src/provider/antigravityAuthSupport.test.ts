@@ -109,6 +109,13 @@ describe("Antigravity process environment", () => {
         TMPDIR: profile.tempDirectory,
       },
     });
+    const fullAccess = buildAntigravityAcpSpawnInput({
+      installation: { executablePath: "/usr/bin/agy" },
+      profile,
+      cwd: "/project",
+      skipPermissions: true,
+    });
+    expect(fullAccess.args.at(-1)).toBe("--dangerously-skip-permissions");
   });
 
   it("passes only the configured method's credential and keeps the GCP pair out of the environment", () => {
