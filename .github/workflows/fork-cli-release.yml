@@ -1,9 +1,10 @@
-name: Fork CLI release
+name: Fork release
 
-# Fork-only: builds the Linux x64 `t3` CLI archive on a GitHub-hosted runner and
-# publishes it as a GitHub release that `t3 update <version>` can install.
-# Upstream's release workflows run on Blacksmith runners the fork cannot use.
-# See FORK.md for the version rules and how to switch a machine to this build.
+# Fork-only: builds the Linux x64 `t3` CLI archive and the macOS arm64 desktop
+# app on GitHub-hosted runners and publishes both as one GitHub release that
+# `t3 update <version>` can install. Upstream's release workflows run on
+# Blacksmith runners the fork cannot use. The desktop identity comes from
+# repository variables; see FORK.md for those and the version rules.
 on:
   workflow_dispatch:
     inputs:
@@ -11,6 +12,11 @@ on:
         description: "Release version (X.Y.Z-r.N); the tag is vX.Y.Z-r.N"
         required: true
         type: string
+      desktop:
+        description: "Also build the macOS desktop app"
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: write
@@ -43,12 +49,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
-      # Release notes compare against the previous release tag.
       - name: Checkout
         uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-          filter: blob:none
 
       - name: Setup dependencies
         uses: ./.github/actions/setup-ci-deps
@@ -64,6 +66,18 @@ jobs:
 
       - name: Build JS bundle
         run: vp run build:desktop:bundle
+
+      # Unbranded, as release.yml's js-bundle: the desktop build brands its own copy.
+      - name: Upload JS bundle
+        if: inputs.desktop
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: js-bundle
+          path: |
+            apps/server/dist
+            apps/desktop/dist-electron
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Apply web client branding
         run: node scripts/apply-web-brand-assets.ts production apps/server/dist/client
@@ -99,9 +113,111 @@ jobs:
       - name: Smoke-test CLI archive
         run: node scripts/smoke-cli-archive.ts --archive release-cli/* --expect-version "$VERSION"
 
-      # `t3 update` verifies the archive against this file next to it.
+      - name: Upload CLI archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: cli-linux-x64
+          path: release-cli/*
+          if-no-files-found: error
+          retention-days: 1
+
+  desktop:
+    name: Build desktop ${{ inputs.version }} (macos-arm64)
+    needs: cli
+    if: inputs.desktop
+    # Standard GitHub-hosted runners are free for public repositories; larger ones are not.
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ inputs.version }}
+      T3CODE_TELEMETRY_CHANNEL: dev
+      # Unset variables build the official identity, which replaces an installed T3 Code.
+      T3CODE_DESKTOP_APP_ID: ${{ vars.T3CODE_ANDROID_PACKAGE }}
+      T3CODE_DESKTOP_PRODUCT_NAME: ${{ vars.T3CODE_APP_NAME }}
+      T3CODE_DESKTOP_DATA_SLUG: ${{ vars.T3CODE_DATA_SLUG }}
+      T3CODE_DESKTOP_ICON: ${{ vars.T3CODE_DESKTOP_ICON }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup dependencies
+        uses: ./.github/actions/setup-ci-deps
+        with:
+          install-args: --filter=@t3tools/desktop... --filter=t3... --filter=@t3tools/scripts...
+
+      - name: Enable T3 Connect
+        run: cp .env.example .env
+
+      - name: Align package versions to release version
+        run: node scripts/update-release-package-versions.ts "$VERSION"
+
+      - name: Download JS bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: js-bundle
+          path: apps
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin
+
+      # Without Apple signing secrets the app is signed ad hoc.
+      - name: Build desktop artifact
+        run: |
+          vp run dist:desktop:artifact \
+            --platform mac \
+            --target dmg \
+            --arch arm64 \
+            --build-version "$VERSION" \
+            --skip-build \
+            --verbose
+
+      - name: Upload desktop artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: desktop-macos-arm64
+          path: |
+            release/*.dmg
+            release/*.zip
+            release/*.blockmap
+            release/latest-mac.yml
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish ${{ inputs.version }}
+    needs: [cli, desktop]
+    if: ${{ !cancelled() && needs.cli.result == 'success' && (needs.desktop.result == 'success' || needs.desktop.result == 'skipped') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      # Release notes compare against the previous release tag.
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          filter: blob:none
+
+      - name: Download CLI archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: cli-linux-x64
+          path: release-assets
+
+      - name: Download desktop artifact
+        if: needs.desktop.result == 'success'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: desktop-macos-arm64
+          path: release-assets
+
+      # `t3 update` finds its archive's line in this file by name.
       - name: Write checksums
-        working-directory: release-cli
+        working-directory: release-assets
         run: sha256sum -- * > SHA256SUMS && cat SHA256SUMS
 
       - name: Write release notes
@@ -113,7 +229,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "v$VERSION" release-cli/* \
+          gh release create "v$VERSION" release-assets/* \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "t3 $VERSION" \
