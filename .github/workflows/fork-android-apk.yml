@@ -10,13 +10,13 @@ on:
         required: true
         type: string
       variant:
-        description: "preview: test build; production: daily build. Both install side by side."
+        description: "production: daily build; preview: trial of a risky build. Both install side by side."
         required: true
         type: choice
-        default: preview
+        default: production
         options:
-          - preview
           - production
+          - preview
       abi:
         description: "arm64-v8a for phones, x86_64 for emulators"
         required: true
