@@ -127,10 +127,14 @@ gh variable set T3CODE_DESKTOP_ICON -R cosmtrek/t3code --body nightly
 Workflow: `.github/workflows/fork-android-apk.yml`, manual trigger only.
 
 ```bash
-gh workflow run fork-android-apk.yml --ref r/main -f version=1.0.0 -f variant=preview
+gh workflow run fork-android-apk.yml --ref r/main -f version=1.0.0
 gh run watch                        # wait for the build
-gh run download --name t3code-preview-1.0.0-arm64-v8a
+gh run download --name t3code-production-1.0.0-arm64-v8a
 ```
+
+Install `production` for daily use. Android cannot downgrade without uninstalling, which drops the
+app's data, so try a risky build (native changes, a MINOR bump) as `-f variant=preview` first: it
+installs beside production and leaves it untouched.
 
 Repository settings it reads (Settings → Secrets and variables → Actions):
 
