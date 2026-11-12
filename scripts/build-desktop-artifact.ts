@@ -2965,7 +2965,12 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
           role: "Viewer",
         },
       ],
-      ...(signed ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : {}),
+      // Unsigned builds still need an ad hoc seal: Apple Silicon kills an app whose
+      // Electron signature no longer matches the repackaged bundle. Hardened
+      // runtime would reject Electron's frameworks under an ad hoc identity.
+      ...(signed
+        ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") }
+        : { identity: "-", hardenedRuntime: false }),
       ...(macPasskeySigning
         ? {
             entitlements: macPasskeySigning.entitlementsPath,

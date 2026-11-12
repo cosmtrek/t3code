@@ -593,7 +593,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     });
   });
 
-  it.effect("declares Calendar access for hosted commands in macOS builds", () =>
+  it.effect("declares Calendar access and seals unsigned macOS builds ad hoc", () =>
     Effect.gen(function* () {
       for (const version of ["0.1.0", "0.1.1-nightly.20261019.1"]) {
         for (const signed of [false, true]) {
@@ -606,7 +606,13 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
             undefined,
             undefined,
           );
-          const mac = config.mac as { extendInfo: Record<string, unknown> };
+          const mac = config.mac as {
+            extendInfo: Record<string, unknown>;
+            identity?: string;
+            hardenedRuntime?: boolean;
+          };
+          assert.equal(mac.identity, signed ? undefined : "-", `${version}, signed=${signed}`);
+          assert.equal(mac.hardenedRuntime, signed ? undefined : false);
           for (const key of [
             "NSCalendarsUsageDescription",
             "NSCalendarsFullAccessUsageDescription",
