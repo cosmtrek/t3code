@@ -29,6 +29,9 @@ import {
   parseWslRuntimeArchiveMembers,
   readWorkspaceConfig,
   createBuildConfig,
+  InvalidDesktopVariantError,
+  resolveDesktopIconBrand,
+  resolveDesktopProductName,
   DESKTOP_FILE_EXCLUSIONS,
   InvalidMacPasskeyRpDomainError,
   InvalidMacPasskeyPublishableKeyError,
@@ -546,6 +549,49 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       ),
     ),
   );
+
+  it.effect("builds a fork variant only from a complete, valid identity", () => {
+    const withEnv = (env: Record<string, string>) =>
+      Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env })));
+    const fork = {
+      T3CODE_DESKTOP_APP_ID: "dev.example.t3code",
+      T3CODE_DESKTOP_PRODUCT_NAME: "Fork",
+      T3CODE_DESKTOP_DATA_SLUG: "r",
+    };
+    const build = createBuildConfig("mac", "dmg", "0.1.9-r.5", false, false, undefined, undefined);
+    return Effect.gen(function* () {
+      const official = yield* build.pipe(withEnv({ T3CODE_DESKTOP_APP_ID: " " }));
+      assert.equal(official.appId, "com.t3tools.t3code");
+      assert.equal(official.productName, resolveDesktopProductName("0.1.9-r.5"));
+
+      const variant = yield* build.pipe(withEnv(fork));
+      assert.equal(variant.appId, "dev.example.t3code");
+      assert.equal(variant.productName, "Fork");
+      assert.equal((variant.dmg as { title: string }).title, "Fork 0.1.9-r.5 Installer");
+
+      for (const env of [
+        { T3CODE_DESKTOP_APP_ID: "dev.example.t3code" },
+        { ...fork, T3CODE_DESKTOP_APP_ID: "com.t3tools.t3code" },
+        { ...fork, T3CODE_DESKTOP_DATA_SLUG: "R/../x" },
+      ]) {
+        const failure = yield* build.pipe(withEnv(env), Effect.flip);
+        assert.instanceOf(failure, InvalidDesktopVariantError);
+      }
+
+      assert.equal(yield* resolveDesktopIconBrand("0.1.9-r.5").pipe(withEnv({})), "production");
+      assert.equal(
+        yield* resolveDesktopIconBrand("0.1.9-r.5").pipe(
+          withEnv({ T3CODE_DESKTOP_ICON: "nightly" }),
+        ),
+        "nightly",
+      );
+      const iconFailure = yield* resolveDesktopIconBrand("0.1.9-r.5").pipe(
+        withEnv({ T3CODE_DESKTOP_ICON: "neon" }),
+        Effect.flip,
+      );
+      assert.instanceOf(iconFailure, InvalidDesktopVariantError);
+    });
+  });
 
   it.effect("declares Calendar access for hosted commands in macOS builds", () =>
     Effect.gen(function* () {

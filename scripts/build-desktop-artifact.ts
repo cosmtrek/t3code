@@ -961,12 +961,19 @@ interface ResolvedBuildOptions {
   readonly wslRuntime: string | undefined;
 }
 
+interface DesktopVariant {
+  readonly appId: string;
+  readonly productName: string;
+  readonly dataSlug: string;
+}
+
 interface StagePackageJson {
   readonly name: string;
   readonly version: string;
   readonly buildVersion: string;
   readonly t3codeCommitHash: string;
   readonly t3codeWebAuthn?: MacWebAuthnEntitlements;
+  readonly t3codeVariant?: DesktopVariant;
   readonly private: true;
   readonly packageManager: string;
   readonly description: string;
@@ -1290,7 +1297,7 @@ export function resolveMacPasskeySigningConfiguration(
   }
 
   return {
-    appId: DESKTOP_APP_ID,
+    appId: env.T3CODE_DESKTOP_APP_ID?.trim() || DESKTOP_APP_ID,
     teamId,
     rpDomains: uniqueRpDomains,
     provisioningProfilePath,
@@ -2688,6 +2695,88 @@ export function resolveDesktopRuntimeDependencies(
   );
 }
 
+export class InvalidDesktopVariantError extends Schema.TaggedError<InvalidDesktopVariantError>()(
+  "InvalidDesktopVariantError",
+  { reason: Schema.String },
+) {
+  override get message(): string {
+    return `Invalid desktop variant: ${this.reason}`;
+  }
+}
+
+const DESKTOP_VARIANT_APP_ID_PATTERN = /^[A-Za-z][A-Za-z0-9-]*(\.[A-Za-z0-9-]+)+$/u;
+const DESKTOP_VARIANT_DATA_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/u;
+const DESKTOP_ICON_BRANDS = ["production", "nightly"] as const;
+type DesktopIconBrand = (typeof DESKTOP_ICON_BRANDS)[number];
+
+const optionalTrimmed = (name: string) =>
+  Config.String(name).pipe(
+    Config.option,
+    Config.map(Option.flatMap((value) => Option.liftPredicate(value.trim(), (v) => v !== ""))),
+  );
+
+/**
+ * A fork identity that installs beside the official app. CI passes unset
+ * variables as empty strings, so blank means unset; all three or none.
+ */
+export const resolveDesktopVariant = Effect.fn("resolveDesktopVariant")(function* () {
+  const env = yield* Config.all({
+    appId: optionalTrimmed("T3CODE_DESKTOP_APP_ID"),
+    productName: optionalTrimmed("T3CODE_DESKTOP_PRODUCT_NAME"),
+    dataSlug: optionalTrimmed("T3CODE_DESKTOP_DATA_SLUG"),
+  });
+  const values = [env.appId, env.productName, env.dataSlug];
+  if (values.every(Option.isNone)) return Option.none<DesktopVariant>();
+  if (!values.every(Option.isSome)) {
+    return yield* new InvalidDesktopVariantError({
+      reason:
+        "set T3CODE_DESKTOP_APP_ID, T3CODE_DESKTOP_PRODUCT_NAME, and T3CODE_DESKTOP_DATA_SLUG together",
+    });
+  }
+  const variant: DesktopVariant = {
+    appId: Option.getOrThrow(env.appId),
+    productName: Option.getOrThrow(env.productName),
+    dataSlug: Option.getOrThrow(env.dataSlug),
+  };
+  if (!DESKTOP_VARIANT_APP_ID_PATTERN.test(variant.appId)) {
+    return yield* new InvalidDesktopVariantError({
+      reason: `T3CODE_DESKTOP_APP_ID must be reverse-DNS, got "${variant.appId}"`,
+    });
+  }
+  if (variant.appId === DESKTOP_APP_ID) {
+    return yield* new InvalidDesktopVariantError({
+      reason: "T3CODE_DESKTOP_APP_ID must differ from the official app id",
+    });
+  }
+  if (variant.productName.length > 48 || /[/\\:]/u.test(variant.productName)) {
+    return yield* new InvalidDesktopVariantError({
+      reason: "T3CODE_DESKTOP_PRODUCT_NAME must be at most 48 characters without / \\ or :",
+    });
+  }
+  if (!DESKTOP_VARIANT_DATA_SLUG_PATTERN.test(variant.dataSlug)) {
+    return yield* new InvalidDesktopVariantError({
+      reason: `T3CODE_DESKTOP_DATA_SLUG must match ${DESKTOP_VARIANT_DATA_SLUG_PATTERN.source}`,
+    });
+  }
+  return Option.some(variant);
+});
+
+export const resolveDesktopIconBrand = Effect.fn("resolveDesktopIconBrand")(function* (
+  version: string,
+) {
+  const configured = yield* optionalTrimmed("T3CODE_DESKTOP_ICON");
+  if (Option.isNone(configured)) {
+    return resolveDesktopUpdateChannel(version) === "nightly" ? "nightly" : "production";
+  }
+  const brand = configured.value;
+  if (!(DESKTOP_ICON_BRANDS as ReadonlyArray<string>).includes(brand)) {
+    return yield* new InvalidDesktopVariantError({
+      reason: `T3CODE_DESKTOP_ICON must be one of ${DESKTOP_ICON_BRANDS.join(", ")}, got "${brand}"`,
+    });
+  }
+  return brand as DesktopIconBrand;
+});
+
 export const resolveGitHubPublishConfig = Effect.fn("resolveGitHubPublishConfig")(function* (
   updateChannel: "latest" | "nightly",
 ) {
@@ -2726,8 +2815,8 @@ export function resolveDesktopWebAssetBrand(version: string): WebAssetBrand {
   return resolveWebAssetBrandForChannel(resolveDesktopUpdateChannel(version));
 }
 
-export function resolveDesktopBuildIconAssets(version: string): DesktopBuildIconAssets {
-  if (resolveDesktopUpdateChannel(version) === "nightly") {
+export function resolveDesktopBuildIconAssets(brand: DesktopIconBrand): DesktopBuildIconAssets {
+  if (brand === "nightly") {
     return {
       macIconPng: BRAND_ASSET_PATHS.nightlyMacIconPng,
       linuxIconPng: BRAND_ASSET_PATHS.nightlyLinuxIconPng,
@@ -2779,10 +2868,15 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   wslRuntimeBundled = false,
   arch?: typeof BuildArch.Type,
 ) {
+  const variant = yield* resolveDesktopVariant();
+  const productName = Option.match(variant, {
+    onNone: () => resolveDesktopProductName(version),
+    onSome: (value) => value.productName,
+  });
   const buildConfig: Record<string, unknown> = {
     afterPack: (yield* Path.Path).join(yield* RepoRoot, "scripts/prepare-server-compile-cache.cjs"),
-    appId: DESKTOP_APP_ID,
-    productName: resolveDesktopProductName(version),
+    appId: Option.match(variant, { onNone: () => DESKTOP_APP_ID, onSome: (value) => value.appId }),
+    productName,
     artifactName: "T3-Code-${version}-${arch}.${ext}",
     electronLanguages: [...DESKTOP_ELECTRON_LANGUAGES],
     files: [
@@ -2884,7 +2978,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   if (platform === "mac" && target === "dmg") {
     buildConfig.dmg = {
       // Finder caches DMG backgrounds by volume name; give each installer its own.
-      title: `${resolveDesktopProductName(version)} ${version} Installer`,
+      title: `${productName} ${version} Installer`,
       background: `dmg/dmg-background-${updateChannel}.png`,
       window: {
         width: 640,
@@ -3651,7 +3745,12 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
   });
 
   const appVersion = options.version ?? serverPackageJson.version;
-  const iconAssets = resolveDesktopBuildIconAssets(appVersion);
+  const iconAssets = resolveDesktopBuildIconAssets(yield* resolveDesktopIconBrand(appVersion));
+  const variant = yield* resolveDesktopVariant();
+  const productName = Option.match(variant, {
+    onNone: () => resolveDesktopProductName(appVersion),
+    onSome: (value) => value.productName,
+  });
   const commitHash = yield* resolveGitCommitHash(repoRoot);
   const mkdir = options.keepStage ? fs.makeTempDirectory : fs.makeTempDirectoryScoped;
   const stageRoot = yield* mkdir({
@@ -3875,6 +3974,8 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
     t3codeCommitHash: commitHash,
     // Read by apps/desktop/src/preview/Passkeys.ts; must match the signed entitlements.
     ...(macWebAuthn ? { t3codeWebAuthn: macWebAuthn } : {}),
+    // Read by apps/desktop/src/main.ts to choose the profile and state directories.
+    ...(Option.isSome(variant) ? { t3codeVariant: variant.value } : {}),
     private: true,
     packageManager: rootPackageJson.packageManager,
     description:
@@ -4059,7 +4160,7 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
   if (options.platform === "win") {
     yield* validateWindowsPackagedPayload({
       stageDistDir,
-      appExecutableName: `${resolveDesktopProductName(appVersion)}.exe`,
+      appExecutableName: `${productName}.exe`,
       targetArch: options.arch,
       appVersion,
       expectWslRuntime: bundlesWslRuntime({

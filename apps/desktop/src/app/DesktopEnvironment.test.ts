@@ -3,6 +3,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 import * as DesktopConfig from "./DesktopConfig.ts";
@@ -60,16 +61,29 @@ describe("DesktopEnvironment", () => {
     }),
   );
 
-  it.effect("keeps implicit development state separate from production state", () =>
+  it.effect("keeps development, production, and variant state separate", () =>
     Effect.gen(function* () {
       const development = yield* makeEnvironment(
         {},
         { VITE_DEV_SERVER_URL: "http://localhost:5173" },
       );
       const production = yield* makeEnvironment();
+      const variant = DesktopEnvironment.decodePackagedVariant(
+        JSON.stringify({
+          name: "t3code",
+          t3codeVariant: { appId: "dev.example.t3code", productName: "Fork", dataSlug: "r" },
+        }),
+      );
+      const packagedVariant = yield* makeEnvironment({ isPackaged: true, variant });
+      const unpackagedVariant = yield* makeEnvironment({ variant });
 
       assert.equal(development.stateDir, "/Users/alice/.t3/dev");
       assert.equal(production.stateDir, "/Users/alice/.t3/userdata");
+      assert.equal(packagedVariant.stateDir, "/Users/alice/.t3-r/userdata");
+      assert.equal(packagedVariant.displayName, "Fork (Beta)");
+      assert.equal(packagedVariant.appUserModelId, "dev.example.t3code");
+      assert.equal(unpackagedVariant.stateDir, "/Users/alice/.t3/userdata");
+      assert.isTrue(Option.isNone(DesktopEnvironment.decodePackagedVariant('{"name":"t3code"}')));
     }),
   );
 });

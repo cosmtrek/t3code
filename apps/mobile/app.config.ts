@@ -135,6 +135,15 @@ const androidPackage = androidPackageOverride
   ? variant.androidPackage.replace(VARIANT_CONFIG.production.androidPackage, androidPackageOverride)
   : variant.androidPackage;
 
+// Forks rename the app; variant suffixes such as "Preview" are kept.
+const appNameOverride = repoEnv.T3CODE_APP_NAME?.trim();
+if (appNameOverride && appNameOverride.length > 30) {
+  throw new Error("T3CODE_APP_NAME must be at most 30 characters.");
+}
+const appName = appNameOverride
+  ? variant.appName.replace(VARIANT_CONFIG.production.appName, appNameOverride)
+  : variant.appName;
+
 const dmSansFonts = {
   regular: "@expo-google-fonts/dm-sans/400Regular/DMSans_400Regular.ttf",
   medium: "@expo-google-fonts/dm-sans/500Medium/DMSans_500Medium.ttf",
@@ -244,7 +253,7 @@ const sharingPlugin: NonNullable<ExpoConfig["plugins"]>[number] = [
 // Match iOS PostScript names on Android so RN and the native composer share fonts before runtime loading.
 
 const config: ExpoConfig = {
-  name: variant.appName,
+  name: appName,
   slug: "t3-code",
   platforms: ["ios", "android"],
   scheme: variant.scheme,
