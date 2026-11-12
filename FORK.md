@@ -203,3 +203,4 @@ Review this list after every sync, and upstream whatever upstream would take.
 | agy full access and accept-edits modes                 | Antigravity support, ACP adapter         | Yes                            |
 | agy Auto mode with its own review                      | Antigravity provider, support, adapter   | Yes                            |
 | Resume agy threads started before the profile move     | `antigravityAuthSupport.ts`, driver      | Upstream PR #34430             |
+| Built-in Absolutely theme                              | `themePalettes.ts`, web boot, mobile     | No                             |
