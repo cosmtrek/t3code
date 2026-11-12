@@ -41,6 +41,7 @@ import {
   antigravityAuthLabel,
   antigravityAuthUsesBrowser,
   buildAntigravityAcpSpawnInput,
+  copyAntigravityCliConversation,
   isAntigravitySignInRequiredError,
   prepareAntigravityProfile,
   resolveAntigravityInstanceDirectories,
@@ -207,7 +208,7 @@ export const AntigravityDriver: ProviderDriver<
     const prepareSpawn = Effect.fn("AntigravityDriver.prepareSpawn")(function* (
       cwd: string,
       baseEnv: NodeJS.ProcessEnv,
-      skipPermissions = false,
+      options: { readonly skipPermissions?: boolean; readonly resumeSessionId?: string } = {},
     ): Effect.fn.Return<
       {
         readonly executable: AntigravityInstallation.AntigravityExecutable;
@@ -255,6 +256,19 @@ export const AntigravityDriver: ProviderDriver<
             : cause,
         ),
       );
+      if (options.resumeSessionId !== undefined) {
+        yield* copyAntigravityCliConversation({
+          userHome,
+          acpDirectory: profile.acpDirectory,
+          sessionId: options.resumeSessionId,
+        }).pipe(
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.provideService(Path.Path, path),
+          Effect.catch(() =>
+            Effect.logWarning("Could not copy an Antigravity CLI conversation into the profile."),
+          ),
+        );
+      }
       // Use one directory per process; shared cleanup could delete files another session still reads.
       // Remove after the child dies, best-effort on Windows where handles may outlive the kill;
       // the next driver start sweeps leftovers.
@@ -288,7 +302,7 @@ export const AntigravityDriver: ProviderDriver<
           baseEnv,
           auth,
           runtimeTempDirectory,
-          skipPermissions,
+          skipPermissions: options.skipPermissions === true,
         }),
       };
     });
@@ -308,7 +322,14 @@ export const AntigravityDriver: ProviderDriver<
         threadEnvironment === undefined
           ? processEnvironment
           : { ...processEnvironment, ...threadEnvironment },
-        runtimeInput.skipPermissions,
+        {
+          ...(runtimeInput.skipPermissions === undefined
+            ? {}
+            : { skipPermissions: runtimeInput.skipPermissions }),
+          ...(runtimeInput.resumeSessionId === undefined
+            ? {}
+            : { resumeSessionId: runtimeInput.resumeSessionId }),
+        },
       );
       const runtime = yield* makeAntigravityAcpRuntime({
         ...runtimeInput,
