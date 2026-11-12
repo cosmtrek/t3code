@@ -99,6 +99,29 @@ additive.
 - Test and daily builds differ by `APP_VARIANT`, not by version: `preview` is the test build and
   `production` the daily one. They have different package names and install side by side.
 
+## Fork identity (repository variables)
+
+The fork installs beside the official apps under its own name, id, and data. Workflows read these
+repository variables and pass them to the builds; nothing is hard-coded, and an unset variable falls
+back to the official value.
+
+| Variable                 | Value                | Used by                                                                      |
+| ------------------------ | -------------------- | ---------------------------------------------------------------------------- |
+| `T3CODE_ANDROID_PACKAGE` | `com.rickoyu.t3code` | App id on Android (preview adds `.preview`) and macOS                        |
+| `T3CODE_APP_NAME`        | `T3 Code R`          | App name on Android (`T3 Code R Preview`) and macOS. Safe to change any time |
+| `T3CODE_DATA_SLUG`       | `r`                  | macOS data: `~/.t3-r` and `~/Library/Application Support/t3code-r`           |
+| `T3CODE_DESKTOP_ICON`    | `nightly`            | macOS icon set, `production` or `nightly`                                    |
+
+**Never change `T3CODE_DATA_SLUG`** once the app is in use: the next build would start from empty
+data. Renaming is what `T3CODE_APP_NAME` is for. The desktop build needs the id, name, and slug
+together and refuses the official id.
+
+```bash
+gh variable set T3CODE_APP_NAME -R cosmtrek/t3code --body "T3 Code R"
+gh variable set T3CODE_DATA_SLUG -R cosmtrek/t3code --body r
+gh variable set T3CODE_DESKTOP_ICON -R cosmtrek/t3code --body nightly
+```
+
 ## Android builds (GitHub Actions)
 
 Workflow: `.github/workflows/fork-android-apk.yml`, manual trigger only.
@@ -113,7 +136,7 @@ Repository settings it reads (Settings → Secrets and variables → Actions):
 
 | Kind     | Name                                                 | Notes                                                                                    |
 | -------- | ---------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| Variable | `T3CODE_ANDROID_PACKAGE`                             | **Required.** Package prefix, `com.rickoyu.t3code`. Preview adds `.preview`, dev `.dev`  |
+| Variable | `T3CODE_ANDROID_PACKAGE`                             | **Required.** See Fork identity                                                          |
 | Secret   | `ANDROID_KEYSTORE_BASE64`                            | Base64 of the signing keystore                                                           |
 | Secret   | `ANDROID_KEYSTORE_PASSWORD` / `ANDROID_KEY_PASSWORD` | Keystore password and key password                                                       |
 | Variable | `ANDROID_KEY_ALIAS`                                  | Key alias. A variable, because a secret would mask every occurrence of its value in logs |
@@ -145,11 +168,12 @@ Current limits:
   may be rejected as an unlisted redirect. Sign in with an email code, using the email of your
   existing account. LAN or Tailscale direct connections always work.
 
-## Server CLI builds (GitHub Actions)
+## Releases: server CLI and macOS desktop (GitHub Actions)
 
 Workflow: `.github/workflows/fork-cli-release.yml`, manual trigger only. It builds the Linux x64
-`t3` archive and publishes it as release `vX.Y.Z-r.N` with a `SHA256SUMS` file, the layout
-`t3 update` expects. `scripts/fork-release-notes.sh` writes the release notes: patches new since the
+`t3` archive and the macOS arm64 desktop app (DMG and zip) from the same JS bundle and publishes
+both as release `vX.Y.Z-r.N` with a `SHA256SUMS` file, the layout `t3 update` expects. Pass
+`-f desktop=false` to release only the CLI. `scripts/fork-release-notes.sh` writes the release notes: patches new since the
 previous `-r.N` release, matched by patch-id so a rebase onto a new upstream tag does not relist
 them. `(fork)`-scoped commits are left out, so keep that scope for fork-only docs and CI.
 
@@ -167,6 +191,12 @@ t3 update 0.1.9                         # back to upstream's build
 
 Always pass a version. A bare `t3 update` installs upstream's latest release over the fork build.
 
+The desktop app is not signed, so it is signed ad hoc. The first launch needs **System Settings →
+Privacy & Security → Open Anyway**, and updates are a manual DMG download: in-app updates expect a
+signed app. It installs beside the official T3 Code with its own data (see Fork identity), and its
+`t3` launcher lives in `~/.t3-<slug>/bin`. Only the macOS build reads the identity at runtime; Linux
+startup and desktop-entry names still use the official values.
+
 ## GitHub Actions in the fork
 
 Most upstream workflows run on Blacksmith runners, which a fork does not have, so their jobs stay
@@ -179,11 +209,9 @@ gh workflow disable CI -R cosmtrek/t3code
 ```
 
 The desktop release workflow (`release.yml`) depends on Blacksmith runners, Apple signing, npm,
-Vercel, and more, so it **does not run as-is** in the fork. Shipping the Mac app needs a separate,
-smaller fork workflow that builds only the macOS DMG with
-`T3CODE_DESKTOP_UPDATE_REPOSITORY=cosmtrek/t3code`. That workflow must also publish `-r.N` versions
-as full releases: upstream publishes suffixed versions as prereleases, which the desktop stable
-channel ignores.
+Vercel, and more, so it **does not run as-is** in the fork. The fork release workflow builds the Mac
+app instead, on the free `macos-15` runner, and publishes `-r.N` versions as full releases: upstream
+publishes suffixed versions as prereleases, which the desktop stable channel ignores.
 
 ## Patches on `r/main`
 
@@ -194,7 +222,9 @@ Review this list after every sync, and upstream whatever upstream would take.
 | Fork maintenance guide                                 | `FORK.md`                                | No                             |
 | Android APK build workflow                             | `.github/workflows/fork-android-apk.yml` | No                             |
 | `T3CODE_ANDROID_PACKAGE` overrides the Android package | `apps/mobile/app.config.ts` and its test | Yes, as a fork-friendly option |
-| Server CLI release workflow                            | `.github/workflows/fork-cli-release.yml` | No                             |
+| `T3CODE_APP_NAME` overrides the mobile app name        | `apps/mobile/app.config.ts` and its test | Yes, as a fork-friendly option |
+| Desktop variant: id, name, data, icon from variables   | `build-desktop-artifact.ts`, desktop app | Yes, as a fork-friendly option |
+| Release workflow (server CLI and macOS desktop)        | `.github/workflows/fork-cli-release.yml` | No                             |
 | agy CLI state stays in the instance profile            | `antigravityAuthSupport.ts`, driver      | Yes                            |
 | Antigravity subagent continuation                      | `AntigravityTurnOutcome.ts`, adapter     | Upstream PR #30083             |
 | agy 1.5.5 subagents and transcripts                    | `AntigravityChildWork.ts`, protocol      | Yes                            |
