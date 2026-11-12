@@ -71,7 +71,12 @@ describe("DesktopEnvironment", () => {
       const variant = DesktopEnvironment.decodePackagedVariant(
         JSON.stringify({
           name: "t3code",
-          t3codeVariant: { appId: "dev.example.t3code", productName: "Fork", dataSlug: "r" },
+          t3codeVariant: {
+            appId: "dev.example.t3code",
+            productName: "Fork",
+            dataSlug: "r",
+            releaseBaseUrl: "https://github.com/fork/t3code/releases/download",
+          },
         }),
       );
       const packagedVariant = yield* makeEnvironment({ isPackaged: true, variant });
@@ -82,7 +87,12 @@ describe("DesktopEnvironment", () => {
       assert.equal(packagedVariant.stateDir, "/Users/alice/.t3-r/userdata");
       assert.equal(packagedVariant.displayName, "Fork (Beta)");
       assert.equal(packagedVariant.appUserModelId, "dev.example.t3code");
+      assert.deepStrictEqual(
+        packagedVariant.releaseBaseUrl,
+        Option.some("https://github.com/fork/t3code/releases/download"),
+      );
       assert.equal(unpackagedVariant.stateDir, "/Users/alice/.t3/userdata");
+      assert.isTrue(Option.isNone(production.releaseBaseUrl));
       assert.isTrue(Option.isNone(DesktopEnvironment.decodePackagedVariant('{"name":"t3code"}')));
     }),
   );

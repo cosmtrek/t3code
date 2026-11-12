@@ -126,7 +126,10 @@ const resolveDesktopSshCliRunner = (
       nodeEngineRange: serverPackageJson.engines.node,
     };
   }
-  return { archiveVersion: environment.appVersion };
+  return {
+    archiveVersion: environment.appVersion,
+    releaseBaseUrl: Option.getOrNull(environment.releaseBaseUrl),
+  };
 };
 
 const layerDesktopSshEnvironment = Layer.unwrap(

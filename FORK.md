@@ -201,6 +201,10 @@ signed app. It installs beside the official T3 Code with its own data (see Fork 
 `t3` launcher lives in `~/.t3-<slug>/bin`. Only the macOS build reads the identity at runtime; Linux
 startup and desktop-entry names still use the official values.
 
+An SSH environment runs the remote `t3` at the desktop's exact version, so the desktop build bakes in
+this repository's release URL (`T3CODE_DESKTOP_RELEASE_BASE_URL`) for SSH hosts to download it from.
+Release the CLI archive along with the desktop app, or SSH connections fail on hosts that lack it.
+
 ## GitHub Actions in the fork
 
 Most upstream workflows run on Blacksmith runners, which a fork does not have, so their jobs stay

@@ -965,6 +965,7 @@ interface DesktopVariant {
   readonly appId: string;
   readonly productName: string;
   readonly dataSlug: string;
+  readonly releaseBaseUrl?: string;
 }
 
 interface StagePackageJson {
@@ -2718,15 +2719,24 @@ const optionalTrimmed = (name: string) =>
 /**
  * A fork identity that installs beside the official app. CI passes unset
  * variables as empty strings, so blank means unset; all three or none.
+ * A release base URL, for SSH hosts to download this build's `t3`, needs the identity.
  */
 export const resolveDesktopVariant = Effect.fn("resolveDesktopVariant")(function* () {
   const env = yield* Config.all({
     appId: optionalTrimmed("T3CODE_DESKTOP_APP_ID"),
     productName: optionalTrimmed("T3CODE_DESKTOP_PRODUCT_NAME"),
     dataSlug: optionalTrimmed("T3CODE_DESKTOP_DATA_SLUG"),
+    releaseBaseUrl: optionalTrimmed("T3CODE_DESKTOP_RELEASE_BASE_URL"),
   });
   const values = [env.appId, env.productName, env.dataSlug];
-  if (values.every(Option.isNone)) return Option.none<DesktopVariant>();
+  if (values.every(Option.isNone)) {
+    if (Option.isSome(env.releaseBaseUrl)) {
+      return yield* new InvalidDesktopVariantError({
+        reason: "T3CODE_DESKTOP_RELEASE_BASE_URL needs the fork identity variables",
+      });
+    }
+    return Option.none<DesktopVariant>();
+  }
   if (!values.every(Option.isSome)) {
     return yield* new InvalidDesktopVariantError({
       reason:
@@ -2737,6 +2747,7 @@ export const resolveDesktopVariant = Effect.fn("resolveDesktopVariant")(function
     appId: Option.getOrThrow(env.appId),
     productName: Option.getOrThrow(env.productName),
     dataSlug: Option.getOrThrow(env.dataSlug),
+    ...(Option.isSome(env.releaseBaseUrl) ? { releaseBaseUrl: env.releaseBaseUrl.value } : {}),
   };
   if (!DESKTOP_VARIANT_APP_ID_PATTERN.test(variant.appId)) {
     return yield* new InvalidDesktopVariantError({
@@ -2756,6 +2767,14 @@ export const resolveDesktopVariant = Effect.fn("resolveDesktopVariant")(function
   if (!DESKTOP_VARIANT_DATA_SLUG_PATTERN.test(variant.dataSlug)) {
     return yield* new InvalidDesktopVariantError({
       reason: `T3CODE_DESKTOP_DATA_SLUG must match ${DESKTOP_VARIANT_DATA_SLUG_PATTERN.source}`,
+    });
+  }
+  if (
+    variant.releaseBaseUrl !== undefined &&
+    URL.parse(variant.releaseBaseUrl)?.protocol !== "https:"
+  ) {
+    return yield* new InvalidDesktopVariantError({
+      reason: `T3CODE_DESKTOP_RELEASE_BASE_URL must be an https URL, got "${variant.releaseBaseUrl}"`,
     });
   }
   return Option.some(variant);

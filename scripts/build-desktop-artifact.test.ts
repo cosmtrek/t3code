@@ -31,6 +31,7 @@ import {
   createBuildConfig,
   InvalidDesktopVariantError,
   resolveDesktopIconBrand,
+  resolveDesktopVariant,
   resolveDesktopProductName,
   DESKTOP_FILE_EXCLUSIONS,
   InvalidMacPasskeyRpDomainError,
@@ -568,11 +569,18 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       assert.equal(variant.appId, "dev.example.t3code");
       assert.equal(variant.productName, "Fork");
       assert.equal((variant.dmg as { title: string }).title, "Fork 0.1.9-r.5 Installer");
+      const releaseBaseUrl = "https://github.com/fork/t3code/releases/download";
+      const withRelease = yield* resolveDesktopVariant().pipe(
+        withEnv({ ...fork, T3CODE_DESKTOP_RELEASE_BASE_URL: releaseBaseUrl }),
+      );
+      assert.equal(Option.getOrThrow(withRelease).releaseBaseUrl, releaseBaseUrl);
 
       for (const env of [
         { T3CODE_DESKTOP_APP_ID: "dev.example.t3code" },
         { ...fork, T3CODE_DESKTOP_APP_ID: "com.t3tools.t3code" },
         { ...fork, T3CODE_DESKTOP_DATA_SLUG: "R/../x" },
+        { ...fork, T3CODE_DESKTOP_RELEASE_BASE_URL: "github.com/fork/releases" },
+        { T3CODE_DESKTOP_RELEASE_BASE_URL: "https://github.com/fork/t3code/releases/download" },
       ]) {
         const failure = yield* build.pipe(withEnv(env), Effect.flip);
         assert.instanceOf(failure, InvalidDesktopVariantError);
