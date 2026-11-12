@@ -44,6 +44,7 @@ jobs:
       T3CODE_MOBILE_VERSION: ${{ inputs.version }}
       T3CODE_ANDROID_PACKAGE: ${{ vars.T3CODE_ANDROID_PACKAGE }}
       T3CODE_APP_NAME: ${{ vars.T3CODE_APP_NAME }}
+      T3CODE_APP_ICON: ${{ vars.T3CODE_APP_ICON }}
       # The official EAS project would otherwise replace this build's JS with upstream's.
       T3CODE_MOBILE_UPDATES_ENABLED: "0"
       MOBILE_VERSION_POLICY: appVersion

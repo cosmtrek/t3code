@@ -105,12 +105,12 @@ The fork installs beside the official apps under its own name, id, and data. Wor
 repository variables and pass them to the builds; nothing is hard-coded, and an unset variable falls
 back to the official value.
 
-| Variable                 | Value                | Used by                                                                      |
-| ------------------------ | -------------------- | ---------------------------------------------------------------------------- |
-| `T3CODE_ANDROID_PACKAGE` | `com.rickoyu.t3code` | App id on Android (preview adds `.preview`) and macOS                        |
-| `T3CODE_APP_NAME`        | `T3 Code R`          | App name on Android (`T3 Code R Preview`) and macOS. Safe to change any time |
-| `T3CODE_DATA_SLUG`       | `r`                  | macOS data: `~/.t3-r` and `~/Library/Application Support/t3code-r`           |
-| `T3CODE_DESKTOP_ICON`    | `nightly`            | macOS icon set, `production` or `nightly`                                    |
+| Variable                 | Value                | Used by                                                                           |
+| ------------------------ | -------------------- | --------------------------------------------------------------------------------- |
+| `T3CODE_ANDROID_PACKAGE` | `com.rickoyu.t3code` | App id on Android (preview adds `.preview`) and macOS                             |
+| `T3CODE_APP_NAME`        | `T3 Code R`          | App name on Android (`T3 Code R Preview`) and macOS. Safe to change any time      |
+| `T3CODE_DATA_SLUG`       | `r`                  | macOS data: `~/.t3-r` and `~/Library/Application Support/t3code-r`                |
+| `T3CODE_APP_ICON`        | `nightly`            | Icon set on Android (production and preview) and macOS, `production` or `nightly` |
 
 **Never change `T3CODE_DATA_SLUG`** once the app is in use: the next build would start from empty
 data. Renaming is what `T3CODE_APP_NAME` is for. The desktop build needs the id, name, and slug
@@ -119,7 +119,7 @@ together and refuses the official id.
 ```bash
 gh variable set T3CODE_APP_NAME -R cosmtrek/t3code --body "T3 Code R"
 gh variable set T3CODE_DATA_SLUG -R cosmtrek/t3code --body r
-gh variable set T3CODE_DESKTOP_ICON -R cosmtrek/t3code --body nightly
+gh variable set T3CODE_APP_ICON -R cosmtrek/t3code --body nightly
 ```
 
 ## Android builds (GitHub Actions)
@@ -226,7 +226,7 @@ Review this list after every sync, and upstream whatever upstream would take.
 | Fork maintenance guide                                 | `FORK.md`                                | No                             |
 | Android APK build workflow                             | `.github/workflows/fork-android-apk.yml` | No                             |
 | `T3CODE_ANDROID_PACKAGE` overrides the Android package | `apps/mobile/app.config.ts` and its test | Yes, as a fork-friendly option |
-| `T3CODE_APP_NAME` overrides the mobile app name        | `apps/mobile/app.config.ts` and its test | Yes, as a fork-friendly option |
+| `T3CODE_APP_NAME` and `T3CODE_APP_ICON` for mobile     | `apps/mobile/app.config.ts`, brand mark  | Yes, as a fork-friendly option |
 | Desktop variant: id, name, data, icon from variables   | `build-desktop-artifact.ts`, desktop app | Yes, as a fork-friendly option |
 | Release workflow (server CLI and macOS desktop)        | `.github/workflows/fork-cli-release.yml` | No                             |
 | agy CLI state stays in the instance profile            | `antigravityAuthSupport.ts`, driver      | Yes                            |

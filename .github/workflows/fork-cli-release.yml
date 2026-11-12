@@ -135,7 +135,7 @@ jobs:
       T3CODE_DESKTOP_APP_ID: ${{ vars.T3CODE_ANDROID_PACKAGE }}
       T3CODE_DESKTOP_PRODUCT_NAME: ${{ vars.T3CODE_APP_NAME }}
       T3CODE_DESKTOP_DATA_SLUG: ${{ vars.T3CODE_DATA_SLUG }}
-      T3CODE_DESKTOP_ICON: ${{ vars.T3CODE_DESKTOP_ICON }}
+      T3CODE_DESKTOP_ICON: ${{ vars.T3CODE_APP_ICON }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
