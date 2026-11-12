@@ -12,6 +12,7 @@ vi.mock("../../scripts/lib/public-config.ts", () => ({
       ? { T3CODE_ANDROID_PACKAGE: process.env.T3CODE_ANDROID_PACKAGE }
       : {}),
     ...(process.env.T3CODE_APP_NAME ? { T3CODE_APP_NAME: process.env.T3CODE_APP_NAME } : {}),
+    ...(process.env.T3CODE_APP_ICON ? { T3CODE_APP_ICON: process.env.T3CODE_APP_ICON } : {}),
   }),
 }));
 
@@ -60,9 +61,12 @@ it.each([
   async (value, identifier, iosIdentifier, name) => {
     vi.stubEnv("T3CODE_ANDROID_PACKAGE", "dev.example.t3code");
     vi.stubEnv("T3CODE_APP_NAME", "Fork");
+    vi.stubEnv("T3CODE_APP_ICON", "nightly");
     const config = await loadConfig(value);
     expect(config.android?.package).toBe(identifier);
     expect(config.ios?.bundleIdentifier).toBe(iosIdentifier);
     expect(config.name).toBe(name);
+    expect(config.extra?.appIcon).toBe("nightly");
+    expect(config.android?.adaptiveIcon?.backgroundColor).toBe("#111533");
   },
 );
