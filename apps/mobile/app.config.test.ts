@@ -11,6 +11,7 @@ vi.mock("../../scripts/lib/public-config.ts", () => ({
     ...(process.env.T3CODE_ANDROID_PACKAGE
       ? { T3CODE_ANDROID_PACKAGE: process.env.T3CODE_ANDROID_PACKAGE }
       : {}),
+    ...(process.env.T3CODE_APP_NAME ? { T3CODE_APP_NAME: process.env.T3CODE_APP_NAME } : {}),
   }),
 }));
 
@@ -52,11 +53,16 @@ it.each([
 });
 
 it.each([
-  ["preview", "dev.example.t3code.preview", "com.t3tools.t3code.preview"],
-  ["production", "dev.example.t3code", "com.t3tools.t3code"],
-])("uses T3CODE_ANDROID_PACKAGE for APP_VARIANT=%j", async (value, identifier, iosIdentifier) => {
-  vi.stubEnv("T3CODE_ANDROID_PACKAGE", "dev.example.t3code");
-  const config = await loadConfig(value);
-  expect(config.android?.package).toBe(identifier);
-  expect(config.ios?.bundleIdentifier).toBe(iosIdentifier);
-});
+  ["preview", "dev.example.t3code.preview", "com.t3tools.t3code.preview", "Fork Preview"],
+  ["production", "dev.example.t3code", "com.t3tools.t3code", "Fork"],
+])(
+  "uses fork identity overrides for APP_VARIANT=%j",
+  async (value, identifier, iosIdentifier, name) => {
+    vi.stubEnv("T3CODE_ANDROID_PACKAGE", "dev.example.t3code");
+    vi.stubEnv("T3CODE_APP_NAME", "Fork");
+    const config = await loadConfig(value);
+    expect(config.android?.package).toBe(identifier);
+    expect(config.ios?.bundleIdentifier).toBe(iosIdentifier);
+    expect(config.name).toBe(name);
+  },
+);

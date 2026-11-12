@@ -10,6 +10,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopConfig from "./DesktopConfig.ts";
@@ -17,6 +18,24 @@ import { resolveLinuxDesktopEntryName } from "./DesktopEarlyElectronStartup.ts";
 import { resolveDesktopBaseDir, resolveDesktopStateDir } from "./DesktopStatePaths.ts";
 import { isNightlyDesktopVersion } from "../updates/updateChannels.ts";
 import type { OtlpProtocol } from "@t3tools/shared/observability";
+
+/** A build identity that installs beside the official app; written by scripts/build-desktop-artifact.ts. */
+export const DesktopVariant = Schema.Struct({
+  appId: Schema.String,
+  productName: Schema.String,
+  dataSlug: Schema.String,
+});
+export type DesktopVariant = typeof DesktopVariant.Type;
+
+const decodePackagedVariantJson = Schema.decodeUnknownOption(
+  Schema.fromJsonString(Schema.Struct({ t3codeVariant: Schema.optional(DesktopVariant) })),
+);
+
+export function decodePackagedVariant(packageJson: string): Option.Option<DesktopVariant> {
+  return decodePackagedVariantJson(packageJson).pipe(
+    Option.flatMap((parsed) => Option.fromUndefinedOr(parsed.t3codeVariant)),
+  );
+}
 
 export interface MakeDesktopEnvironmentInput {
   readonly dirname: string;
@@ -28,6 +47,7 @@ export interface MakeDesktopEnvironmentInput {
   readonly isPackaged: boolean;
   readonly resourcesPath: string;
   readonly runningUnderArm64Translation: boolean;
+  readonly variant?: Option.Option<DesktopVariant>;
 }
 
 export class DesktopEnvironment extends Context.Service<
@@ -44,6 +64,7 @@ export class DesktopEnvironment extends Context.Service<
     readonly resourcesPath: string;
     readonly homeDirectory: string;
     readonly appDataDirectory: string;
+    readonly dataSlug: Option.Option<string>;
     readonly baseDir: string;
     readonly stateDir: string;
     readonly desktopSettingsPath: string;
@@ -101,12 +122,14 @@ function resolveDesktopAppStageLabel(input: {
 export function resolveDesktopAppBranding(input: {
   readonly isDevelopment: boolean;
   readonly appVersion: string;
+  readonly productName?: string | undefined;
 }): DesktopAppBranding {
   const stageLabel = resolveDesktopAppStageLabel(input);
+  const baseName = input.productName ?? APP_BASE_NAME;
   return {
-    baseName: APP_BASE_NAME,
+    baseName,
     stageLabel,
-    displayName: `${APP_BASE_NAME} (${stageLabel})`,
+    displayName: `${baseName} (${stageLabel})`,
   };
 }
 
@@ -156,10 +179,13 @@ const make = Effect.fn("desktop.environment.make")(function* (
       : input.platform === "darwin"
         ? path.join(homeDirectory, "Library", "Application Support")
         : Option.getOrElse(config.xdgConfigHome, () => path.join(homeDirectory, ".config"));
+  const variant = Option.filter(input.variant ?? Option.none(), () => input.isPackaged);
+  const dataSlug = Option.map(variant, (value) => value.dataSlug);
   const baseDir = resolveDesktopBaseDir({
     homeDirectory,
     joinPath: path.join,
     t3Home: config.t3Home,
+    dataSlug,
   });
   const rootDir = path.resolve(input.dirname, "../../..");
   const appRoot = input.isPackaged ? input.appPath : rootDir;
@@ -170,6 +196,7 @@ const make = Effect.fn("desktop.environment.make")(function* (
   const branding = resolveDesktopAppBranding({
     isDevelopment,
     appVersion: input.appVersion,
+    productName: Option.getOrUndefined(Option.map(variant, (value) => value.productName)),
   });
   const displayName = branding.displayName;
   const stateDir = resolveDesktopStateDir({
@@ -196,6 +223,7 @@ const make = Effect.fn("desktop.environment.make")(function* (
     resourcesPath,
     homeDirectory,
     appDataDirectory,
+    dataSlug,
     baseDir,
     stateDir,
     desktopSettingsPath: path.join(stateDir, "desktop-settings.json"),
@@ -228,7 +256,12 @@ const make = Effect.fn("desktop.environment.make")(function* (
     branding,
     displayName,
     appUserModelId: Option.getOrElse(config.appUserModelIdOverride, () =>
-      isDevelopment ? "com.t3tools.t3code.dev" : "com.t3tools.t3code",
+      isDevelopment
+        ? "com.t3tools.t3code.dev"
+        : Option.getOrElse(
+            Option.map(variant, (value) => value.appId),
+            () => "com.t3tools.t3code",
+          ),
     ),
     linuxDesktopEntryName: resolveLinuxDesktopEntryName(isDevelopment),
     linuxApplicationsDir,
