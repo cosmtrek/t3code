@@ -179,6 +179,7 @@ export function antigravityPermissionMode(runtimeMode: RuntimeMode): string {
     case "auto-accept-edits":
       return "auto_edit";
     case "auto":
+      return "auto";
     case "approval-required":
       return "default";
   }
@@ -186,7 +187,8 @@ export function antigravityPermissionMode(runtimeMode: RuntimeMode): string {
 
 /**
  * The agy CLI rejects the managed runtime's `yolo` and `auto_edit`. Full access is its launch
- * flag instead, so `yolo` stays in `default`; `auto_edit` is `accept-edits` where advertised.
+ * flag instead, so `yolo` stays in `default`; `auto_edit` is `accept-edits` and `auto` is `auto`
+ * where advertised.
  */
 export function antigravityCliSessionMode(
   modeId: string,
@@ -195,6 +197,7 @@ export function antigravityCliSessionMode(
   if (modeId === "yolo") return "default";
   if (modeId === "auto_edit")
     return availableModes.includes("accept-edits") ? "accept-edits" : "default";
+  if (modeId === "auto") return availableModes.includes("auto") ? "auto" : "default";
   return modeId;
 }
 
@@ -206,6 +209,8 @@ export function antigravityRuntimeModeForSessionMode(modeId: string): RuntimeMod
     case "auto_edit":
     case "accept-edits":
       return "auto-accept-edits";
+    case "auto":
+      return "auto";
     case "default":
       return "approval-required";
     default:

@@ -94,6 +94,22 @@ describe("AntigravityAdapterV2 flavor", () => {
     assert.equal(launch?.prompt, "Read README.md");
   });
 
+  it("leaves what agy's Auto review still asks to the user", () => {
+    const request = {
+      sessionId: "session-1",
+      options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+      toolCall: { toolCallId: "tool_1", title: "rm -rf build", kind: "execute" },
+    } satisfies EffectAcpSchema.RequestPermissionRequest;
+    const policy = (runtimeMode: "auto" | "full-access") =>
+      ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode,
+        interactionMode: "default",
+        cwd: "/workspace",
+      });
+    assert.equal(flavor.permissionDisposition?.(policy("auto"), request), "ask");
+    assert.equal(flavor.permissionDisposition?.(policy("full-access"), request), "allow");
+  });
+
   it("routes interaction_* permission requests to the question card", () => {
     const question = flavor.extractPermissionQuestion?.(
       permissionRequest("interaction_1", [

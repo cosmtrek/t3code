@@ -107,12 +107,15 @@ describe("antigravityCliSessionMode", () => {
     ["auto_edit", agy155, "accept-edits"],
     ["auto_edit", ["default", "plan"], "default"],
     ["plan", agy155, "plan"],
+    ["auto", agy155, "auto"],
+    ["auto", ["default", "accept-edits", "plan"], "default"],
   ])("maps %s to the agy CLI mode", (modeId, available, expected) => {
     expect(antigravityCliSessionMode(modeId, available)).toBe(expected);
   });
 
   it("reads agy's accept-edits back as auto-accept-edits", () => {
     expect(antigravityRuntimeModeForSessionMode("accept-edits")).toBe("auto-accept-edits");
+    expect(antigravityRuntimeModeForSessionMode("auto")).toBe("auto");
   });
 });
 

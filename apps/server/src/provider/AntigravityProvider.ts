@@ -3,6 +3,7 @@ import {
   ProviderDriverKind,
   type AntigravitySettings,
   type ProviderSetupError,
+  type RuntimeMode,
   type ServerProvider,
   type ServerProviderModel,
   type ServerProviderSlashCommand,
@@ -23,6 +24,7 @@ import type * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/compat";
 
 import type * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
+import { parseSessionModeState } from "@t3tools/provider-acp/server/runtimeModel";
 import { acpProviderOptionDescriptors } from "@t3tools/provider-acp/server/sessionConfig";
 import { makeManagedServerProvider } from "@t3tools/provider-core/server/managedProvider";
 import {
@@ -167,6 +169,24 @@ interface AntigravityProviderOptions {
   readonly auth?: { readonly type: string; readonly label: string };
 }
 
+/**
+ * Auto needs the agent's own review: agy 1.5.4+ offers an `auto` session mode, while older
+ * runtimes have none, so Auto falls back to Supervised instead of approving everything.
+ */
+function antigravityRuntimeModes(
+  sessionSetupResult:
+    | AcpSessionRuntime.AcpSessionRuntimeStartResult["sessionSetupResult"]
+    | undefined,
+): Array<RuntimeMode> {
+  const offersAuto =
+    sessionSetupResult !== undefined &&
+    parseSessionModeState(sessionSetupResult)?.availableModes.some((mode) => mode.id === "auto") ===
+      true;
+  return offersAuto
+    ? ["approval-required", "auto-accept-edits", "auto", "full-access"]
+    : ["approval-required", "auto-accept-edits", "full-access"];
+}
+
 export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(function* (
   settings: AntigravitySettings,
   options: AntigravityProviderOptions,
@@ -185,8 +205,7 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
       presentation: {
         displayName: "Antigravity",
         showInteractionModeToggle: false,
-        // No automatic review, so Auto falls back to Supervised instead of approving everything.
-        supportedRuntimeModes: ["approval-required", "auto-accept-edits", "full-access"],
+        supportedRuntimeModes: antigravityRuntimeModes(undefined),
       },
       enabled: settings.enabled,
       checkedAt,
@@ -392,6 +411,7 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
           },
           checkedAt: updatedAt,
           models: buildAntigravityModelsFromSession(started.sessionSetupResult, thinkingLevels),
+          supportedRuntimeModes: antigravityRuntimeModes(started.sessionSetupResult),
           supportsTextGeneration,
           ...(cwd
             ? {

@@ -348,15 +348,39 @@ it.layer(layerTest)("Antigravity provider snapshots", (it) => {
     ),
   );
 
-  it.effect("does not offer Auto, so Auto threads fall back to Supervised", () =>
+  it.effect("offers Auto only once a session advertises agy's auto mode", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const harness = yield* makeHarness();
         yield* harness.initialize;
-        // Antigravity has no automatic review; the shared ACP policy would approve every request.
+        // Without the agent's own review, the shared ACP policy would approve every request.
         expect((yield* harness.provider.snapshot.getSnapshot).supportedRuntimeModes).toEqual([
           "approval-required",
           "auto-accept-edits",
+          "full-access",
+        ]);
+        yield* harness.provider.onSessionStarted(started, "/workspace");
+        expect((yield* harness.provider.snapshot.getSnapshot).supportedRuntimeModes).not.toContain(
+          "auto",
+        );
+        const agyModes = ["default", "accept-edits", "auto", "plan"];
+        yield* harness.provider.onSessionStarted(
+          {
+            ...started,
+            sessionSetupResult: {
+              ...sessionSetupResult,
+              modes: {
+                currentModeId: "default",
+                availableModes: agyModes.map((id) => ({ id, name: id })),
+              },
+            },
+          },
+          "/workspace",
+        );
+        expect((yield* harness.provider.snapshot.getSnapshot).supportedRuntimeModes).toEqual([
+          "approval-required",
+          "auto-accept-edits",
+          "auto",
           "full-access",
         ]);
       }),
