@@ -43,8 +43,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
+      # Release notes compare against the previous release tag.
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          filter: blob:none
 
       - name: Setup dependencies
         uses: ./.github/actions/setup-ci-deps
@@ -100,6 +104,11 @@ jobs:
         working-directory: release-cli
         run: sha256sum -- * > SHA256SUMS && cat SHA256SUMS
 
+      - name: Write release notes
+        run: |
+          scripts/fork-release-notes.sh "$VERSION" "$GITHUB_SHA" "$GITHUB_REPOSITORY" > "$RUNNER_TEMP/release-notes.md"
+          cat "$RUNNER_TEMP/release-notes.md" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -108,4 +117,4 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "t3 $VERSION" \
-            --notes "Fork build of upstream $(echo "$VERSION" | sed 's/-r\..*//') plus the patches on r/main at $GITHUB_SHA. Install with \`T3CODE_RELEASE_BASE_URL=https://github.com/$GITHUB_REPOSITORY/releases/download t3 update $VERSION\`."
+            --notes-file "$RUNNER_TEMP/release-notes.md"

@@ -149,7 +149,9 @@ Current limits:
 
 Workflow: `.github/workflows/fork-cli-release.yml`, manual trigger only. It builds the Linux x64
 `t3` archive and publishes it as release `vX.Y.Z-r.N` with a `SHA256SUMS` file, the layout
-`t3 update` expects.
+`t3 update` expects. `scripts/fork-release-notes.sh` writes the release notes: patches new since the
+previous `-r.N` release, matched by patch-id so a rebase onto a new upstream tag does not relist
+them. `(fork)`-scoped commits are left out, so keep that scope for fork-only docs and CI.
 
 ```bash
 gh workflow run fork-cli-release.yml -R cosmtrek/t3code --ref r/main -f version=0.1.9-r.1
