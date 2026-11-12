@@ -27,6 +27,7 @@ import {
   type AntigravityAuthConfig,
   type AntigravityProfile,
   buildAntigravityAcpSpawnInput,
+  copyAntigravityCliConversation,
   isAntigravitySignInRequiredError,
   makeAntigravityStderrHandler,
   makeAntigravityStdoutTransform,
@@ -736,6 +737,73 @@ it.layer(NodeServices.layer)("Antigravity profile preparation", (it) => {
       expect(decodeJson(yield* fs.readFileString(settingsPath))).toEqual({
         auth: { type: "oauth-personal" },
       });
+    }),
+  );
+
+  it.effect(
+    "copies a CLI conversation from ~/.gemini once and keeps the profile's copy after",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const directory = yield* fs.makeTempDirectoryScoped();
+        const userHome = path.join(directory, "home");
+        const acpDirectory = path.join(directory, "profile", "antigravity-acp");
+        const cliConversations = path.join(userHome, ".gemini", "antigravity-cli", "conversations");
+        const conversations = path.join(acpDirectory, "conversations");
+        yield* fs.makeDirectory(cliConversations, { recursive: true });
+        yield* fs.writeFileString(path.join(cliConversations, "session-1.db"), "db");
+        yield* fs.writeFileString(path.join(cliConversations, "session-1.db-wal"), "wal");
+        const copy = copyAntigravityCliConversation({
+          userHome,
+          acpDirectory,
+          sessionId: "session-1",
+        });
+
+        yield* copy;
+        expect(yield* fs.readFileString(path.join(conversations, "session-1.db"))).toBe("db");
+        expect(yield* fs.readFileString(path.join(conversations, "session-1.db-wal"))).toBe("wal");
+        expect(yield* fs.exists(path.join(conversations, "session-1.db-shm"))).toBe(false);
+
+        // Once the CLI has run on the profile, its copy is the newer one.
+        yield* fs.writeFileString(path.join(conversations, "session-1.db"), "newer");
+        yield* copy;
+        expect(yield* fs.readFileString(path.join(conversations, "session-1.db"))).toBe("newer");
+
+        // A session ID that isn't a plain file name is never copied.
+        yield* fs.writeFileString(path.join(cliConversations, "..", "outside.db"), "db");
+        yield* copyAntigravityCliConversation({ userHome, acpDirectory, sessionId: "../outside" });
+        expect(yield* fs.exists(path.join(acpDirectory, "outside.db"))).toBe(false);
+      }),
+  );
+
+  it.effect("retries a CLI conversation copy that failed partway", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fs.makeTempDirectoryScoped();
+      const userHome = path.join(directory, "home");
+      const acpDirectory = path.join(directory, "profile", "antigravity-acp");
+      const cliConversations = path.join(userHome, ".gemini", "antigravity-cli", "conversations");
+      const conversations = path.join(acpDirectory, "conversations");
+      yield* fs.makeDirectory(cliConversations, { recursive: true });
+      yield* fs.writeFileString(path.join(cliConversations, "session-1.db"), "db");
+      // A directory can't be copied as a file, so the WAL copy fails.
+      yield* fs.makeDirectory(path.join(cliConversations, "session-1.db-wal"));
+      const copy = copyAntigravityCliConversation({
+        userHome,
+        acpDirectory,
+        sessionId: "session-1",
+      });
+
+      expect(Result.isFailure(yield* copy.pipe(Effect.result))).toBe(true);
+      expect(yield* fs.exists(path.join(conversations, "session-1.db"))).toBe(false);
+
+      yield* fs.remove(path.join(cliConversations, "session-1.db-wal"), { recursive: true });
+      yield* fs.writeFileString(path.join(cliConversations, "session-1.db-wal"), "wal");
+      yield* copy;
+      expect(yield* fs.readFileString(path.join(conversations, "session-1.db"))).toBe("db");
+      expect(yield* fs.readFileString(path.join(conversations, "session-1.db-wal"))).toBe("wal");
     }),
   );
 
