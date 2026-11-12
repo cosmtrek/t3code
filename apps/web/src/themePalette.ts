@@ -8,6 +8,7 @@ import { msg } from "gt-react";
 import "culori/css";
 import { converter, parse } from "culori/fn";
 import {
+  ABSOLUTELY_THEME,
   BUILT_IN_THEMES,
   EMBER_THEME,
   GROVE_THEME,
@@ -36,7 +37,15 @@ import { applyThemeBackground } from "./themeBackground";
 import { applyThemeCss } from "./themeCss";
 import { themeServerEnvironmentThemesAtom } from "./state/server";
 
-export { EMBER_THEME, GROVE_THEME, IRIS_THEME, OCEAN_THEME, T3_CHAT_THEME, THEME_COLOR_ROLES };
+export {
+  ABSOLUTELY_THEME,
+  EMBER_THEME,
+  GROVE_THEME,
+  IRIS_THEME,
+  OCEAN_THEME,
+  T3_CHAT_THEME,
+  THEME_COLOR_ROLES,
+};
 export type { ThemeAppearance, ThemeColorRole, ThemeColors, ThemeDefinition, ThemeVariants };
 
 const T3_CHAT_THEME_ID = "t3-chat" as const;

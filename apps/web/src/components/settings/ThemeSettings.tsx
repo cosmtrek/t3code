@@ -26,6 +26,7 @@ import {
   EMBER_THEME,
   GROVE_THEME,
   IRIS_THEME,
+  ABSOLUTELY_THEME,
   OCEAN_THEME,
 } from "../../themePalette";
 import {
@@ -61,6 +62,7 @@ const MAINTAINER_THEMES: ReadonlyArray<ThemeDefinition> = [
   OCEAN_THEME,
   EMBER_THEME,
   IRIS_THEME,
+  ABSOLUTELY_THEME,
 ];
 
 function collectionVariantLabels(themes: ReadonlyArray<ThemeDefinition>): ReadonlyArray<string> {
