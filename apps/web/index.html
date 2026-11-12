@@ -121,6 +121,20 @@
               chrome: "oklch(0.225975 0.031062 293.741)",
             },
           },
+          absolutely: {
+            light: {
+              background: "oklch(0.981775 0.005392 95.099)",
+              foreground: "oklch(0.190839 0.001983 106.586)",
+              accent: "oklch(0.67242 0.13084 38.756)",
+              chrome: "oklch(0.966263 0.008017 98.879)",
+            },
+            dark: {
+              background: "oklch(0.267865 0.003639 106.643)",
+              foreground: "oklch(0.981775 0.005392 95.099)",
+              accent: "oklch(0.67242 0.13084 38.756)",
+              chrome: "oklch(0.23574 0.002438 67.708)",
+            },
+          },
         };
         const BUILT_IN_THEME_MODES = Object.fromEntries(
           Object.entries(BUILT_IN_THEME_PALETTES).map(([id, palettes]) => [
@@ -137,6 +151,7 @@
           "ocean",
           "ember",
           "iris",
+          "absolutely",
           "t3-chat-dark",
           "t3-grove",
           "t3-ocean",
