@@ -24,6 +24,8 @@ export const DesktopVariant = Schema.Struct({
   appId: Schema.String,
   productName: Schema.String,
   dataSlug: Schema.String,
+  // Where SSH hosts download this build's `t3` archive; forks publish their own releases.
+  releaseBaseUrl: Schema.optional(Schema.String),
 });
 export type DesktopVariant = typeof DesktopVariant.Type;
 
@@ -65,6 +67,7 @@ export class DesktopEnvironment extends Context.Service<
     readonly homeDirectory: string;
     readonly appDataDirectory: string;
     readonly dataSlug: Option.Option<string>;
+    readonly releaseBaseUrl: Option.Option<string>;
     readonly baseDir: string;
     readonly stateDir: string;
     readonly desktopSettingsPath: string;
@@ -224,6 +227,9 @@ const make = Effect.fn("desktop.environment.make")(function* (
     homeDirectory,
     appDataDirectory,
     dataSlug,
+    releaseBaseUrl: Option.flatMap(variant, (value) =>
+      Option.fromUndefinedOr(value.releaseBaseUrl),
+    ),
     baseDir,
     stateDir,
     desktopSettingsPath: path.join(stateDir, "desktop-settings.json"),
