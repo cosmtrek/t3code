@@ -242,3 +242,70 @@ Review this list after every sync, and upstream whatever upstream would take.
 | agy Auto mode with its own review                      | Antigravity provider, support, adapter   | Yes                            |
 | Resume agy threads started before the profile move     | `antigravityAuthSupport.ts`, driver      | Upstream PR #34430             |
 | Built-in Absolutely theme                              | `themePalettes.ts`, web boot, mobile     | No                             |
+| Inbox and message channels                             | `apps/*/src/fork/`, seams below          | No                             |
+
+## Inbox and channels
+
+The inbox (`/inbox`) shows messages an external chat adapter collects, delegates a topic to a
+thread, and sends the thread's draft back. Settings → Channels configures adapters per
+environment. Everything lives in fork-only directories:
+
+- Server: `apps/server/src/fork/` (`layer.ts` merges it all; `channels/` holds the protocol client,
+  `channels.json`, and the in-process example channel; `inbox/` holds items, delegation, and
+  `inbox.sqlite`). Routes are plain `HttpRouter` routes under `/api/fork/channels` and
+  `/api/fork/inbox`, authenticated with `authenticateMediaRequest` like the device hub proxy.
+- Web: `apps/web/src/fork/`, plus the thin routes `_chat.inbox.tsx` and
+  `_chat.settings.channels.tsx`. `forkApiAccess.ts` mints the per-environment media ticket, so
+  remote environments work.
+- State: `<stateDir>/channels/` only (`channels.json`, `inbox.sqlite`, `items/<itemId>/`). No
+  contracts, `settings.json`, or main-database changes.
+
+The adapter protocol (v1) is documented in `apps/server/src/fork/channels/protocol.ts`, and the
+example channel (`channels/example/exampleChannel.ts`) implements all of it with made-up data.
+
+### Inbox seams
+
+Upstream files the inbox touches. Keep these in one `fork(inbox): wire seams` commit.
+
+| File                                                      | Change                                                               |
+| --------------------------------------------------------- | -------------------------------------------------------------------- |
+| `apps/server/src/server.ts`                               | Import `ForkExtensions`; `ForkExtensions.layer` in `layerMakeRoutes` |
+| `apps/web/src/components/settings/settingsSearch.ts`      | `ForkSettingsPath` in `SettingsPath`; spread the four fork tables    |
+| `apps/web/src/components/settings/SettingsSidebarNav.tsx` | Spread `FORK_SETTINGS_ICONS`                                         |
+| `apps/web/src/components/sidebar/SidebarChrome.tsx`       | `<ForkSidebarItems>` beside Pull requests                            |
+| `apps/web/src/routeTree.gen.ts`                           | Generated; never merge by hand                                       |
+| `package.json`                                            | `fork:inbox-seam-check` script                                       |
+
+`settingsSearch.ts` has a fifth table the plan did not list: `SETTINGS_CATEGORY_SCOPES` is a
+`Record<SettingsPath, …>` too, so it spreads `FORK_SETTINGS_CATEGORY_SCOPES`. The sidebar entry
+is imported from `fork/inbox/ForkSidebarItems.tsx` rather than `fork/registry.ts`, so the
+settings tables do not pull React views into `settingsSearch.ts`.
+
+### Syncing with the inbox
+
+After the usual sync, rebase `r/inbox` onto `r/main`, then:
+
+```bash
+# routeTree.gen.ts conflict: take either side, then regenerate it from the route files
+git checkout --theirs apps/web/src/routeTree.gen.ts
+node scripts/inbox-seam-check.ts regen-route-tree && git add apps/web/src/routeTree.gen.ts
+
+node scripts/inbox-seam-check.ts --since v0.1.8 --to v0.1.9   # old and new upstream tags
+vp run typecheck   # plus lint, knip, and: vp test run apps/server/src/fork
+```
+
+The check lists each seam, the upstream symbols the fork calls, and paths upstream might have
+claimed, with where to fix a failure, then the upstream commits that touched seam files. Then try
+the example channel end to end in a browser before releasing.
+
+### Delegation details
+
+- Threads start in process through `ThreadMessageIntake.launchThread` with
+  `creationSource: "server"` and `createdBy: "user"`. The default model is the project's, through
+  the shared `resolveNewThreadModelSelection` (no upstream code was copied).
+- The thread writes `conclusion.md` and `draft.md` into its context folder. When it cannot (a
+  sandbox limited to the workspace), it ends its reply with `<conclusion>` and `<draft>` tags; the
+  inbox reads the latest finished run once (`.fallback-run` remembers it) and writes the files.
+  Files win when both exist.
+- Which providers can write to `<stateDir>/channels/items/` from their sandbox has not been
+  measured yet. Record it here per provider and mode once tried.
