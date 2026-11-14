@@ -1,0 +1,10 @@
+{
+  "protocol": 1,
+  "adapterVersion": "1.4.0",
+  "online": true,
+  "loggedIn": true,
+  "lastSyncAt": "2026-11-14T08:00:00.000Z",
+  "self": { "name": "Alex Rivera" },
+  "logsUrl": "http://127.0.0.1:7341/logs",
+  "lastError": null
+}

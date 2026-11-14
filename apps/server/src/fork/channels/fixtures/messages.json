@@ -1,0 +1,27 @@
+{
+  "items": [
+    {
+      "id": "om_3",
+      "topicId": "omt_cache",
+      "createdAt": "2026-11-14T09:30:00.000Z",
+      "author": { "id": "ou_sam", "name": "Sam Okafor", "isSelf": false },
+      "mentionsSelf": false,
+      "text": "Same on staging.",
+      "attachments": [],
+      "links": []
+    },
+    {
+      "id": "om_1",
+      "topicId": "omt_cache",
+      "createdAt": "2026-11-14T09:00:00.000Z",
+      "author": { "id": "ou_priya", "name": "Priya Shah", "isSelf": false },
+      "mentionsSelf": true,
+      "text": "@Alex Rivera the cache hit rate dropped after yesterday's deploy.",
+      "richSummary": null,
+      "attachments": [{ "key": "img_v2_abc", "kind": "image", "name": "chart.png" }],
+      "links": ["https://grafana.example/d/cache"],
+      "openUrl": "https://applink.example/client/chat/open?id=om_1"
+    }
+  ],
+  "nextCursor": null
+}
