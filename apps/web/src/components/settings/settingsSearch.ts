@@ -14,6 +14,13 @@ import { TYPOGRAPHY_ADVANCED_STORAGE_KEY } from "../../appearanceFonts";
 import { writeLocalStorageValue } from "../../hooks/useLocalStorage";
 import { commandLabel } from "./KeybindingsSettings.logic";
 import type { ResolvedSettingsScope } from "./settingsScope";
+import {
+  FORK_SETTINGS_CATEGORY_SCOPES,
+  FORK_SETTINGS_LABELS,
+  FORK_SETTINGS_NAV_PATHS,
+  FORK_SETTINGS_SEARCH_ITEMS,
+  type ForkSettingsPath,
+} from "../../fork/registry";
 
 export type SettingsPath =
   | "/settings/projects"
@@ -38,7 +45,8 @@ export type SettingsPath =
   | "/settings/maintenance"
   | "/settings/labs"
   | "/settings/about"
-  | "/settings/archived";
+  | "/settings/archived"
+  | ForkSettingsPath;
 
 export type SettingsSearchScope =
   | "environment"
@@ -115,6 +123,7 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/about": "About",
   "/settings/voice": "Voice",
   "/settings/archived": "Archive",
+  ...FORK_SETTINGS_LABELS,
 };
 
 /** Sidebar order. A group without a heading is set apart by space alone. */
@@ -154,6 +163,7 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<{
       "/settings/connections",
       "/settings/access",
       ...(isSecretsFeatureEnabled ? (["/settings/secrets"] as const) : []),
+      ...FORK_SETTINGS_NAV_PATHS,
     ],
   },
   {
@@ -1328,6 +1338,7 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/archived",
     searchTerms: ["restore reopen deleted history projects"],
   },
+  ...FORK_SETTINGS_SEARCH_ITEMS,
 ] as const satisfies ReadonlyArray<SettingsSearchItem>;
 
 export type SettingsSearchItemId = (typeof SETTINGS_SEARCH_ITEMS)[number]["id"];
@@ -1358,6 +1369,7 @@ const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScop
   "/settings/labs": null,
   "/settings/about": null,
   "/settings/archived": "project-defaults",
+  ...FORK_SETTINGS_CATEGORY_SCOPES,
 };
 
 const RENAMED_SETTINGS_PATHS: Readonly<Record<string, SettingsPath>> = {

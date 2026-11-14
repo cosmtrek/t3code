@@ -29,6 +29,7 @@
     "typecheck": "vp run -r --cache --concurrency-limit 4 typecheck",
     "tc": "vp run -r --cache --concurrency-limit 4 typecheck",
     "check:changed": "node scripts/check-changed.ts",
+    "fork:inbox-seam-check": "node scripts/inbox-seam-check.ts",
     "report:renders": "node scripts/render-metrics.ts",
     "lint": "vp lint --report-unused-disable-directives",
     "knip": "knip --preprocessor ./scripts/knip-schemas.ts",
