@@ -242,3 +242,90 @@ Review this list after every sync, and upstream whatever upstream would take.
 | agy Auto mode with its own review                      | Antigravity provider, support, adapter   | Yes                            |
 | Resume agy threads started before the profile move     | `antigravityAuthSupport.ts`, driver      | Upstream PR #34430             |
 | Built-in Absolutely theme                              | `themePalettes.ts`, web boot, mobile     | No                             |
+| Inbox and message channels                             | `apps/*/src/fork/`, seams below          | No                             |
+
+## Inbox and channels
+
+The inbox (`/inbox`) shows messages an external chat adapter collects, delegates a topic to a
+thread, and sends the thread's draft back. Settings → Channels configures adapters per
+environment. Everything lives in fork-only directories:
+
+- Server: `apps/server/src/fork/` (`layer.ts` merges it all; `channels/` holds the protocol client,
+  `channels.json`, and the in-process example channel; `inbox/` holds items, delegation, and
+  `inbox.sqlite`). Routes are plain `HttpRouter` routes under `/api/fork/channels` and
+  `/api/fork/inbox`, authenticated with `authenticateMediaRequest` like the device hub proxy.
+- Web: `apps/web/src/fork/`, plus the thin routes `_chat.inbox.tsx` and
+  `_chat.settings.channels.tsx`. `forkApiAccess.ts` mints the per-environment media ticket, so
+  remote environments work.
+- State: `<stateDir>/channels/` only (`channels.json`, `inbox.sqlite`, `items/<itemId>/`). No
+  contracts, `settings.json`, or main-database changes.
+
+The adapter protocol (v1) is defined by `apps/server/src/fork/channels/protocol.ts` alone;
+[docs/fork/channel-protocol.md](docs/fork/channel-protocol.md) explains it, and
+`channels/fixtures/` holds a valid answer per endpoint for adapters' contract tests. The example
+channel (`channels/example/exampleChannel.ts`) implements all of it with made-up data.
+
+### Inbox seams
+
+Upstream files the inbox touches. Keep these in one `fork(inbox): wire seams` commit.
+
+| File                                                      | Change                                                               |
+| --------------------------------------------------------- | -------------------------------------------------------------------- |
+| `apps/server/src/server.ts`                               | Import `ForkExtensions`; `ForkExtensions.layer` in `layerMakeRoutes` |
+| `apps/web/src/components/settings/settingsSearch.ts`      | `ForkSettingsPath` in `SettingsPath`; spread the four fork tables    |
+| `apps/web/src/components/settings/SettingsSidebarNav.tsx` | Spread `FORK_SETTINGS_ICONS`                                         |
+| `apps/web/src/components/sidebar/SidebarChrome.tsx`       | `<ForkSidebarItems>` beside Pull requests                            |
+| `apps/web/src/routeTree.gen.ts`                           | Generated; never merge by hand                                       |
+| `package.json`                                            | `fork:inbox-seam-check` script                                       |
+
+`settingsSearch.ts` has a fifth table the plan did not list: `SETTINGS_CATEGORY_SCOPES` is a
+`Record<SettingsPath, …>` too, so it spreads `FORK_SETTINGS_CATEGORY_SCOPES`. The sidebar entry
+is imported from `fork/inbox/ForkSidebarItems.tsx` rather than `fork/registry.ts`, so the
+settings tables do not pull React views into `settingsSearch.ts`.
+
+### Syncing with the inbox
+
+The inbox is two commits on `r/main` (`feat(inbox)` and `fork(inbox): wire seams`) and syncs
+with it. After the usual sync:
+
+```bash
+# routeTree.gen.ts conflict: take either side, then regenerate it from the route files
+git checkout --theirs apps/web/src/routeTree.gen.ts
+node scripts/inbox-seam-check.ts regen-route-tree && git add apps/web/src/routeTree.gen.ts
+
+node scripts/inbox-seam-check.ts --since v0.1.8 --to v0.1.9   # both old and new upstream tags
+vp run typecheck   # plus lint, knip, and: vp test run apps/server/src/fork
+```
+
+The check lists each seam, the upstream symbols and behavior the fork relies on, and paths
+upstream might have claimed, with where to fix a failure, then the upstream commits that touched
+seam files. Then try the example channel end to end in a browser before releasing.
+
+### Delegation details
+
+- Threads start in process through `ThreadMessageIntake.launchThread` with
+  `creationSource: "server"` and `createdBy: "user"`. The default model is the project's, through
+  the shared `resolveNewThreadModelSelection`, else the first ready provider's default model. The
+  title is `<sender>: <summary>`, cut at a word or sentence near 48 characters.
+- A protocol v1 template is only a prompt. "Read only" in a template is an instruction to the
+  agent; the thread runs in the project's default runtime mode. Enforcing a mode would need a
+  `runtimeMode` field in the protocol's templates.
+- Each delegation gets its own context folder, `items/<itemId>/<thread>/`, so a newer thread never
+  shows an older thread's files and an older thread that finishes late cannot overwrite them. Only
+  the item's current thread drives its state and fills the reply box; a deleted or replaced
+  thread's conclusion shows as history. One delegation per item runs at a time, and "Start a new
+  thread" replaces only the thread the dialog showed. A topic longer than the message page cap is
+  refused rather than delegated with part of the conversation.
+- The thread writes `conclusion.md` and `draft.md` into its folder. When it cannot (a sandbox
+  limited to the workspace), it ends its reply with `<conclusion>` and `<draft>` tags; the inbox
+  reads each finished run once and writes the files (`.fallback.json` records the run and what it
+  wrote). A later run's tags replace an earlier run's; a file the thread wrote itself always wins.
+- A sent reply is kept as `items/<itemId>/sent.<time>.<hash>.md`: the text as sent, its message
+  id, and whether it was the draft, an edited draft, or typed. An adapter answer without a message
+  id leaves the draft in place and reports the delivery as unknown. A send whose copy cannot be
+  written still succeeds and says so.
+- Linked threads' run, archive, and delete events refresh the inbox; nothing else in orchestration
+  is followed.
+- The example channel's settings offer **Simulate**, to see each adapter state in the browser.
+- Which providers can write to `<stateDir>/channels/items/` from their sandbox has not been
+  measured yet. Record it here per provider and mode once tried.

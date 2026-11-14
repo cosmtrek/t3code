@@ -1,0 +1,16 @@
+{
+  "items": [
+    {
+      "id": "omt_cache",
+      "rootMessageId": "om_1",
+      "rootPreview": "@Alex Rivera the cache hit rate dropped after yesterday's deploy.",
+      "replyCount": 2,
+      "lastMessageAt": "2026-11-14T09:30:00.000Z",
+      "lastAuthor": { "id": "ou_sam", "name": "Sam Okafor", "isSelf": false },
+      "participatedBySelf": true,
+      "lastOtherMessageAt": "2026-11-14T09:30:00.000Z",
+      "mentionsSelfSinceOwn": false
+    }
+  ],
+  "nextCursor": null
+}

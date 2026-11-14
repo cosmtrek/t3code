@@ -1,0 +1,802 @@
+// @effect-diagnostics nodeBuiltinImport:off globalDate:off - Exercises the plain-TypeScript hub with temporary files.
+import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+
+import { describe, expect, it } from "@effect/vitest";
+import * as Schema from "effect/Schema";
+import { vi } from "vite-plus/test";
+
+import {
+  ChannelConfigError,
+  createTokenReader,
+  readChannelsFile,
+  validateLoopbackBaseUrl,
+  type ChannelConfigEntry,
+} from "./config.ts";
+import {
+  ChannelHub,
+  channelAccess,
+  nextCheckDelay,
+  sleepUnlessAborted,
+  type ChannelStatus,
+} from "./hub.ts";
+import {
+  AdapterConfig,
+  AdapterError,
+  ChannelHealth,
+  Conversation,
+  Message,
+  RawPage,
+  SendErrorCode,
+  SendResult,
+  Topic,
+  createSseParser,
+  parseChannelEvent,
+  type ChannelEvent,
+} from "./protocol.ts";
+import {
+  AdapterUnreachableError,
+  httpTransport,
+  type AdapterRequest,
+  type AdapterResponse,
+  type ChannelTransport,
+} from "./transport.ts";
+
+const encoder = new TextEncoder();
+const json = (status: number, value: unknown): AdapterResponse => ({
+  status,
+  contentType: "application/json",
+  body: encoder.encode(JSON.stringify(value)),
+});
+
+const HEALTH = {
+  protocol: 1,
+  adapterVersion: "1.2.3",
+  online: true,
+  loggedIn: true,
+  lastSyncAt: "2026-11-14T08:00:00.000Z",
+  self: { id: "u1", name: "Me" },
+};
+const CONFIG = {
+  displayName: "Chat",
+  defaultProjectPaths: [],
+  delegateTemplates: [{ id: "t", name: "T", prompt: "{contextDir}" }],
+  relevanceSummary: "Everything",
+};
+
+function fakeTransport(handle: (request: AdapterRequest) => AdapterResponse): ChannelTransport {
+  return {
+    request: async (request) => handle(request),
+    events: () => new Promise(() => undefined),
+  };
+}
+
+async function tempDir() {
+  return NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-channels-"));
+}
+
+async function hubWith(
+  handle: (request: AdapterRequest) => AdapterResponse,
+  entry: Partial<ChannelConfigEntry> = {},
+) {
+  const dir = await tempDir();
+  const tokenFile = NodePath.join(dir, "token");
+  await NodeFSP.writeFile(tokenFile, "secret-token\n", { mode: 0o600 });
+  const hub = new ChannelHub({
+    configPath: NodePath.join(dir, "channels.json"),
+    transportFor: () => fakeTransport(handle),
+    background: false,
+  });
+  await hub.start();
+  await hub.save(
+    {
+      id: "chat",
+      kind: "http-adapter",
+      name: "Chat",
+      baseUrl: "http://127.0.0.1:7341",
+      tokenFile,
+      enabled: true,
+      ...entry,
+    },
+    { create: true },
+  );
+  return { hub, dir };
+}
+
+describe("ChannelHub checks", () => {
+  const cases: ReadonlyArray<{
+    readonly name: string;
+    readonly handle: (request: AdapterRequest) => AdapterResponse;
+    readonly entry?: Partial<ChannelConfigEntry>;
+    readonly status: ChannelStatus;
+    readonly failedStep: string | null;
+  }> = [
+    {
+      name: "online",
+      handle: (request) => json(200, request.path === "/health" ? HEALTH : CONFIG),
+      status: "online",
+      failedStep: null,
+    },
+    {
+      name: "missing token file",
+      handle: () => json(200, HEALTH),
+      entry: { tokenFile: "/nonexistent/t3-token" },
+      status: "token_missing",
+      failedStep: "token",
+    },
+    {
+      name: "unreachable",
+      handle: () => {
+        throw new AdapterUnreachableError("connect ECONNREFUSED");
+      },
+      status: "unreachable",
+      failedStep: "connect",
+    },
+    {
+      name: "refused token",
+      handle: () => json(401, { error: { code: "unauthorized", message: "no" } }),
+      status: "unauthorized",
+      failedStep: "auth",
+    },
+    {
+      name: "newer protocol",
+      handle: () => json(200, { ...HEALTH, protocol: 2 }),
+      status: "incompatible",
+      failedStep: "protocol",
+    },
+    {
+      name: "signed out",
+      handle: (request) =>
+        json(200, request.path === "/health" ? { ...HEALTH, loggedIn: false } : CONFIG),
+      status: "needs_login",
+      failedStep: "login",
+    },
+    {
+      name: "collector stopped",
+      handle: (request) =>
+        json(200, request.path === "/health" ? { ...HEALTH, online: false } : CONFIG),
+      status: "collector_stopped",
+      failedStep: "online",
+    },
+  ];
+
+  it.each(cases)("reports $name", async (testCase) => {
+    const { hub } = await hubWith(testCase.handle, testCase.entry);
+    const view = await hub.test("chat");
+    expect(view.status).toBe(testCase.status);
+    expect(view.steps.find((step) => !step.ok)?.id ?? null).toBe(testCase.failedStep);
+    hub.stop();
+  });
+
+  it("serves the last answer while the adapter is unreachable", async () => {
+    let up = true;
+    const { hub } = await hubWith((request) => {
+      if (!up) throw new AdapterUnreachableError("down");
+      if (request.path === "/health") return json(200, HEALTH);
+      if (request.path === "/config") return json(200, CONFIG);
+      return json(200, { items: [], nextCursor: null });
+    });
+    await hub.test("chat");
+    const schema = RawPage;
+    expect((await hub.getJson("chat", "/conversations", schema)).stale).toBe(false);
+    up = false;
+    hub.invalidate("chat");
+    await hub.test("chat");
+    expect(hub.get("chat")?.status).toBe("unreachable");
+    expect(await hub.getJson("chat", "/conversations", schema)).toEqual({
+      value: { items: [], nextCursor: null },
+      stale: true,
+    });
+    await expect(hub.postJson("chat", "/messages", {})).rejects.toThrow();
+    hub.stop();
+  });
+
+  it("keeps ids stable and refuses duplicates", async () => {
+    const { hub } = await hubWith((request) =>
+      json(200, request.path === "/health" ? HEALTH : CONFIG),
+    );
+    await expect(
+      hub.save(
+        {
+          id: "chat",
+          kind: "http-adapter",
+          name: "Again",
+          baseUrl: "http://127.0.0.1:1",
+          tokenFile: "",
+          enabled: false,
+        },
+        { create: true },
+      ),
+    ).rejects.toBeInstanceOf(ChannelConfigError);
+    hub.stop();
+  });
+});
+
+describe("ChannelHub lists", () => {
+  const conversation = (id: string) => ({
+    id,
+    kind: "group",
+    name: id,
+    lastActivityAt: "2026-11-14T08:00:00.000Z",
+    relevant: true,
+    muted: false,
+  });
+  const topic = (id: string) => ({
+    id,
+    rootMessageId: `${id}-root`,
+    rootPreview: id,
+    replyCount: 0,
+    lastMessageAt: "2026-11-14T08:00:00.000Z",
+    lastAuthor: { id: "u2", name: "Other", isSelf: false },
+    participatedBySelf: false,
+    lastOtherMessageAt: "2026-11-14T08:00:00.000Z",
+    mentionsSelfSinceOwn: false,
+  });
+  const message = (id: string) => ({
+    id,
+    topicId: "t",
+    createdAt: "2026-11-14T08:00:00.000Z",
+    author: { id: "u2", name: "Other", isSelf: false },
+    mentionsSelf: false,
+    text: id,
+    attachments: [],
+    links: [],
+  });
+
+  it.each([
+    ["conversations", "/conversations?relevant=1", Conversation, conversation],
+    ["topics", "/conversations/c/topics?limit=50", Topic, topic],
+    ["messages", "/conversations/c/messages?topic=t", Message, message],
+  ] as const)("follows nextCursor through every page of %s", async (_name, path, schema, make) => {
+    const asked: string[] = [];
+    const { hub } = await hubWith((request) => {
+      if (request.path === "/health") return json(200, HEALTH);
+      if (request.path === "/config") return json(200, CONFIG);
+      asked.push(request.path);
+      return request.path.includes("cursor=p%202")
+        ? json(200, { items: [make("b")], nextCursor: null })
+        : json(200, { items: [make("a")], nextCursor: "p 2" });
+    });
+    await hub.test("chat");
+    const result = await hub.getAllPages<{ readonly id: string }>("chat", path, schema, {
+      maxPages: 10,
+    });
+    expect(result.items.map((item) => item.id)).toEqual(["a", "b"]);
+    expect(result.complete).toBe(true);
+    expect(asked).toEqual([path, `${path}${path.includes("?") ? "&" : "?"}cursor=p%202`]);
+    hub.stop();
+  });
+
+  it("stops after maxPages when the adapter never ends the list", async () => {
+    let served = 0;
+    const { hub } = await hubWith((request) => {
+      if (request.path === "/health") return json(200, HEALTH);
+      if (request.path === "/config") return json(200, CONFIG);
+      served += 1;
+      return json(200, { items: [], nextCursor: `n${served}` });
+    });
+    await hub.test("chat");
+    const result = await hub.getAllPages("chat", "/conversations", Conversation, {
+      maxPages: 3,
+    });
+    expect(result.complete).toBe(false);
+    expect(served).toBe(3);
+    hub.stop();
+  });
+
+  it("stops early when the adapter hands back a cursor it already gave", async () => {
+    let served = 0;
+    const { hub } = await hubWith((request) => {
+      if (request.path === "/health") return json(200, HEALTH);
+      if (request.path === "/config") return json(200, CONFIG);
+      served += 1;
+      return json(200, { items: [conversation(`c${served}`)], nextCursor: "again" });
+    });
+    await hub.test("chat");
+    const result = await hub.getAllPages<{ readonly id: string }>(
+      "chat",
+      "/conversations",
+      Conversation,
+      { maxPages: 10 },
+    );
+    expect(result.complete).toBe(false);
+    expect(result.items.map((item) => item.id)).toEqual(["c1", "c2"]);
+    hub.stop();
+  });
+
+  it("skips an item that does not decode and keeps the rest of the page", async () => {
+    const { hub } = await hubWith((request) => {
+      if (request.path === "/health") return json(200, HEALTH);
+      if (request.path === "/config") return json(200, CONFIG);
+      return json(200, {
+        items: [
+          conversation("good"),
+          { ...conversation("no-zone"), lastActivityAt: "2026-11-14 08:00" },
+          { id: "missing-fields" },
+        ],
+        nextCursor: null,
+      });
+    });
+    await hub.test("chat");
+    const result = await hub.getAllPages<{ readonly id: string }>(
+      "chat",
+      "/conversations",
+      Conversation,
+      { maxPages: 1 },
+    );
+    expect(result.items.map((item) => item.id)).toEqual(["good"]);
+    expect(result.skipped).toBe(2);
+    // A page whose envelope is wrong still fails as a whole.
+    const { hub: broken } = await hubWith((request) =>
+      request.path === "/health"
+        ? json(200, HEALTH)
+        : request.path === "/config"
+          ? json(200, CONFIG)
+          : json(200, { items: "nope" }),
+    );
+    await broken.test("chat");
+    await expect(
+      broken.getAllPages("chat", "/conversations", Conversation, { maxPages: 1 }),
+    ).rejects.toThrow(/does not match protocol/);
+    hub.stop();
+    broken.stop();
+  });
+});
+
+describe("ChannelHub token redaction", () => {
+  it("never hands the token to the browser when the adapter echoes it", async () => {
+    const token = "secret-token";
+    const { hub } = await hubWith((request) => {
+      if (request.path === "/health") {
+        return json(200, { ...HEALTH, loggedIn: false, lastError: `bad session ${token}` });
+      }
+      if (request.path === "/config") {
+        return json(200, { ...CONFIG, relevanceSummary: `uses ${token}` });
+      }
+      return json(500, { error: { code: "unknown", message: `rejected ${token}` } });
+    });
+    const view = await hub.test("chat");
+    expect(view.status).toBe("needs_login");
+    expect(JSON.stringify(view)).not.toContain(token);
+    expect(JSON.stringify(hub.list())).not.toContain(token);
+    const failure = await hub
+      .getJson("chat", "/conversations", RawPage)
+      .catch((error: Error) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect(
+      JSON.stringify({ ...(failure as object), message: (failure as Error).message }),
+    ).not.toContain(token);
+    hub.stop();
+  });
+
+  it("redacts a token echoed in a send answer", async () => {
+    const { hub } = await hubWith((request) => {
+      if (request.path === "/health") return json(200, HEALTH);
+      if (request.path === "/config") return json(200, CONFIG);
+      return json(200, { messageId: "secret-token" });
+    });
+    await hub.test("chat");
+    expect(await hub.postJson("chat", "/messages", {})).toEqual({ messageId: "***" });
+    hub.stop();
+  });
+
+  it("tells the browser only which channel changed, never the adapter's ids", async () => {
+    const dir = await tempDir();
+    const tokenFile = NodePath.join(dir, "token");
+    await NodeFSP.writeFile(tokenFile, "secret-token\n", { mode: 0o600 });
+    let delivered!: () => void;
+    const eventDelivered = new Promise<void>((resolve) => (delivered = resolve));
+    const hub = new ChannelHub({
+      configPath: NodePath.join(dir, "channels.json"),
+      transportFor: () => ({
+        request: async (request) => json(200, request.path === "/health" ? HEALTH : CONFIG),
+        events: (_token, onEvent) => {
+          onEvent({ type: "message.created" });
+          delivered();
+          return new Promise(() => undefined);
+        },
+      }),
+    });
+    const events: unknown[] = [];
+    hub.subscribe((event) => events.push(event));
+    await hub.start();
+    await hub.save(
+      {
+        id: "chat",
+        kind: "http-adapter",
+        name: "Chat",
+        baseUrl: "http://127.0.0.1:7341",
+        tokenFile,
+        enabled: true,
+      },
+      { create: true },
+    );
+    await eventDelivered;
+    expect(events).toContainEqual({ type: "inbox", channelId: "chat" });
+    expect(JSON.stringify(events)).not.toContain("secret-token");
+    hub.stop();
+  });
+
+  it("redacts a token echoed in an unreachable error", async () => {
+    const { hub } = await hubWith(() => {
+      throw new AdapterUnreachableError("connect to secret-token failed");
+    });
+    expect(JSON.stringify(await hub.test("chat"))).not.toContain("secret-token");
+    hub.stop();
+  });
+});
+
+describe("ChannelHub events", () => {
+  it("reads lists again once the event stream (re)connects", async () => {
+    let listed = 0;
+    let send!: (event: ChannelEvent) => void;
+    let opened!: () => void;
+    const streamOpen = new Promise<void>((resolve) => (opened = resolve));
+    const dir = await tempDir();
+    const tokenFile = NodePath.join(dir, "token");
+    await NodeFSP.writeFile(tokenFile, "secret-token\n", { mode: 0o600 });
+    const hub = new ChannelHub({
+      configPath: NodePath.join(dir, "channels.json"),
+      transportFor: () => ({
+        request: async (request) => {
+          if (request.path === "/health") return json(200, HEALTH);
+          if (request.path === "/config") return json(200, CONFIG);
+          listed += 1;
+          return json(200, { items: [], nextCursor: null });
+        },
+        events: (_token, onEvent) => {
+          send = onEvent;
+          opened();
+          return new Promise(() => undefined);
+        },
+      }),
+    });
+    await hub.start();
+    await hub.save(
+      {
+        id: "chat",
+        kind: "http-adapter",
+        name: "Chat",
+        baseUrl: "http://127.0.0.1:7341",
+        tokenFile,
+        enabled: true,
+      },
+      { create: true },
+    );
+    await streamOpen;
+    await hub.getJson("chat", "/conversations", RawPage);
+    await hub.getJson("chat", "/conversations", RawPage);
+    expect(listed).toBe(1);
+    send({ type: "connected" });
+    await hub.getJson("chat", "/conversations", RawPage);
+    expect(listed).toBe(2);
+    hub.stop();
+  });
+});
+
+describe("example channel simulation", () => {
+  it("lists conversations and topics newest first, so a capped read keeps the latest", async () => {
+    const dir = await tempDir();
+    const hub = new ChannelHub({
+      configPath: NodePath.join(dir, "channels.json"),
+      background: false,
+    });
+    await hub.start();
+    await hub.save(
+      {
+        id: "example",
+        kind: "example",
+        name: "Example",
+        baseUrl: "",
+        tokenFile: "",
+        enabled: true,
+      },
+      { create: false },
+    );
+    const conversations = await hub.getAllPages("example", "/conversations", Conversation, {
+      maxPages: 1,
+    });
+    expect(conversations.complete).toBe(false);
+    const all = await hub.getAllPages("example", "/conversations", Conversation, {
+      maxPages: 20,
+    });
+    expect(all).toMatchObject({ complete: true, skipped: 0 });
+    const newest = all.items.toSorted((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt));
+    expect(conversations.items).toEqual(newest.slice(0, conversations.items.length));
+    for (const conversation of all.items) {
+      const topics = await hub.getAllPages(
+        "example",
+        `/conversations/${conversation.id}/topics`,
+        Topic,
+        { maxPages: 20 },
+      );
+      expect(topics.skipped).toBe(0);
+      expect(topics.items.map((topic) => topic.lastMessageAt)).toEqual(
+        topics.items
+          .map((topic) => topic.lastMessageAt)
+          .toSorted()
+          .toReversed(),
+      );
+    }
+    hub.stop();
+  });
+
+  it.each([
+    ["needs_login", "needs_login"],
+    ["collector_stopped", "collector_stopped"],
+    ["unreachable", "unreachable"],
+    ["incompatible", "incompatible"],
+    ["online", "online"],
+  ] as const)("simulates %s", async (simulation, status) => {
+    const dir = await tempDir();
+    const hub = new ChannelHub({
+      configPath: NodePath.join(dir, "channels.json"),
+      background: false,
+    });
+    await hub.start();
+    await hub.save(
+      {
+        id: "example",
+        kind: "example",
+        name: "Example",
+        baseUrl: "",
+        tokenFile: "",
+        enabled: true,
+      },
+      { create: false },
+    );
+    const view = await hub.simulate("example", simulation);
+    expect(view.status).toBe(status);
+    expect(view.simulation).toBe(simulation);
+    // Health from another protocol means nothing; the channel shows none.
+    if (status === "incompatible") expect(view.health).toBeNull();
+    hub.stop();
+  });
+
+  it("keeps what was read when the adapter goes away", async () => {
+    const dir = await tempDir();
+    const hub = new ChannelHub({
+      configPath: NodePath.join(dir, "channels.json"),
+      background: false,
+    });
+    await hub.start();
+    await hub.save(
+      {
+        id: "example",
+        kind: "example",
+        name: "Example",
+        baseUrl: "",
+        tokenFile: "",
+        enabled: true,
+      },
+      { create: false },
+    );
+    const schema = RawPage;
+    const fresh = await hub.getJson("example", "/conversations", schema);
+    await hub.simulate("example", "unreachable");
+    const stale = await hub.getJson("example", "/conversations", schema);
+    expect(stale).toEqual({ value: fresh.value, stale: true });
+    expect(channelAccess(hub.get("example")!.status).send).toBe(false);
+    hub.stop();
+  });
+});
+
+describe("sleepUnlessAborted", () => {
+  it("removes its abort listener when the timer ends", async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      const added = vi.spyOn(controller.signal, "addEventListener");
+      const removed = vi.spyOn(controller.signal, "removeEventListener");
+      for (let round = 0; round < 3; round++) {
+        const sleeping = sleepUnlessAborted(1_000, controller.signal);
+        vi.advanceTimersByTime(1_000);
+        await sleeping;
+      }
+      expect(added).toHaveBeenCalledTimes(3);
+      expect(removed).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("nextCheckDelay", () => {
+  it("retries an unreachable adapter sooner, backing off to the usual interval", () => {
+    let retryMs: number | null = null;
+    const delays: number[] = [];
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const next = nextCheckDelay("unreachable", retryMs);
+      delays.push(next.delayMs);
+      retryMs = next.retryMs;
+    }
+    expect(delays).toEqual([5_000, 10_000, 20_000, 30_000, 30_000]);
+    // Back online: the usual interval, and the next outage starts over at 5 seconds.
+    const online = nextCheckDelay("online", retryMs);
+    expect(online).toEqual({ delayMs: 30_000, retryMs: null });
+    expect(nextCheckDelay("unreachable", online.retryMs).delayMs).toBe(5_000);
+  });
+});
+
+describe("channel access", () => {
+  it("matches the status table", () => {
+    expect(channelAccess("online")).toEqual({ read: true, send: true, stale: false });
+    expect(channelAccess("collector_stopped")).toEqual({ read: true, send: true, stale: false });
+    expect(channelAccess("needs_login")).toEqual({ read: true, send: false, stale: false });
+    expect(channelAccess("unreachable")).toEqual({ read: true, send: false, stale: true });
+    for (const status of ["disabled", "token_missing", "unauthorized", "incompatible"] as const) {
+      expect(channelAccess(status).read).toBe(false);
+    }
+  });
+});
+
+describe("validateLoopbackBaseUrl", () => {
+  it.each([
+    ["http://127.0.0.1:7341/", "http://127.0.0.1:7341"],
+    ["http://localhost:80/api/", "http://localhost/api"],
+    ["http://[::1]:9000", "http://[::1]:9000"],
+  ])("accepts %s", (raw, expected) => {
+    expect(validateLoopbackBaseUrl(raw)).toBe(expected);
+  });
+
+  it.each([
+    "http://10.0.0.5:7341",
+    "http://example.com",
+    "http://127.0.0.1.nip.io",
+    "file:///etc/passwd",
+    "http://user:pw@127.0.0.1:1",
+    "127.0.0.1:7341",
+  ])("refuses %s", (raw) => {
+    expect(() => validateLoopbackBaseUrl(raw)).toThrow(ChannelConfigError);
+  });
+
+  it("refuses a hand-edited channels.json that points away from this machine", async () => {
+    const dir = await tempDir();
+    const file = NodePath.join(dir, "channels.json");
+    const entry = {
+      id: "chat",
+      kind: "http-adapter",
+      name: "Chat",
+      baseUrl: "http://10.0.0.5:7341",
+      tokenFile: "",
+      enabled: true,
+    };
+    await NodeFSP.writeFile(file, JSON.stringify({ version: 1, channels: [entry] }));
+    await expect(readChannelsFile(file)).rejects.toThrow(/10\.0\.0\.5|this machine/);
+    await NodeFSP.writeFile(
+      file,
+      JSON.stringify({ version: 1, channels: [{ ...entry, baseUrl: "http://[::1]:7341" }] }),
+    );
+    expect((await readChannelsFile(file)).channels).toHaveLength(1);
+  });
+
+  it("builds no HTTP transport for a non-loopback address", () => {
+    expect(() => httpTransport("http://10.0.0.5:7341")).toThrow(ChannelConfigError);
+    expect(() => httpTransport("http://localhost.evil.com")).toThrow(ChannelConfigError);
+  });
+
+  it("sends localhost requests to 127.0.0.1, not to whatever localhost resolves to", async () => {
+    const urls: string[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      urls.push(String(input));
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    try {
+      await httpTransport("http://localhost:7341/api").request({
+        method: "GET",
+        path: "/health",
+        token: null,
+      });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(urls).toEqual(["http://127.0.0.1:7341/api/health"]);
+  });
+});
+
+describe("token reader", () => {
+  it("reads a trimmed token, warns on loose permissions, and explains failures", async () => {
+    const dir = await tempDir();
+    const read = createTokenReader();
+    const file = NodePath.join(dir, "token");
+    await NodeFSP.writeFile(file, "  abc  \n", { mode: 0o600 });
+    expect(await read(file)).toEqual({ ok: true, token: "abc", warning: null });
+    await NodeFSP.chmod(file, 0o644);
+    await NodeFSP.writeFile(file, "def\n");
+    const loose = await read(file);
+    expect(loose.ok && loose.token).toBe("def");
+    expect(loose.ok && loose.warning).toMatch(/chmod 600/);
+    await NodeFSP.writeFile(file, "\n");
+    expect((await read(file)).ok).toBe(false);
+    expect(await read(NodePath.join(dir, "missing"))).toMatchObject({ ok: false });
+    expect(await read("relative/token")).toMatchObject({ ok: false });
+    expect(await read("")).toMatchObject({ ok: false });
+  });
+});
+
+describe("SSE parsing", () => {
+  it("splits frames across chunks and decodes known events", () => {
+    const frames: Array<[string, string]> = [];
+    const parse = createSseParser((event, data) => frames.push([event, data]));
+    parse('event: message.created\ndata: {"conversationId":"c",');
+    parse('"topicId":"t","messageId":"m"}\n\n: ping\n\nevent: health.changed\ndata: {}\n\n');
+    expect(frames.map(([event, data]) => parseChannelEvent(event, data))).toEqual([
+      { type: "message.created" },
+      { type: "health.changed" },
+    ]);
+    // A known event counts whatever its data; it only says that something changed.
+    expect(parseChannelEvent("message.created", "{bad")).toEqual({ type: "message.created" });
+    expect(parseChannelEvent("message.created", "")).toEqual({ type: "message.created" });
+    expect(parseChannelEvent("other", "{}")).toBeNull();
+  });
+
+  it.each([
+    ["LF", "\n"],
+    ["CRLF", "\r\n"],
+    ["CR", "\r"],
+  ])("keeps frames whole with %s line ends split at every byte", (_name, eol) => {
+    const stream = [
+      "event: health.changed",
+      "data: {}",
+      "",
+      "event: message.created",
+      'data: {"conversationId":"c",',
+      'data: "topicId":"t","messageId":"m"}',
+      "",
+      "",
+    ].join(eol);
+    for (let cut = 0; cut <= stream.length; cut++) {
+      const frames: Array<[string, string]> = [];
+      const parse = createSseParser((event, data) => frames.push([event, data]));
+      parse(stream.slice(0, cut));
+      parse(stream.slice(cut));
+      expect(frames, `cut at ${cut}`).toEqual([
+        ["health.changed", "{}"],
+        ["message.created", '{"conversationId":"c",\n"topicId":"t","messageId":"m"}'],
+      ]);
+    }
+  });
+});
+
+describe("protocol fixtures", () => {
+  // Adapters check their real answers against these; they must decode as this code does.
+  const fixture = (name: string) =>
+    NodeFSP.readFile(NodePath.join(import.meta.dirname, "fixtures", name), "utf8");
+  const decodes = (schema: Schema.Top, value: unknown) =>
+    Schema.decodeUnknownExit(schema as Schema.Decoder<unknown>)(value)._tag;
+
+  it.each([
+    ["health.json", ChannelHealth],
+    ["config.json", AdapterConfig],
+    ["send-ok.json", SendResult],
+    ["send-error.json", AdapterError],
+  ] as const)("%s decodes", async (name, schema) => {
+    expect(decodes(schema, JSON.parse(await fixture(name)))).toBe("Success");
+  });
+
+  it.each([
+    ["conversations.json", Conversation],
+    ["topics.json", Topic],
+    ["messages.json", Message],
+  ] as const)("every item of %s decodes", async (name, schema) => {
+    const page = JSON.parse(await fixture(name)) as { items: ReadonlyArray<unknown> };
+    expect(decodes(RawPage, page)).toBe("Success");
+    expect(page.items.length).toBeGreaterThan(0);
+    for (const item of page.items) expect(decodes(schema, item)).toBe("Success");
+  });
+
+  it("uses a send error code the protocol names", async () => {
+    const { error } = JSON.parse(await fixture("send-error.json")) as { error: { code: string } };
+    expect(decodes(SendErrorCode, error.code)).toBe("Success");
+  });
+
+  it("parses events.sse into both events", async () => {
+    const events: unknown[] = [];
+    createSseParser((event, data) => events.push(parseChannelEvent(event, data)))(
+      await fixture("events.sse"),
+    );
+    expect(events).toEqual([{ type: "message.created" }, { type: "health.changed" }]);
+  });
+});
