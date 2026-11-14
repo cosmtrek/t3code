@@ -595,6 +595,8 @@ export default defineConfig({
           "**/{test-fixtures,*TestFixtures}.ts",
           "apps/mobile/src/features/development/**",
           "packages/client-runtime/src/rpc/**",
+          // Fork-only inbox UI, not translated yet.
+          "apps/web/src/fork/**",
         ],
         rules: { "t3code/no-untranslated-copy": "error" },
       },
