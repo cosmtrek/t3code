@@ -60,6 +60,7 @@ import {
 import { useAvailableSettingsSearchItems } from "./useAvailableSettingsSearchItems";
 import { useSettingsSectionNavigation } from "./useSettingsSectionNavigation";
 import { workspaceAreaProps } from "../../lib/workspaceFocus";
+import { FORK_SETTINGS_ICONS } from "../../fork/registry";
 
 const SnapShotIcon = createLucideIcon("snap-shot", [
   [
@@ -110,6 +111,7 @@ const SETTINGS_SECTION_ICONS: Readonly<
   "/settings/labs": FlaskConicalIcon,
   "/settings/about": InfoIcon,
   "/settings/archived": ArchiveIcon,
+  ...FORK_SETTINGS_ICONS,
 };
 
 // Detail pages without a nav entry highlight the page that links to them.
