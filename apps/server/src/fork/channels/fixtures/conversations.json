@@ -1,0 +1,21 @@
+{
+  "items": [
+    {
+      "id": "oc_platform",
+      "kind": "group",
+      "name": "Platform team",
+      "lastActivityAt": "2026-11-14T09:30:00.000Z",
+      "relevant": true,
+      "muted": false
+    },
+    {
+      "id": "oc_jordan",
+      "kind": "dm",
+      "name": "Jordan Lee",
+      "lastActivityAt": "2026-11-14T08:10:00+08:00",
+      "relevant": true,
+      "muted": false
+    }
+  ],
+  "nextCursor": "page-2"
+}
