@@ -17,15 +17,23 @@ const LINKED_THREAD_EVENT_TYPES: ReadonlySet<string> = new Set([
 ] satisfies ReadonlyArray<OrchestrationV2DomainEvent["type"]>);
 
 export const followLinkedThreads = Effect.fn("ForkInbox.followLinkedThreads")(function* <E, R>(
-  events: Stream.Stream<Pick<OrchestrationV2DomainEvent, "type" | "threadId">, E, R>,
+  events: Stream.Stream<OrchestrationV2DomainEvent, E, R>,
 ) {
   const { hub, store } = yield* InboxRuntime;
+  // A run is updated many times (usage, checkpoints); the inbox only shows its status.
+  const runStatus = new Map<string, string>();
   yield* events.pipe(
     Stream.filter((event) => LINKED_THREAD_EVENT_TYPES.has(event.type)),
     Stream.runForEach((event) =>
       Effect.sync(() => {
         const channelId = store.channelOfThread(event.threadId);
-        if (channelId !== null) hub.publish({ type: "inbox", channelId });
+        if (channelId === null) return;
+        if (event.type === "run.updated") {
+          const status = `${event.payload.id}:${event.payload.status}`;
+          if (runStatus.get(event.threadId) === status) return;
+          runStatus.set(event.threadId, status);
+        }
+        hub.publish({ type: "inbox", channelId });
       }),
     ),
   );

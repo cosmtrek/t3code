@@ -143,9 +143,6 @@ export interface InboxItem {
   readonly state: ItemState;
   readonly category: "direct" | "participated" | "followed" | "other";
   readonly reopened: boolean;
-  readonly waitMs: number;
-  readonly highlight: boolean;
-  readonly score: number;
   readonly mark: { readonly state: "done" | "ignored"; readonly markedAt: string } | null;
   readonly thread: LinkedThread | null;
   readonly hasConclusion: boolean;

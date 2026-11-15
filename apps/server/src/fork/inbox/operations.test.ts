@@ -12,6 +12,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as FileSystem from "effect/FileSystem";
 import * as Stream from "effect/Stream";
+import { vi } from "vite-plus/test";
 
 import * as ServerConfig from "../../config.ts";
 import * as ThreadLaunch from "../../orchestration-v2/ThreadLaunchService.ts";
@@ -347,6 +348,29 @@ describe("inbox listing", () => {
     }),
   );
 
+  it.effect("shares one read of the channel until something in it changes", () =>
+    Effect.gen(function* () {
+      const messages: FakeMessage[] = [{ id: "m1", minute: 1, author: THEM }];
+      const h = yield* Effect.promise(() =>
+        harness(() => [{ conversationId: "c", topicId: "t", messages }]),
+      );
+      const key = h.keyOf("c", "t");
+      const reads = vi.spyOn(h.runtime.store, "listMarks");
+      yield* Effect.all(
+        [Inbox.overview(), Inbox.listItems(h.channelId), Inbox.readTopic(new URLSearchParams(key))],
+        { concurrency: "unbounded" },
+      ).pipe(Effect.provide(h.layer));
+      expect(reads).toHaveBeenCalledTimes(1);
+      yield* Inbox.mark({ ...key, state: "done", lastMessageAt: at(1) }).pipe(
+        Effect.provide(h.layer),
+      );
+      const result = yield* Inbox.listItems(h.channelId).pipe(Effect.provide(h.layer));
+      expect(reads).toHaveBeenCalledTimes(2);
+      expect(result.items[0]).toMatchObject({ state: "done" });
+      expect(result.items[0]).not.toHaveProperty("waitMs");
+    }),
+  );
+
   it.effect("says when the channel lists more conversations than it reads", () =>
     Effect.gen(function* () {
       const h = yield* Effect.promise(() =>
@@ -493,6 +517,8 @@ describe("linked threads and their files", () => {
         "drafted",
       );
       h.shells.set("thread-1", null);
+      // What followLinkedThreads publishes on thread.deleted.
+      h.runtime.hub.publish({ type: "inbox", channelId: h.channelId });
       const after = yield* Inbox.readTopic(query).pipe(Effect.provide(h.layer));
       expect(after.item).toMatchObject({ state: "needs_reply", hasDraft: false });
       expect(after).toMatchObject({
@@ -521,16 +547,23 @@ describe("following linked threads", () => {
       yield* linkThread(h, h.keyOf("c", "t"), "thread-linked", 1);
       const published: unknown[] = [];
       h.runtime.hub.subscribe((event) => published.push(event));
-      const event = (type: string, threadId: string) => ({ type, threadId }) as never;
+      const event = (type: string, threadId: string, status = "running", runId = "run-1") =>
+        ({ type, threadId, payload: { id: runId, status } }) as never;
       yield* followLinkedThreads(
         Stream.fromIterable([
+          event("run.updated", "thread-linked"),
+          // Usage and checkpoint updates leave the run's status as it was.
           event("run.updated", "thread-linked"),
           event("run.updated", "thread-elsewhere"),
           // Streaming text does not change what the inbox shows.
           event("message.updated", "thread-linked"),
+          event("run.updated", "thread-linked", "completed"),
+          event("run.updated", "thread-linked", "running", "run-2"),
         ]),
       ).pipe(Effect.provide(h.layer));
-      expect(published).toEqual([{ type: "inbox", channelId: h.channelId }]);
+      expect(published).toEqual(
+        Array.from({ length: 3 }, () => ({ type: "inbox", channelId: h.channelId })),
+      );
     }),
   );
 });

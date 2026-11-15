@@ -241,6 +241,8 @@ export class ChannelHub {
   private example: ExampleChannel | null = null;
   private readonly now: () => number;
   private writes: Promise<unknown> = Promise.resolve();
+  /** Bumped whenever what a channel's inbox shows may have changed; see `revision`. */
+  private readonly revisions = new Map<string, number>();
 
   private readonly options: ChannelHubOptions;
 
@@ -527,6 +529,7 @@ export class ChannelHub {
   /** Drops cached answers whose path starts with one of `prefixes`, or all of them. */
   private dropCached(runtime: Runtime, prefixes?: ReadonlyArray<string>) {
     runtime.generation += 1;
+    this.bumpRevision(runtime.entry.id);
     runtime.inflight.clear();
     if (prefixes === undefined) {
       runtime.cache.clear();
@@ -579,7 +582,23 @@ export class ChannelHub {
     return result;
   }
 
+  /**
+   * Changes whenever a cached answer is dropped or an inbox or channels event is published, so a
+   * result derived from the channel can be reused while it stays the same.
+   */
+  revision(channelId: string): number {
+    return this.revisions.get(channelId) ?? 0;
+  }
+
+  private bumpRevision(channelId: string) {
+    this.revisions.set(channelId, this.revision(channelId) + 1);
+  }
+
   publish(event: HubEvent): void {
+    if (event.type === "inbox") this.bumpRevision(event.channelId);
+    else if (event.type === "channels") {
+      for (const channelId of this.runtimes.keys()) this.bumpRevision(channelId);
+    }
     for (const listener of this.listeners) {
       try {
         listener(event);

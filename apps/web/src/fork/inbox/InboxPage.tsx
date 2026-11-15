@@ -41,6 +41,7 @@ import {
 import { SidebarInset } from "../../components/ui/sidebar";
 import { Toggle, ToggleGroup } from "../../components/ui/toggle-group";
 import { isElectron } from "../../env";
+import { useNowMinute } from "../../hooks/useNowMinute";
 import { cn } from "../../lib/utils";
 import { ChannelStatusDot, formatSince } from "../presentation";
 import type { InboxItem, ItemsResponse, TopicDetail as TopicDetailData } from "../types";
@@ -90,7 +91,7 @@ function storeEnvironment(environmentId: string) {
 }
 
 export function InboxPage() {
-  const inboxes = useInboxOverviews();
+  const inboxes = useInboxOverviews({ followSync: true });
   const [chosenEnvironment, setChosenEnvironment] = useState<string | null>(readStoredEnvironment);
   const inbox =
     inboxes.find((candidate) => candidate.environmentId === chosenEnvironment) ??
@@ -521,6 +522,7 @@ function TopicCard({
   readonly onDelegate: () => void;
   readonly onMark: (state: MarkTarget) => void;
 }) {
+  const now = Date.parse(useNowMinute());
   const marked = item.state === "done" || item.state === "ignored";
   return (
     <li
@@ -536,7 +538,7 @@ function TopicCard({
       >
         <span className="flex min-w-0 items-baseline gap-2 text-xs text-muted-foreground">
           <span className="truncate">{STATE_LABELS[item.state]}</span>
-          <span className="ms-auto shrink-0 tabular-nums">{waitLabel(item)}</span>
+          <span className="ms-auto shrink-0 tabular-nums">{waitLabel(item, now)}</span>
         </span>
         <span className="text-sm break-words whitespace-pre-wrap">{item.preview}</span>
         {itemMeta(item) ? (

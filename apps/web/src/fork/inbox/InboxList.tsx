@@ -15,7 +15,8 @@ import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../../components/ui/menu
 import { cn } from "../../lib/utils";
 import type { InboxItem } from "../types";
 import { copyItemContext, openItemInApp, type MarkTarget } from "./itemActions";
-import { STATE_LABELS, itemMeta, nameOrUnknown, waitLabel } from "./inboxView";
+import { useNowMinute } from "../../hooks/useNowMinute";
+import { STATE_LABELS, isOverdue, itemMeta, nameOrUnknown, waitLabel } from "./inboxView";
 
 export interface ItemHandlers {
   readonly onSelect: (item: InboxItem) => void;
@@ -102,12 +103,14 @@ export function ItemMenu({
 function ItemRow({
   environmentId,
   item,
+  now,
   selected,
   readOnly,
   handlers,
 }: {
   readonly environmentId: EnvironmentId;
   readonly item: InboxItem;
+  readonly now: number;
   readonly selected: boolean;
   readonly readOnly: boolean;
   readonly handlers: ItemHandlers;
@@ -202,10 +205,10 @@ function ItemRow({
             <span
               className={cn(
                 "ms-auto shrink-0 tabular-nums text-muted-foreground",
-                item.highlight && "font-medium text-warning",
+                isOverdue(item, now) && "font-medium text-warning",
               )}
             >
-              {waitLabel(item)}
+              {waitLabel(item, now)}
             </span>
           </span>
           <span className="line-clamp-2 text-sm break-words text-foreground/90">
@@ -243,6 +246,7 @@ export function InboxList({
   readonly readOnly: boolean;
   readonly handlers: ItemHandlers;
 }) {
+  const now = Date.parse(useNowMinute());
   return (
     <ul className="flex flex-col">
       {items.map((item) => (
@@ -250,6 +254,7 @@ export function InboxList({
           key={item.id}
           environmentId={environmentId}
           item={item}
+          now={now}
           selected={item.id === selectedId}
           readOnly={readOnly}
           handlers={handlers}
