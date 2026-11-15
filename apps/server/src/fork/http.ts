@@ -3,6 +3,8 @@
  * untouched. Clients authenticate like the device hub proxy: a session cookie, or a `wsTicket`
  * query parameter minted for media.
  */
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- a synchronous hash for ETags.
+import * as NodeCrypto from "node:crypto";
 import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
@@ -41,6 +43,28 @@ const errorResponse = (error: Inbox.ForkHttpError) =>
 
 const ok = (value: unknown) => HttpServerResponse.jsonUnsafe(value, { headers: NO_STORE });
 
+/**
+ * Reads revalidate through the browser's own cache: it sends If-None-Match by itself, which a
+ * custom header would not do without a CORS preflight, and an unchanged answer costs a 304.
+ */
+const REVALIDATE = { "cache-control": "private, no-cache" };
+
+export const okRevalidated = (value: unknown, ifNoneMatch: string | undefined) => {
+  const text = JSON.stringify(value);
+  const tag = NodeCrypto.createHash("sha1").update(text).digest("base64url");
+  // Weak: compression may re-encode the body; the JSON is what the tag stands for.
+  const etag = `W/"${tag}"`;
+  const unchanged = ifNoneMatch
+    ?.split(",")
+    .some((candidate) => candidate.trim().replace(/^W\//i, "") === `"${tag}"`);
+  return unchanged
+    ? HttpServerResponse.empty({ status: 304, headers: { ...REVALIDATE, etag } })
+    : HttpServerResponse.text(text, {
+        contentType: "application/json",
+        headers: { ...REVALIDATE, etag },
+      });
+};
+
 const query = Effect.map(HttpServerRequest.HttpServerRequest, (request) =>
   Option.match(requestUrl(request), {
     onNone: () => new URLSearchParams(),
@@ -71,10 +95,15 @@ const makeRoute =
       path,
       Effect.gen(function* () {
         yield* authenticateMediaRequest(scope);
+        const request = yield* HttpServerRequest.HttpServerRequest;
         return yield* handle.pipe(
           Effect.provideService(InboxRuntime, runtime),
           Effect.map((value) =>
-            HttpServerResponse.isHttpServerResponse(value) ? value : ok(value),
+            HttpServerResponse.isHttpServerResponse(value)
+              ? value
+              : method === "GET"
+                ? okRevalidated(value, request.headers["if-none-match"])
+                : ok(value),
           ),
           Effect.catchTags({ ForkHttpError: (error) => Effect.succeed(errorResponse(error)) }),
         );

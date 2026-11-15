@@ -18,6 +18,7 @@ import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 
@@ -33,6 +34,7 @@ import {
   AdapterRequestError,
   ChannelUnavailableError,
   channelAccess,
+  type ChannelHub,
   type ChannelView,
 } from "../channels/hub.ts";
 import {
@@ -392,7 +394,49 @@ interface ChannelItems {
   readonly conversations: ReadonlyArray<ConversationType>;
 }
 
+interface ItemsMemo {
+  readonly revision: number;
+  readonly at: number;
+  readonly fiber: Fiber.Fiber<ChannelItems, ForkHttpError>;
+}
+
+/** Bounds a change no signal announced, as the client's poll does. */
+const ITEMS_MEMO_MS = 10_000;
+const itemsMemos = new WeakMap<ChannelHub, Map<string, ItemsMemo>>();
+
+/**
+ * One event sends the overview, the list, and the open topic here at once. They share one read
+ * of the channel, reused until the hub's revision for it moves (an adapter event, a mark, a
+ * link, a thread's run) or it gets old.
+ */
 const readChannelItems = Effect.fn("ForkInbox.readChannelItems")(function* (channelId: string) {
+  const { hub } = yield* InboxRuntime;
+  let memos = itemsMemos.get(hub);
+  if (memos === undefined) {
+    memos = new Map();
+    itemsMemos.set(hub, memos);
+  }
+  const revision = hub.revision(channelId);
+  const now = Date.now();
+  let memo = memos.get(channelId);
+  if (memo === undefined || memo.revision !== revision || now - memo.at >= ITEMS_MEMO_MS) {
+    // Detached: a client that gives up must not cancel the read the others are waiting on.
+    memo = { revision, at: now, fiber: yield* Effect.forkDetach(computeChannelItems(channelId)) };
+    memos.set(channelId, memo);
+  }
+  const joined = memo;
+  return yield* Fiber.join(joined.fiber).pipe(
+    Effect.tapError(() =>
+      Effect.sync(() => {
+        if (memos.get(channelId) === joined) memos.delete(channelId);
+      }),
+    ),
+  );
+});
+
+const computeChannelItems = Effect.fn("ForkInbox.computeChannelItems")(function* (
+  channelId: string,
+) {
   const runtime = yield* InboxRuntime;
   const { hub, store } = runtime;
   const conversations = yield* attempt(() =>
@@ -555,6 +599,13 @@ export const overview = Effect.fn("ForkInbox.overview")(function* () {
   return { channels: summaries };
 });
 
+/**
+ * An item as clients get it. Wait time, highlight, and score move with the clock, so the client
+ * works them out from `lastMessageAt`, and an unchanged list stays byte-identical for its ETag.
+ */
+const toWire = ({ waitMs: _waitMs, highlight: _highlight, score: _score, ...item }: InboxItem) =>
+  item;
+
 export const listItems = Effect.fn("ForkInbox.listItems")(function* (channelId: string) {
   const { hub } = yield* InboxRuntime;
   const channel = hub.get(channelId);
@@ -563,7 +614,7 @@ export const listItems = Effect.fn("ForkInbox.listItems")(function* (channelId: 
   }
   const result = yield* readChannelItems(channelId);
   return {
-    items: result.items,
+    items: result.items.map(toWire),
     stale: result.stale,
     truncatedAtPages: result.truncatedAtPages,
     skipped: result.skipped,
@@ -624,7 +675,7 @@ export const readTopic = Effect.fn("ForkInbox.readTopic")(function* (query: URLS
   );
   const access = channelAccess(channel.status);
   return {
-    item,
+    item: toWire(item),
     conversation,
     messages: messages.items,
     stale: messages.stale,
