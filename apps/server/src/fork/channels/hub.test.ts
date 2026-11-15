@@ -869,6 +869,8 @@ describe("SSE parsing", () => {
   });
 });
 
+const decodeMessage = Schema.decodeUnknownExit(Message);
+
 describe("protocol fixtures", () => {
   // Adapters check their real answers against these; they must decode as this code does.
   const fixture = (name: string) =>
@@ -894,6 +896,22 @@ describe("protocol fixtures", () => {
     expect(decodes(RawPage, page)).toBe("Success");
     expect(page.items.length).toBeGreaterThan(0);
     for (const item of page.items) expect(decodes(schema, item)).toBe("Success");
+  });
+
+  it("keeps a message whose attachment kind T3 does not know, as a file", () => {
+    const message = {
+      id: "om_9",
+      topicId: "omt_cache",
+      createdAt: "2026-11-14T10:00:00.000Z",
+      author: { id: "ou_sam", name: "Sam Okafor", isSelf: false },
+      mentionsSelf: false,
+      text: "",
+      attachments: [{ key: "file_v3_audio", kind: "audio", name: "voice.opus" }],
+      links: [],
+    };
+    const decoded = decodeMessage(message);
+    expect(decoded._tag).toBe("Success");
+    if (decoded._tag === "Success") expect(decoded.value.attachments[0]?.kind).toBe("file");
   });
 
   it("uses a send error code the protocol names", async () => {

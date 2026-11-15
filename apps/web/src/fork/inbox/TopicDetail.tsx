@@ -65,12 +65,13 @@ export function TopicDetail({
           <p className="mb-3 text-xs text-warning">{skippedNotice(detail.skipped)}</p>
         ) : null}
         <ol className="flex flex-col gap-3">
-          {detail.messages.map((message) => (
-            <li key={message.id}>
+          {detail.messages.map((message, index) => (
+            <li key={message.id} className="flex min-w-0 flex-col">
               <MessageView
                 environmentId={environmentId}
                 channelId={item.channelId}
                 message={message}
+                showAuthor={detail.messages[index - 1]?.author.id !== message.author.id}
               />
             </li>
           ))}
@@ -93,29 +94,46 @@ function MessageView({
   environmentId,
   channelId,
   message,
+  showAuthor,
 }: {
   readonly environmentId: EnvironmentId;
   readonly channelId: string;
   readonly message: InboxMessage;
+  readonly showAuthor: boolean;
 }) {
   const access = useForkAccess(environmentId);
+  const self = message.author.isSelf;
+  const hasText = message.text.trim().length > 0;
   return (
-    <article className="flex min-w-0 flex-col gap-1">
-      <header className="flex min-w-0 items-baseline gap-2 text-xs">
-        <span className={cn("truncate font-medium", message.author.isSelf && "text-primary")}>
-          {nameOrUnknown(message.author.name)}
-          {message.author.isSelf ? " (you)" : ""}
-        </span>
-        <time className="shrink-0 text-muted-foreground" dateTime={message.createdAt}>
+    <article
+      className={cn(
+        "flex max-w-[85%] min-w-0 flex-col gap-1",
+        self ? "items-end self-end" : "items-start self-start",
+      )}
+    >
+      <header className="flex min-w-0 items-baseline gap-2 text-xs text-muted-foreground">
+        {showAuthor && !self ? (
+          <span className="truncate font-medium text-foreground">
+            {nameOrUnknown(message.author.name)}
+          </span>
+        ) : null}
+        <time className="shrink-0" dateTime={message.createdAt}>
           {formatTimestamp(message.createdAt)}
         </time>
         {message.mentionsSelf ? <span className="shrink-0 text-warning">@you</span> : null}
       </header>
-      {message.text.trim() ? (
-        <p className="text-sm break-words whitespace-pre-wrap">{message.text}</p>
+      {hasText ? (
+        <p
+          className={cn(
+            "rounded-2xl px-3 py-2 text-sm break-words whitespace-pre-wrap",
+            self ? "rounded-tr-sm bg-primary text-primary-foreground" : "rounded-tl-sm bg-muted",
+          )}
+        >
+          {message.text}
+        </p>
       ) : null}
       {message.richSummary ? (
-        <div className="rounded-md border border-border/60 bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+        <div className="rounded-xl border border-border/60 bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
           <p className="break-words whitespace-pre-wrap">{message.richSummary}</p>
           {message.openUrl ? (
             <a
@@ -139,13 +157,16 @@ function MessageView({
             path={`/inbox/media?${new URLSearchParams({ channelId, messageId: message.id, key: attachment.key }).toString()}`}
           />
         ) : (
-          <span key={attachment.key} className="text-xs text-muted-foreground">
+          <span
+            key={attachment.key}
+            className="rounded-xl border border-border/60 px-3 py-1.5 text-xs text-muted-foreground"
+          >
             {attachment.kind === "image" ? "Image" : "File"}: {attachment.name}
           </span>
         ),
       )}
       {message.links.length > 0 ? (
-        <ul className="flex flex-col gap-0.5 text-xs">
+        <ul className="flex max-w-full min-w-0 flex-col gap-0.5 text-xs">
           {message.links.map((link) => (
             <li key={link} className="min-w-0 truncate">
               <a
@@ -159,6 +180,27 @@ function MessageView({
             </li>
           ))}
         </ul>
+      ) : null}
+      {!hasText &&
+      !message.richSummary &&
+      message.attachments.length === 0 &&
+      message.links.length === 0 ? (
+        <p className="rounded-xl border border-dashed border-border/70 px-3 py-1.5 text-xs text-muted-foreground">
+          Unsupported message
+          {message.openUrl ? (
+            <>
+              {" · "}
+              <a
+                className="text-foreground underline-offset-2 hover:underline"
+                href={message.openUrl}
+                target="_blank"
+                rel="noreferrer noopener"
+              >
+                Open in app
+              </a>
+            </>
+          ) : null}
+        </p>
       ) : null}
     </article>
   );
@@ -184,7 +226,7 @@ function MediaImage({
     <img
       alt={alt}
       loading="lazy"
-      className="max-h-72 max-w-full self-start rounded-md border border-border/60 object-contain"
+      className="max-h-72 max-w-full rounded-xl border border-border/60 object-contain"
       src={forkUrl(access, path)}
       onError={() => {
         if (renewed) {

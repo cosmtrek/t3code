@@ -4,6 +4,7 @@
  * item that does not decode is skipped, not the page. DMs are split into topics by the adapter.
  */
 import * as Schema from "effect/Schema";
+import * as SchemaTransformation from "effect/SchemaTransformation";
 
 export const CHANNEL_PROTOCOL_VERSION = 1;
 
@@ -75,9 +76,22 @@ export const Topic = Schema.Struct({
 });
 export type Topic = typeof Topic.Type;
 
+const AttachmentKind = Schema.Literals(["image", "file"]);
+
+/** Chats add kinds (audio, video, sticker); an unknown one shows as a file, not a lost message. */
+const LenientAttachmentKind = Schema.String.pipe(
+  Schema.decodeTo(
+    AttachmentKind,
+    SchemaTransformation.transform({
+      decode: (kind) => (kind === "image" ? "image" : "file"),
+      encode: (kind) => kind,
+    }),
+  ),
+);
+
 export const Attachment = Schema.Struct({
   key: Schema.String,
-  kind: Schema.Literals(["image", "file"]),
+  kind: LenientAttachmentKind,
   name: Schema.String,
 });
 
