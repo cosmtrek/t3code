@@ -1,5 +1,5 @@
 import type { EnvironmentId } from "@t3tools/contracts";
-import { useEffect, useEffectEvent, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 
 import { ForkApiError, forkRequest, subscribeForkEvents } from "./forkApiAccess";
 
@@ -46,12 +46,23 @@ export type ForkRefreshFilter = (event: ForkEvent) => boolean;
 const REFRESH_DEBOUNCE_MS = 250;
 /** Linked thread state is read on fetch, not pushed; a slow poll keeps it from going stale. */
 const POLL_INTERVAL_MS = 60_000;
+/** A first read that fails is retried before the view shows an error: the adapter may be waking. */
+const FIRST_READ_RETRY_MS = [2_000, 5_000, 10_000] as const;
+
+const asForkError = (error: unknown) =>
+  error instanceof ForkApiError
+    ? error
+    : new ForkApiError(0, "network", error instanceof Error ? error.message : String(error));
+
+const isRetryable = (error: ForkApiError) =>
+  error.status === 0 || error.status >= 500 || error.code === "unreachable";
 
 export interface ForkResource<T> {
   readonly data: T | null;
   readonly error: ForkApiError | null;
   readonly loading: boolean;
-  readonly refresh: () => void;
+  /** Reads again; resolves once a read that started after the call has settled. */
+  readonly refresh: () => Promise<void>;
 }
 
 export function useForkResource<T>(
@@ -62,55 +73,93 @@ export function useForkResource<T>(
   const key = environmentId === null || path === null ? null : `${environmentId}\u0000${path}`;
   const [state, setState] = useState<{
     readonly key: string | null;
-    readonly version: number;
     readonly data: T | null;
     readonly error: ForkApiError | null;
-  }>({ key: null, version: -1, data: null, error: null });
-  const [version, setVersion] = useState(0);
+    readonly loading: boolean;
+  }>({ key: null, data: null, error: null, loading: false });
+  const request = useRef<((done?: () => void) => void) | null>(null);
+  const shouldRefresh = useEffectEvent(refreshOn);
 
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- fetches the resource from the environment's server
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- fetches the resource from the environment's server and follows its events and a visibility-aware poll
   useEffect(() => {
     if (environmentId === null || path === null) return;
     const controller = new AbortController();
-    const settle = (data: T | null, error: ForkApiError | null) =>
-      setState((current) => ({
-        key,
-        version,
-        // A failed refresh keeps what was shown, so a blip does not blank the view.
-        data: error !== null && current.key === key ? current.data : data,
-        error,
-      }));
-    forkRequest<T>(environmentId, path, { signal: controller.signal }).then(
-      (data) => {
-        if (!controller.signal.aborted) settle(data, null);
-      },
-      (error: unknown) => {
-        if (controller.signal.aborted) return;
-        settle(
-          null,
-          error instanceof ForkApiError
-            ? error
-            : new ForkApiError(
-                0,
-                "network",
-                error instanceof Error ? error.message : String(error),
-              ),
-        );
-      },
-    );
-    return () => controller.abort();
-  }, [environmentId, path, key, version]);
+    // A refresh asked for mid-read waits for that read and runs once after it, instead of
+    // aborting it: under a burst of events, aborting would never let a slow read finish.
+    let running = false;
+    let again = false;
+    let waiters: Array<() => void> = [];
+    let hasData = false;
+    let failures = 0;
+    let retry: ReturnType<typeof setTimeout> | null = null;
 
-  const shouldRefresh = useEffectEvent(refreshOn);
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- debounces server events and a visibility-aware poll into refetches
-  useEffect(() => {
-    if (environmentId === null || path === null) return;
+    const run = async () => {
+      running = true;
+      again = false;
+      const owned = waiters;
+      waiters = [];
+      setState((current) =>
+        current.key === key
+          ? // With nothing to show, a retry reads as loading, not as the last error.
+            { ...current, error: hasData ? current.error : null, loading: true }
+          : { key, data: null, error: null, loading: true },
+      );
+      try {
+        const data = await forkRequest<T>(environmentId, path, { signal: controller.signal });
+        if (controller.signal.aborted) return;
+        hasData = true;
+        failures = 0;
+        setState({ key, data, error: null, loading: false });
+      } catch (raw) {
+        if (controller.signal.aborted) return;
+        const error = asForkError(raw);
+        const delay = hasData || !isRetryable(error) ? undefined : FIRST_READ_RETRY_MS[failures];
+        if (delay !== undefined) {
+          failures += 1;
+          // A refresh asked for meanwhile runs right away instead.
+          if (!again) {
+            retry = setTimeout(() => {
+              retry = null;
+              void run();
+            }, delay);
+          }
+          return;
+        }
+        // A failed refresh keeps what was shown, so a blip does not blank the view.
+        setState((current) => ({
+          key,
+          data: current.key === key ? current.data : null,
+          error,
+          loading: false,
+        }));
+      } finally {
+        running = false;
+        for (const done of owned) done();
+        if (again && !controller.signal.aborted) void run();
+      }
+    };
+
+    const requestRead = (done?: () => void) => {
+      if (done) waiters.push(done);
+      if (running) {
+        again = true;
+        return;
+      }
+      if (retry !== null) {
+        clearTimeout(retry);
+        retry = null;
+      }
+      void run();
+    };
+    request.current = requestRead;
+    requestRead();
+
     let timer: ReturnType<typeof setTimeout> | null = null;
     const bump = () => {
       if (timer !== null) return;
       timer = setTimeout(() => {
         timer = null;
-        setVersion((value) => value + 1);
+        requestRead();
       }, REFRESH_DEBOUNCE_MS);
     };
     const stop = subscribeToForkEvents(environmentId, (event) => {
@@ -120,17 +169,25 @@ export function useForkResource<T>(
       if (document.visibilityState === "visible") bump();
     }, POLL_INTERVAL_MS);
     return () => {
+      controller.abort();
       stop();
       clearInterval(poll);
       if (timer !== null) clearTimeout(timer);
+      if (retry !== null) clearTimeout(retry);
+      if (request.current === requestRead) request.current = null;
+      for (const done of waiters) done();
     };
-  }, [environmentId, path]);
+  }, [environmentId, path, key]);
 
   const current = state.key === key;
   return {
     data: current ? state.data : null,
     error: current ? state.error : null,
-    loading: key !== null && (!current || state.version !== version),
-    refresh: () => setVersion((value) => value + 1),
+    loading: key !== null && (!current || state.loading),
+    refresh: () =>
+      new Promise<void>((resolve) => {
+        if (request.current) request.current(resolve);
+        else resolve();
+      }),
   };
 }

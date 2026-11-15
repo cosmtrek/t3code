@@ -61,7 +61,13 @@ import {
   type InboxFilter,
   type InboxView,
 } from "./inboxView";
-import { copyItemContext, markItem, openItemInApp, topicPath } from "./itemActions";
+import {
+  copyItemContext,
+  markItem,
+  openItemInApp,
+  topicPath,
+  type MarkTarget,
+} from "./itemActions";
 import { TopicDetail } from "./TopicDetail";
 import { useInboxOverviews, type EnvironmentInbox } from "./useInboxOverviews";
 
@@ -175,6 +181,13 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
   const [filter, setFilter] = useState<InboxFilter>("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [delegating, setDelegating] = useState<InboxItem | null>(null);
+  // Marks sent but not yet read back, shown at once so the list answers the click.
+  const [pendingMarks, setPendingMarks] = useState<
+    ReadonlyMap<
+      string,
+      { readonly state: MarkTarget; readonly markedAt: string; readonly token: symbol }
+    >
+  >(new Map());
 
   const refreshChannel = (event: { type: string; channelId?: string }) =>
     event.type === "channels" || (event.type === "inbox" && event.channelId === channel.id);
@@ -183,7 +196,16 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
     `/inbox/items?channelId=${encodeURIComponent(channel.id)}`,
     refreshChannel,
   );
-  const items = listing.data?.items ?? [];
+  const items = (listing.data?.items ?? []).map((item) => {
+    const pending = pendingMarks.get(item.id);
+    return pending?.state
+      ? {
+          ...item,
+          state: pending.state,
+          mark: { state: pending.state, markedAt: pending.markedAt },
+        }
+      : item;
+  });
   const selected = items.find((item) => item.id === selectedId) ?? null;
   const detail = useForkResource<TopicDetailData>(
     selected ? environmentId : null,
@@ -193,9 +215,26 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
   const visible = items.filter((item) => inView(view, filter, item));
   const readOnly = listing.data?.access.stale ?? !channel.access.send;
   const banner = channelBanner(channel);
+  const onMark = async (item: InboxItem, state: MarkTarget) => {
+    const token = Symbol(item.id);
+    const settle = () =>
+      setPendingMarks((current) => {
+        if (current.get(item.id)?.token !== token) return current;
+        const next = new Map(current);
+        next.delete(item.id);
+        return next;
+      });
+    setPendingMarks((current) =>
+      new Map(current).set(item.id, { state, markedAt: new Date().toISOString(), token }),
+    );
+    // The event stream may be down; read the list back rather than wait for the poll.
+    if (await markItem(environmentId, item, state)) await listing.refresh();
+    settle();
+  };
   const handlers = {
     onSelect: (item: InboxItem) => setSelectedId(item.id),
     onDelegate: (item: InboxItem) => setDelegating(item),
+    onMark: (item: InboxItem, state: MarkTarget) => void onMark(item, state),
   };
   const conversationTopics = selected
     ? items
@@ -208,8 +247,8 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
   let list: ReactNode;
   if (!channel.access.read) {
     list = <InboxEmpty icon={<PlugZapIcon />} title="Channel unavailable" settingsLink />;
-  } else if (listing.error) {
-    list = <p className="px-4 py-6 text-sm text-destructive-foreground">{listing.error.message}</p>;
+  } else if (listing.data === null && listing.error) {
+    list = <ReadError message={listing.error.message} onRetry={() => void listing.refresh()} />;
   } else if (listing.data === null) {
     list = <p className="px-4 py-6 text-sm text-muted-foreground">Loading…</p>;
   } else if (visible.length === 0) {
@@ -367,6 +406,7 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
                   readOnly={readOnly}
                   onSelect={() => setSelectedId(topic.id)}
                   onDelegate={() => setDelegating(topic)}
+                  onMark={(state) => handlers.onMark(topic, state)}
                 />
               ))}
             </ul>
@@ -415,6 +455,7 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
                   item={selected}
                   readOnly={readOnly}
                   onDelegate={handlers.onDelegate}
+                  onMark={handlers.onMark}
                 />
               </div>
               {detail.data && detail.data.item.id === selected.id ? (
@@ -424,7 +465,7 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
                   sendingOff={readOnly}
                 />
               ) : detail.error ? (
-                <p className="p-4 text-sm text-destructive-foreground">{detail.error.message}</p>
+                <ReadError message={detail.error.message} onRetry={() => void detail.refresh()} />
               ) : (
                 <p className="p-4 text-sm text-muted-foreground">Loading…</p>
               )}
@@ -446,6 +487,23 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
   );
 }
 
+function ReadError({
+  message,
+  onRetry,
+}: {
+  readonly message: string;
+  readonly onRetry: () => void;
+}) {
+  return (
+    <div className="flex flex-col items-start gap-2 px-4 py-6">
+      <p className="text-sm text-destructive-foreground">{message}</p>
+      <Button size="sm" variant="outline" onClick={onRetry}>
+        Retry
+      </Button>
+    </div>
+  );
+}
+
 function TopicCard({
   environmentId,
   item,
@@ -453,6 +511,7 @@ function TopicCard({
   readOnly,
   onSelect,
   onDelegate,
+  onMark,
 }: {
   readonly environmentId: EnvironmentId;
   readonly item: InboxItem;
@@ -460,6 +519,7 @@ function TopicCard({
   readonly readOnly: boolean;
   readonly onSelect: () => void;
   readonly onDelegate: () => void;
+  readonly onMark: (state: MarkTarget) => void;
 }) {
   const marked = item.state === "done" || item.state === "ignored";
   return (
@@ -499,7 +559,7 @@ function TopicCard({
               size="icon-xs"
               variant="ghost"
               aria-label="Mark done"
-              onClick={() => void markItem(environmentId, item, "done")}
+              onClick={() => onMark("done")}
             >
               <CheckIcon />
             </Button>
@@ -507,7 +567,7 @@ function TopicCard({
               size="icon-xs"
               variant="ghost"
               aria-label="Ignore"
-              onClick={() => void markItem(environmentId, item, "ignored")}
+              onClick={() => onMark("ignored")}
             >
               <EyeOffIcon />
             </Button>

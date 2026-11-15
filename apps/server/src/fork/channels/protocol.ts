@@ -16,7 +16,7 @@ const Author = Schema.Struct({
 const OptionalText = Schema.optional(Schema.NullOr(Schema.String));
 
 /** ISO 8601 with a time zone (`Z` or an offset), so times compare across adapters. */
-const Timestamp = Schema.String.check(
+export const Timestamp = Schema.String.check(
   Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/u),
 );
 
@@ -120,15 +120,35 @@ export const AdapterError = Schema.Struct({
  * each time the stream opens, since anything may have changed while it was closed.
  */
 export type ChannelEvent =
-  | { readonly type: "message.created" }
+  | {
+      readonly type: "message.created";
+      readonly conversationId?: string;
+      readonly topicId?: string;
+    }
   | { readonly type: "health.changed" }
   | { readonly type: "connected" };
 
+const decodeMessageCreated = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Struct({
+      conversationId: Schema.optional(Schema.String),
+      topicId: Schema.optional(Schema.String),
+    }),
+  ),
+);
+
 /** One SSE frame from `/events`. A known event counts even when its data does not parse. */
-export function parseChannelEvent(event: string, _data: string): ChannelEvent | null {
+export function parseChannelEvent(event: string, data: string): ChannelEvent | null {
   if (event === "health.changed") return { type: "health.changed" };
-  if (event === "message.created") return { type: "message.created" };
-  return null;
+  if (event !== "message.created") return null;
+  const named = decodeMessageCreated(data);
+  if (named._tag === "None") return { type: "message.created" };
+  const { conversationId, topicId } = named.value;
+  return {
+    type: "message.created",
+    ...(conversationId === undefined ? {} : { conversationId }),
+    ...(topicId === undefined ? {} : { topicId }),
+  };
 }
 
 /** Splits an SSE byte stream into (event, data) frames. Keeps a partial frame between chunks. */

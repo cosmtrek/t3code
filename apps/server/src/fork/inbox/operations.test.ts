@@ -158,6 +158,8 @@ let channelCounter = 0;
 
 interface Harness {
   readonly channelId: string;
+  /** Every path asked of the adapter. */
+  readonly requests: string[];
   readonly runtime: InboxRuntime["Service"];
   readonly shells: Map<string, OrchestrationV2ThreadShell | null>;
   readonly layer: Layer.Layer<
@@ -181,10 +183,14 @@ async function harness(
   const tokenFile = NodePath.join(dir, "token");
   await NodeFSP.writeFile(tokenFile, `${TOKEN}\n`, { mode: 0o600 });
   const handle = fakeAdapter(topics, sendAnswer);
+  const requests: string[] = [];
   const hub = new ChannelHub({
     configPath: NodePath.join(dir, "channels.json"),
     transportFor: () => ({
-      request: async (request) => handle(request),
+      request: async (request) => {
+        requests.push(request.path);
+        return handle(request);
+      },
       events: () => new Promise(() => undefined),
     }),
     background: false,
@@ -221,6 +227,7 @@ async function harness(
   );
   return {
     channelId,
+    requests,
     runtime,
     shells,
     layer,
@@ -313,6 +320,30 @@ describe("inbox listing", () => {
       const result = yield* Inbox.listItems(h.channelId).pipe(Effect.provide(h.layer));
       expect(result.items[0]).toMatchObject({ state: "waiting", mark: null });
       expect(h.runtime.store.listMarks(h.channelId)).toEqual([]);
+    }),
+  );
+
+  it.effect("marks with the client's last message without reading the channel", () =>
+    Effect.gen(function* () {
+      const messages: FakeMessage[] = [{ id: "m1", minute: 1, author: THEM }];
+      const h = yield* Effect.promise(() =>
+        harness(() => [{ conversationId: "c", topicId: "t", messages }]),
+      );
+      const key = h.keyOf("c", "t");
+      h.requests.length = 0;
+      yield* Inbox.mark({ ...key, state: "ignored", lastMessageAt: at(1) }).pipe(
+        Effect.provide(h.layer),
+      );
+      expect(h.requests).toEqual([]);
+      expect(h.runtime.store.listMarks(h.channelId)).toMatchObject([
+        { state: "ignored", watermarkMessageAt: at(1) },
+      ]);
+      // An older client reads only the topic's own conversation.
+      yield* Inbox.mark({ ...key, state: "done" }).pipe(Effect.provide(h.layer));
+      expect(h.requests.every((path) => path.startsWith("/conversations/c/topics"))).toBe(true);
+      expect(h.runtime.store.listMarks(h.channelId)).toMatchObject([
+        { state: "done", watermarkMessageAt: at(1) },
+      ]);
     }),
   );
 
