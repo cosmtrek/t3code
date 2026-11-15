@@ -1,3 +1,4 @@
+import { LegendList } from "@legendapp/list/react";
 import type { EnvironmentId } from "@t3tools/contracts";
 import {
   BotIcon,
@@ -16,7 +17,14 @@ import { cn } from "../../lib/utils";
 import type { InboxItem } from "../types";
 import { copyItemContext, openItemInApp, type MarkTarget } from "./itemActions";
 import { useNowMinute } from "../../hooks/useNowMinute";
-import { STATE_LABELS, isOverdue, itemMeta, nameOrUnknown, waitLabel } from "./inboxView";
+import {
+  STATE_LABELS,
+  isOverdue,
+  itemMeta,
+  minuteToMs,
+  nameOrUnknown,
+  waitLabel,
+} from "./inboxView";
 
 export interface ItemHandlers {
   readonly onSelect: (item: InboxItem) => void;
@@ -146,7 +154,7 @@ function ItemRow({
   const marked = item.state === "done" || item.state === "ignored";
 
   return (
-    <li className="relative overflow-hidden border-b border-border/50">
+    <div className="relative overflow-hidden border-b border-border/50">
       <div
         className={cn("absolute inset-y-0 right-0 flex", !swiped && !dragging && "invisible")}
         aria-hidden={!swiped}
@@ -229,7 +237,7 @@ function ItemRow({
           onMark={handlers.onMark}
         />
       </div>
-    </li>
+    </div>
   );
 }
 
@@ -246,12 +254,15 @@ export function InboxList({
   readonly readOnly: boolean;
   readonly handlers: ItemHandlers;
 }) {
-  const now = Date.parse(useNowMinute());
+  const now = minuteToMs(useNowMinute());
+  // "All" can hold a thousand topics per conversation; only the rows in view are mounted.
   return (
-    <ul className="flex flex-col">
-      {items.map((item) => (
+    <LegendList<InboxItem>
+      data={items}
+      keyExtractor={(item) => item.id}
+      extraData={{ selectedId, now, readOnly, handlers }}
+      renderItem={({ item }) => (
         <ItemRow
-          key={item.id}
           environmentId={environmentId}
           item={item}
           now={now}
@@ -259,7 +270,10 @@ export function InboxList({
           readOnly={readOnly}
           handlers={handlers}
         />
-      ))}
-    </ul>
+      )}
+      estimatedItemSize={78}
+      drawDistance={600}
+      className="min-h-0 flex-1 overscroll-contain"
+    />
   );
 }
