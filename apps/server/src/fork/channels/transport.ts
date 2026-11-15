@@ -8,6 +8,8 @@ export interface AdapterRequest {
   readonly path: string;
   readonly body?: unknown;
   readonly token: string | null;
+  /** A file the adapter may first fetch from its service; it gets more time and room. */
+  readonly media?: boolean;
 }
 
 export interface AdapterResponse {
@@ -33,8 +35,9 @@ export interface ChannelTransport {
   ) => Promise<void>;
 }
 
-const REQUEST_TIMEOUT_MS = 10_000;
-const MAX_RESPONSE_BYTES = 25 * 1024 * 1024;
+const LIMITS = { timeoutMs: 10_000, maxBytes: 25 * 1024 * 1024 };
+// Chat videos and documents run to tens of megabytes; the adapter may download them first.
+const MEDIA_LIMITS = { timeoutMs: 120_000, maxBytes: 200 * 1024 * 1024 };
 
 const authHeaders = (token: string | null): Record<string, string> =>
   token === null ? {} : { authorization: `Bearer ${token}` };
@@ -43,7 +46,8 @@ const authHeaders = (token: string | null): Record<string, string> =>
 export function httpTransport(rawBaseUrl: string): ChannelTransport {
   const baseUrl = resolveLoopbackBase(rawBaseUrl);
   return {
-    request: async ({ method, path, body, token }) => {
+    request: async ({ method, path, body, token, media }) => {
+      const limits = media ? MEDIA_LIMITS : LIMITS;
       let response: Response;
       try {
         response = await fetch(`${baseUrl}${path}`, {
@@ -55,7 +59,7 @@ export function httpTransport(rawBaseUrl: string): ChannelTransport {
           },
           ...(body === undefined ? {} : { body: JSON.stringify(body) }),
           redirect: "error",
-          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+          signal: AbortSignal.timeout(limits.timeoutMs),
         });
       } catch (error) {
         throw new AdapterUnreachableError(
@@ -65,12 +69,12 @@ export function httpTransport(rawBaseUrl: string): ChannelTransport {
         );
       }
       const declared = Number(response.headers.get("content-length") ?? "0");
-      if (declared > MAX_RESPONSE_BYTES) {
+      if (declared > limits.maxBytes) {
         await response.body?.cancel();
         throw new Error(`The adapter answered with ${declared} bytes, more than allowed.`);
       }
       const bytes = new Uint8Array(await response.arrayBuffer());
-      if (bytes.byteLength > MAX_RESPONSE_BYTES) {
+      if (bytes.byteLength > limits.maxBytes) {
         throw new Error("The adapter's answer is larger than allowed.");
       }
       return {

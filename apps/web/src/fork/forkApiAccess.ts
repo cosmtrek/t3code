@@ -10,6 +10,7 @@ import {
   withDeviceHubQuery,
 } from "@t3tools/client-runtime/state/deviceHubAccess";
 import type { EnvironmentId } from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
@@ -19,6 +20,9 @@ import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentSession } from "../state/session";
 
 const FORK_API_BASE_PATH = "/api/fork";
+/** Media tickets live five minutes on the server; renew a little before that. */
+const TICKET_RENEW_AFTER_MS = 4 * 60_000;
+const mintedAt = new WeakMap<DeviceHubAccess, number>();
 
 const forkAccessAtom = Atom.family((environmentId: EnvironmentId) =>
   connectionAtomRuntime
@@ -27,7 +31,11 @@ const forkAccessAtom = Atom.family((environmentId: EnvironmentId) =>
         get(environmentSession.preparedConnectionValueAtom(environmentId)),
       );
       if (prepared === null) return Effect.never;
-      return resolveDeviceHubAccess({ prepared, hubBasePath: FORK_API_BASE_PATH });
+      return resolveDeviceHubAccess({ prepared, hubBasePath: FORK_API_BASE_PATH }).pipe(
+        Effect.tap((access) =>
+          Clock.currentTimeMillis.pipe(Effect.map((now) => mintedAt.set(access, now))),
+        ),
+      );
     })
     .pipe(Atom.setIdleTTL(60_000), Atom.withLabel(`fork-api-access:${environmentId}`)),
 );
@@ -46,6 +54,17 @@ export function useForkAccess(environmentId: EnvironmentId | null): DeviceHubAcc
 /** Mints a fresh ticket, for a media request that failed on an expired one. */
 export function renewForkAccess(environmentId: EnvironmentId): void {
   appAtomRegistry.refresh(forkAccessAtom(environmentId));
+}
+
+/**
+ * Renews a ticket about to expire. A link cannot see its own failure the way an image can, so
+ * links call this when the pointer or focus reaches them, before the click.
+ */
+export function renewStaleForkAccess(environmentId: EnvironmentId, access: DeviceHubAccess): void {
+  if (access.credentials) return;
+  if (Date.now() - (mintedAt.get(access) ?? 0) > TICKET_RENEW_AFTER_MS) {
+    renewForkAccess(environmentId);
+  }
 }
 
 /** The current access, or a fresh ticket after a 401. Resolves null when none can be had. */
