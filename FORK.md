@@ -264,6 +264,8 @@ The adapter protocol (v1) is defined by `apps/server/src/fork/channels/protocol.
 [docs/fork/channel-protocol.md](docs/fork/channel-protocol.md) explains it, and
 `channels/fixtures/` holds a valid answer per endpoint for adapters' contract tests. The example
 channel (`channels/example/exampleChannel.ts`) implements all of it with made-up data.
+[docs/fork/inbox-architecture.md](docs/fork/inbox-architecture.md) shows where the inbox sits in
+T3 Code and how a request moves through it.
 
 ### Inbox seams
 
