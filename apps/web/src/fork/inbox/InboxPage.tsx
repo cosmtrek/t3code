@@ -12,7 +12,7 @@ import {
   MessagesSquareIcon,
   PlugZapIcon,
 } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { WorkspacePageHeader } from "../../components/WorkspacePageHeader";
 import { Button } from "../../components/ui/button";
@@ -53,6 +53,7 @@ import {
   INBOX_VIEWS,
   STATE_LABELS,
   channelBanner,
+  conversationTopicsOf,
   emptyViewTitle,
   minuteToMs,
   inView,
@@ -238,13 +239,23 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
     onDelegate: (item: InboxItem) => setDelegating(item),
     onMark: (item: InboxItem, state: MarkTarget) => void onMark(item, state),
   };
-  const conversationTopics = selected
-    ? items
-        .filter((item) => item.conversationId === selected.conversationId)
-        .toSorted((left, right) => right.lastMessageAt.localeCompare(left.lastMessageAt))
-    : [];
+  const conversationTopics = conversationTopicsOf(items, selected);
   // A conversation with one topic would only repeat the list's card.
   const showConversation = conversationTopics.length > 1;
+  const conversationRef = useRef<HTMLElement>(null);
+  const selectedTopicId = selected?.id ?? null;
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- scrolls the DOM to the newly selected topic; list refreshes must not pull a reader back down
+  useEffect(() => {
+    const container = conversationRef.current;
+    if (!showConversation || container === null) return;
+    const card =
+      selectedTopicId === null
+        ? null
+        : container.querySelector(`[data-item-id="${CSS.escape(selectedTopicId)}"]`);
+    if (card) card.scrollIntoView({ block: "nearest" });
+    else container.scrollTop = container.scrollHeight;
+  }, [conversationRef, selectedTopicId, showConversation]);
 
   let list: ReactNode;
   if (!channel.access.read) {
@@ -392,6 +403,7 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
 
         {showConversation && selected ? (
           <section
+            ref={conversationRef}
             aria-label="Conversation"
             className="scrollbar-gutter-both hidden min-h-0 min-w-0 flex-1 flex-col overflow-y-auto overscroll-contain @5xl/inbox:flex"
           >
@@ -527,8 +539,9 @@ function TopicCard({
   const marked = item.state === "done" || item.state === "ignored";
   return (
     <li
+      data-item-id={item.id}
       className={cn(
-        "group relative rounded-lg border border-border/70 p-3",
+        "group relative scroll-mt-12 rounded-lg border border-border/70 p-3",
         selected && "border-primary/50 bg-accent/40",
       )}
     >
