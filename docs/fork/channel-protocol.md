@@ -45,6 +45,8 @@ is "Sign-in needed" (reading works, sending does not); `online: false` is "Colle
 - A page whose `items` or `nextCursor` is malformed fails as a whole. An item that does not decode
   (a missing field, a time without a zone) is skipped, counted, and reported in the inbox as
   "N items from the adapter could not be read."
+- An attachment `kind` other than `image` (`audio`, `video`, `sticker`, …) is read as `file`,
+  so a new kind in the chat app does not drop the message.
 - Direct messages have no topics of their own: the adapter splits them into topics, by time
   window or however it likes. T3 does not.
 
