@@ -37,41 +37,52 @@ export function useInboxOverviews(): ReadonlyArray<EnvironmentInbox> {
     }>;
     let cancelled = false;
     const timers = new Map<EnvironmentId, ReturnType<typeof setTimeout>>();
+    // A load asked for mid-read runs once after it, so overlapping reads do not pile up.
+    const running = new Map<EnvironmentId, { again: boolean }>();
     const load = (target: (typeof targets)[number]) => {
-      forkRequest<{ channels: ReadonlyArray<InboxChannelSummary> }>(
-        target.id,
-        "/inbox/overview",
-      ).then(
-        (overview) => {
-          if (cancelled) return;
-          setOverviews((current) => {
-            const next = new Map(current);
-            if (overview.channels.length === 0) next.delete(target.id);
-            else {
-              next.set(target.id, {
-                environmentId: target.id,
-                label: target.label,
-                channels: overview.channels,
-                pendingCount: overview.channels.reduce(
-                  (sum, channel) => sum + (channel.pendingCount ?? 0),
-                  0,
-                ),
-              });
-            }
-            return next;
-          });
-        },
-        (error: unknown) => {
-          // Only a server without the inbox drops out; a blip keeps what was last read.
-          if (cancelled || !(error instanceof ForkApiError) || error.status !== 404) return;
-          setOverviews((current) => {
-            if (!current.has(target.id)) return current;
-            const next = new Map(current);
-            next.delete(target.id);
-            return next;
-          });
-        },
-      );
+      const inFlight = running.get(target.id);
+      if (inFlight) {
+        inFlight.again = true;
+        return;
+      }
+      const run = { again: false };
+      running.set(target.id, run);
+      forkRequest<{ channels: ReadonlyArray<InboxChannelSummary> }>(target.id, "/inbox/overview")
+        .then(
+          (overview) => {
+            if (cancelled) return;
+            setOverviews((current) => {
+              const next = new Map(current);
+              if (overview.channels.length === 0) next.delete(target.id);
+              else {
+                next.set(target.id, {
+                  environmentId: target.id,
+                  label: target.label,
+                  channels: overview.channels,
+                  pendingCount: overview.channels.reduce(
+                    (sum, channel) => sum + (channel.pendingCount ?? 0),
+                    0,
+                  ),
+                });
+              }
+              return next;
+            });
+          },
+          (error: unknown) => {
+            // Only a server without the inbox drops out; a blip keeps what was last read.
+            if (cancelled || !(error instanceof ForkApiError) || error.status !== 404) return;
+            setOverviews((current) => {
+              if (!current.has(target.id)) return current;
+              const next = new Map(current);
+              next.delete(target.id);
+              return next;
+            });
+          },
+        )
+        .finally(() => {
+          running.delete(target.id);
+          if (run.again && !cancelled) load(target);
+        });
     };
     const stops = targets.map((target) => {
       load(target);

@@ -22,7 +22,7 @@ step with the code. Adapters should check their real answers against the same fi
 | `GET /health`                                                | `ChannelHealth` (`health.json`)               |
 | `GET /config`                                                | `AdapterConfig` (`config.json`)               |
 | `GET /conversations?relevant=1&limit=100`                    | page of `Conversation` (`conversations.json`) |
-| `GET /conversations/{id}/topics?limit=50`                    | page of `Topic` (`topics.json`)               |
+| `GET /conversations/{id}/topics?limit=200`                   | page of `Topic` (`topics.json`)               |
 | `GET /conversations/{id}/messages?topic={topicId}&limit=200` | page of `Message` (`messages.json`)           |
 | `GET /media/{messageId}/{key}`                               | the file's bytes, with its `content-type`     |
 | `POST /messages`                                             | `{ "messageId" }` (`send-ok.json`)            |
@@ -72,7 +72,9 @@ of `not_logged_in`, `rate_limited`, `rejected`, `unknown`.
 lists again.
 
 - `message.created`: a message arrived. Its data may name `conversationId`, `topicId`, and
-  `messageId`, but nothing requires them, and data T3 cannot parse still counts.
+  `messageId`, but nothing requires them, and data T3 cannot parse still counts. With a
+  `conversationId`, T3 reads again only the conversation list and that conversation; without
+  one, everything.
 - `health.changed`: T3 checks `/health` again.
 
 Other event names are ignored. T3 reads everything again each time the stream (re)connects, so

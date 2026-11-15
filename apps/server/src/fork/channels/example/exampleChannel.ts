@@ -255,7 +255,7 @@ export function createExampleChannel(
 
   const append = (conversation: ExampleConversation, item: ExampleMessage) => {
     conversation.messages.push(item);
-    emit({ type: "message.created" });
+    emit({ type: "message.created", conversationId: conversation.id, topicId: item.topicId });
   };
 
   const send = (body: unknown): AdapterResponse => {

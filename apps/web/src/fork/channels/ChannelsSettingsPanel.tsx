@@ -103,7 +103,7 @@ function EnvironmentChannels({
   const resource = useForkResource<{ readonly channels: ReadonlyArray<ChannelView> }>(
     environmentId,
     "/channels",
-    (event) => event.type === "channels",
+    (event) => event.type === "channels" || event.type === "sync",
   );
   const [openId, setOpenId] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);

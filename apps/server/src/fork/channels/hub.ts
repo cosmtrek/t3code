@@ -88,7 +88,9 @@ export interface ChannelView {
 /** What reaches the browser: which local channel changed, never an adapter's own ids. */
 export type HubEvent =
   | { readonly type: "channels" }
-  | { readonly type: "inbox"; readonly channelId: string };
+  | { readonly type: "inbox"; readonly channelId: string }
+  /** Only `lastSyncAt` or the latency moved: nothing a list shows, just "synced x ago". */
+  | { readonly type: "sync"; readonly channelId: string };
 
 export class ChannelUnavailableError extends Error {
   readonly channelId: string;
@@ -122,6 +124,10 @@ interface Runtime {
   health: ChannelHealth | null;
   config: AdapterConfig | null;
   cache: Map<string, { readonly at: number; readonly value: unknown }>;
+  /** Reads under way, so concurrent views of one path share one adapter request. */
+  inflight: Map<string, Promise<{ readonly value: unknown; readonly stale: boolean }>>;
+  /** Bumped on every invalidation; a read that started before one does not fill the cache. */
+  generation: number;
   lastGood: Map<string, unknown>;
   stop: AbortController;
   checking: Promise<void> | null;
@@ -340,7 +346,7 @@ export class ChannelHub {
     }
     this.example.setSimulation(simulation);
     // Like a real outage: what was read stays readable, only fresh reads are dropped.
-    runtime.cache.clear();
+    this.dropCached(runtime);
     await this.runCheck(runtime, { force: true });
     return this.view(runtime);
   }
@@ -367,6 +373,23 @@ export class ChannelHub {
       return { value: cached.value as A, stale: false };
     }
     if (access.stale) return this.lastGood<A>(runtime, path);
+    // A path always decodes with the same schema, so a shared read fits every caller.
+    const pending = runtime.inflight.get(path);
+    if (pending) return pending as Promise<{ readonly value: A; readonly stale: boolean }>;
+    const read = this.readJson(runtime, path, schema).finally(() => {
+      if (runtime.inflight.get(path) === read) runtime.inflight.delete(path);
+    });
+    runtime.inflight.set(path, read);
+    return read;
+  }
+
+  private async readJson<A>(
+    runtime: Runtime,
+    path: string,
+    schema: Schema.Decoder<A>,
+  ): Promise<{ readonly value: A; readonly stale: boolean }> {
+    const channelId = runtime.entry.id;
+    const generation = runtime.generation;
     let response: AdapterResponse;
     try {
       response = await runtime.transport.request({ method: "GET", path, token: runtime.token });
@@ -395,7 +418,7 @@ export class ChannelHub {
       );
     }
     const value = redactToken(decoded.value, runtime.token);
-    runtime.cache.set(path, { at: this.now(), value });
+    if (runtime.generation === generation) runtime.cache.set(path, { at: this.now(), value });
     runtime.lastGood.delete(path);
     runtime.lastGood.set(path, value);
     if (runtime.lastGood.size > LAST_GOOD_LIMIT) {
@@ -497,7 +520,21 @@ export class ChannelHub {
 
   /** Drops cached lists so the next read asks the adapter. */
   invalidate(channelId: string): void {
-    this.runtimes.get(channelId)?.cache.clear();
+    const runtime = this.runtimes.get(channelId);
+    if (runtime) this.dropCached(runtime);
+  }
+
+  /** Drops cached answers whose path starts with one of `prefixes`, or all of them. */
+  private dropCached(runtime: Runtime, prefixes?: ReadonlyArray<string>) {
+    runtime.generation += 1;
+    runtime.inflight.clear();
+    if (prefixes === undefined) {
+      runtime.cache.clear();
+      return;
+    }
+    for (const path of runtime.cache.keys()) {
+      if (prefixes.some((prefix) => path.startsWith(prefix))) runtime.cache.delete(path);
+    }
   }
 
   private lastGood<T>(runtime: Runtime, path: string): { value: T; stale: boolean } {
@@ -574,6 +611,8 @@ export class ChannelHub {
       health: null,
       config: null,
       cache: new Map(),
+      inflight: new Map(),
+      generation: 0,
       lastGood: new Map(),
       stop: new AbortController(),
       checking: null,
@@ -625,9 +664,19 @@ export class ChannelHub {
     }
   }
 
-  /** Any event, or a (re)connected stream, means the lists may have changed. */
+  /**
+   * Any event, or a (re)connected stream, means the lists may have changed. A message that names
+   * its conversation only stales the conversation list and that conversation's own lists.
+   */
   private onEvent(runtime: Runtime, event: ChannelEvent) {
-    runtime.cache.clear();
+    if (event.type === "message.created" && event.conversationId !== undefined) {
+      this.dropCached(runtime, [
+        "/conversations?",
+        `/conversations/${encodeURIComponent(event.conversationId)}/`,
+      ]);
+    } else {
+      this.dropCached(runtime);
+    }
     if (event.type === "health.changed") {
       void this.runCheck(runtime);
       return;
@@ -649,21 +698,33 @@ export class ChannelHub {
   }
 
   private async check(runtime: Runtime) {
-    const before = JSON.stringify([runtime.status, runtime.steps, runtime.health, runtime.config]);
+    // lastSyncAt moves with every message, which the adapter's events already announced, and the
+    // connect step carries the latency; neither changes what a list shows.
+    const full = () => JSON.stringify([runtime.health, runtime.steps]);
+    const material = () =>
+      JSON.stringify([
+        runtime.status,
+        runtime.steps.map((step) => (step.id === "connect" ? { ...step, detail: "" } : step)),
+        runtime.health && { ...runtime.health, lastSyncAt: null },
+        runtime.config,
+      ]);
+    const before = material();
+    const fullBefore = full();
     const result = await this.evaluate(runtime);
     runtime.lastCheckedAt = new Date(this.now()).toISOString();
     if (result.status !== runtime.status) {
       runtime.statusSince = runtime.lastCheckedAt;
       runtime.status = result.status;
-      runtime.cache.clear();
+      this.dropCached(runtime);
     }
     runtime.steps = result.steps;
     if (result.health !== undefined) runtime.health = result.health;
     if (result.config) runtime.config = result.config;
-    const after = JSON.stringify([runtime.status, runtime.steps, runtime.health, runtime.config]);
-    if (before !== after) {
+    if (before !== material()) {
       this.publish({ type: "channels" });
       this.publish({ type: "inbox", channelId: runtime.entry.id });
+    } else if (fullBefore !== full()) {
+      this.publish({ type: "sync", channelId: runtime.entry.id });
     }
   }
 

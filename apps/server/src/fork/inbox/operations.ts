@@ -39,6 +39,7 @@ import {
   Conversation,
   Message,
   SendResult,
+  Timestamp,
   Topic,
   type Conversation as ConversationType,
   type Message as MessageType,
@@ -123,11 +124,11 @@ const badRequest = (detail: string, field?: string) =>
   new ForkHttpError({ status: 400, code: "bad_request", detail, ...(field ? { field } : {}) });
 
 const CONVERSATION_LIMIT = 100;
-const TOPIC_LIMIT = 50;
+const TOPIC_LIMIT = 200;
 const MESSAGE_LIMIT = 200;
 /** Page caps: far above a real inbox, low enough that a looping adapter cannot hang a request. */
 const CONVERSATION_PAGES = 20;
-const TOPIC_PAGES = 20;
+const TOPIC_PAGES = 5;
 const MESSAGE_PAGES = 50;
 const SENDER_HISTORY_MS = 7 * 24 * 3_600_000;
 
@@ -653,8 +654,29 @@ const MarkInput = Schema.Struct({
   conversationId: Schema.String,
   topicId: Schema.String,
   state: Schema.NullOr(Schema.Literals(["done", "ignored"])),
+  /** The topic's last message as the client saw it: what was marked is what the user saw. */
+  lastMessageAt: Schema.optional(Timestamp),
 });
 const decodeMarkInput = Schema.decodeUnknownEffect(MarkInput);
+
+/** Without the client's view, only the topic's own conversation is read, not the whole channel. */
+const topicLastMessageAt = Effect.fn("ForkInbox.topicLastMessageAt")(function* (key: TopicKey) {
+  const { hub } = yield* InboxRuntime;
+  const topics = yield* attempt(() =>
+    hub.getAllPages(key.channelId, topicsPath(key.conversationId), Topic, {
+      maxPages: TOPIC_PAGES,
+    }),
+  );
+  const topic = topics.items.find((candidate) => candidate.id === key.topicId);
+  if (!topic) {
+    return yield* new ForkHttpError({
+      status: 404,
+      code: "missing",
+      detail: "This topic is no longer listed by the channel.",
+    });
+  }
+  return topic.lastMessageAt;
+});
 
 export const mark = Effect.fn("ForkInbox.mark")(function* (body: unknown) {
   const input = yield* decodeMarkInput(body).pipe(
@@ -664,14 +686,14 @@ export const mark = Effect.fn("ForkInbox.mark")(function* (body: unknown) {
   if (input.state === null) {
     runtime.store.clearMark(input);
   } else {
-    const { item } = yield* findTopic(input);
+    const watermarkMessageAt = input.lastMessageAt ?? (yield* topicLastMessageAt(input));
     runtime.store.setMark({
       channelId: input.channelId,
       conversationId: input.conversationId,
       topicId: input.topicId,
       state: input.state,
       markedAt: new Date().toISOString(),
-      watermarkMessageAt: item.lastMessageAt,
+      watermarkMessageAt,
     });
   }
   runtime.hub.publish({ type: "inbox", channelId: input.channelId });
