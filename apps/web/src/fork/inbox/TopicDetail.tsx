@@ -1,7 +1,7 @@
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { ThreadId, type EnvironmentId } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
-import { ExternalLinkIcon, SendIcon } from "lucide-react";
+import { DownloadIcon, ExternalLinkIcon, SendIcon } from "lucide-react";
 import { useState } from "react";
 import type { DeviceHubAccess } from "@t3tools/client-runtime/state/deviceHubAccess";
 
@@ -17,6 +17,7 @@ import {
   forkRequest,
   forkUrl,
   renewForkAccess,
+  renewStaleForkAccess,
   useForkAccess,
 } from "../forkApiAccess";
 import { formatTimestamp } from "../presentation";
@@ -104,6 +105,14 @@ function MessageView({
   const access = useForkAccess(environmentId);
   const self = message.author.isSelf;
   const hasText = message.text.trim().length > 0;
+  if (isSystemNotice(message)) {
+    return (
+      <p className="self-center px-3 text-center text-xs text-muted-foreground">
+        {message.richSummary} ·{" "}
+        <time dateTime={message.createdAt}>{formatTimestamp(message.createdAt)}</time>
+      </p>
+    );
+  }
   return (
     <article
       className={cn(
@@ -147,24 +156,43 @@ function MessageView({
           ) : null}
         </div>
       ) : null}
-      {message.attachments.map((attachment) =>
-        attachment.kind === "image" && access !== null ? (
-          <MediaImage
-            key={attachment.key}
-            environmentId={environmentId}
-            access={access}
-            alt={attachment.name}
-            path={`/inbox/media?${new URLSearchParams({ channelId, messageId: message.id, key: attachment.key }).toString()}`}
-          />
-        ) : (
-          <span
-            key={attachment.key}
-            className="rounded-xl border border-border/60 px-3 py-1.5 text-xs text-muted-foreground"
-          >
-            {attachment.kind === "image" ? "Image" : "File"}: {attachment.name}
-          </span>
-        ),
-      )}
+      {message.attachments.map((attachment) => {
+        if (access === null) {
+          return (
+            <span
+              key={attachment.key}
+              className="rounded-xl border border-border/60 px-3 py-1.5 text-xs text-muted-foreground"
+            >
+              {attachment.kind === "image" ? "Image" : "File"}: {attachment.name}
+            </span>
+          );
+        }
+        const path = `/inbox/media?${new URLSearchParams({ channelId, messageId: message.id, key: attachment.key }).toString()}`;
+        if (attachment.kind === "image") {
+          return (
+            <MediaImage
+              key={attachment.key}
+              environmentId={environmentId}
+              access={access}
+              alt={attachment.name}
+              path={path}
+            />
+          );
+        }
+        return (
+          <div key={attachment.key} className="flex max-w-full min-w-0 flex-col gap-1">
+            {VIDEO_NAME.test(attachment.name) ? (
+              <MediaVideo environmentId={environmentId} access={access} path={path} />
+            ) : null}
+            <MediaLink
+              environmentId={environmentId}
+              access={access}
+              name={attachment.name}
+              path={path}
+            />
+          </div>
+        );
+      })}
       {message.links.length > 0 ? (
         <ul className="flex max-w-full min-w-0 flex-col gap-0.5 text-xs">
           {message.links.map((link) => (
@@ -203,6 +231,81 @@ function MessageView({
         </p>
       ) : null}
     </article>
+  );
+}
+
+/** Feishu's adapter writes join/leave notices as author "1" with only a summary line. */
+const SYSTEM_AUTHOR_ID = "1";
+
+function isSystemNotice(message: InboxMessage): boolean {
+  return (
+    message.author.id === SYSTEM_AUTHOR_ID &&
+    message.text.trim().length === 0 &&
+    message.attachments.length === 0 &&
+    message.links.length === 0 &&
+    !!message.richSummary
+  );
+}
+
+const VIDEO_NAME = /\.(mp4|mov|m4v|webm)$/i;
+
+/** The server names the download from `name`; `download` alone is ignored across origins. */
+function MediaLink({
+  environmentId,
+  access,
+  name,
+  path,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly access: DeviceHubAccess;
+  readonly name: string;
+  readonly path: string;
+}) {
+  const renew = () => renewStaleForkAccess(environmentId, access);
+  return (
+    <a
+      className="inline-flex max-w-full min-w-0 items-center gap-1.5 self-start rounded-xl border border-border/60 px-3 py-1.5 text-xs text-foreground underline-offset-2 hover:underline"
+      href={forkUrl(access, `${path}&${new URLSearchParams({ name }).toString()}`)}
+      download={name}
+      target="_blank"
+      rel="noreferrer noopener"
+      onPointerEnter={renew}
+      onFocus={renew}
+    >
+      <DownloadIcon className="size-3.5 shrink-0" />
+      <span className="truncate">{name}</span>
+    </a>
+  );
+}
+
+/** Loads nothing until played, so a long topic of videos costs no bandwidth. */
+function MediaVideo({
+  environmentId,
+  access,
+  path,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly access: DeviceHubAccess;
+  readonly path: string;
+}) {
+  const [renewed, setRenewed] = useState(false);
+  const [failed, setFailed] = useState(false);
+  if (failed) return null;
+  return (
+    <video
+      controls
+      preload="none"
+      className="max-h-72 max-w-full rounded-xl border border-border/60"
+      src={forkUrl(access, path)}
+      onError={() => {
+        if (renewed) {
+          setFailed(true);
+          return;
+        }
+        setRenewed(true);
+        renewForkAccess(environmentId);
+      }}
+    />
   );
 }
 

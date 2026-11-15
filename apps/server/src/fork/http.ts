@@ -143,16 +143,23 @@ const eventsRoute = (runtime: InboxRuntimeShape) =>
     }),
   );
 
+/** The ASCII fallback keeps old clients working; `filename*` carries the real name. */
+export const attachmentDisposition = (name: string) =>
+  `attachment; filename="${name.replace(/[^\x20-\x7e]|["\\]/g, "_")}"; filename*=UTF-8''${encodeURIComponent(name).replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)}`;
+
 const mediaRoute = (route: ReturnType<typeof makeRoute>) =>
   route(
     "GET",
     `${INBOX}/media`,
     AuthOrchestrationReadScope,
     Effect.gen(function* () {
-      const response = yield* Inbox.media(yield* query);
+      const params = yield* query;
+      const response = yield* Inbox.media(params);
+      const name = params.get("name");
       return HttpServerResponse.uint8Array(response.body, {
         contentType: response.contentType ?? "application/octet-stream",
         headers: {
+          ...(name ? { "content-disposition": attachmentDisposition(name) } : {}),
           "cache-control": "private, max-age=300",
           "x-content-type-options": "nosniff",
           // An adapter's file never runs as a page on this origin.

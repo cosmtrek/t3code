@@ -483,7 +483,12 @@ export class ChannelHub {
         this.unavailableMessage(runtime),
       );
     }
-    const response = await runtime.transport.request({ method: "GET", path, token: runtime.token });
+    const response = await runtime.transport.request({
+      method: "GET",
+      path,
+      token: runtime.token,
+      media: true,
+    });
     if (response.status >= 400) throw adapterError(response, runtime.token);
     return response;
   }
