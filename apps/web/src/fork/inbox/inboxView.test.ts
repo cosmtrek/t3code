@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { emptyViewTitle, itemMeta, minuteToMs, nextReplyText, type DraftSource } from "./inboxView";
+import type { InboxItem } from "../types";
+import {
+  conversationTopicsOf,
+  emptyViewTitle,
+  itemMeta,
+  minuteToMs,
+  nextReplyText,
+  type DraftSource,
+} from "./inboxView";
 
 const draft = (threadId: string, text: string): DraftSource => ({ threadId, text });
 
@@ -43,5 +51,27 @@ describe("itemMeta", () => {
 describe("minuteToMs", () => {
   it("reads useNowMinute's zoneless minute as UTC", () => {
     expect(minuteToMs("2026-11-15T14:41")).toBe(Date.UTC(2026, 10, 15, 14, 41));
+  });
+});
+
+describe("conversationTopicsOf", () => {
+  const topic = (id: string, conversationId: string, lastMessageAt: string) =>
+    ({ id, conversationId, lastMessageAt }) as InboxItem;
+  const items = [
+    topic("c", "group", "2026-11-15T10:05:00Z"),
+    topic("other", "dm", "2026-11-15T10:03:00Z"),
+    topic("b", "group", "2026-11-15T10:01:00Z"),
+    topic("a", "group", "2026-11-15T10:01:00Z"),
+    topic("old", "group", "2026-11-15T09:00:00Z"),
+  ];
+
+  it("lists the selected conversation oldest first, ties by id", () => {
+    expect(conversationTopicsOf(items, { conversationId: "group" }).map((item) => item.id)).toEqual(
+      ["old", "a", "b", "c"],
+    );
+  });
+
+  it("is empty without a selection", () => {
+    expect(conversationTopicsOf(items, null)).toEqual([]);
   });
 });
