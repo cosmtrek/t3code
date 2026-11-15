@@ -19,7 +19,10 @@ const REFRESH_DEBOUNCE_MS = 1_000;
  * Each connected environment's enabled channels. Environments without the inbox (other builds)
  * or without an enabled channel are left out.
  */
-export function useInboxOverviews(): ReadonlyArray<EnvironmentInbox> {
+export function useInboxOverviews(
+  // "synced x ago" is only shown on the inbox page; the sidebar badge ignores sync events.
+  { followSync = false }: { readonly followSync?: boolean } = {},
+): ReadonlyArray<EnvironmentInbox> {
   const { environments } = useEnvironments();
   const connected = environments
     .filter((environment) => environment.connection.phase === "connected")
@@ -86,8 +89,8 @@ export function useInboxOverviews(): ReadonlyArray<EnvironmentInbox> {
     };
     const stops = targets.map((target) => {
       load(target);
-      return subscribeToForkEvents(target.id, () => {
-        if (timers.has(target.id)) return;
+      return subscribeToForkEvents(target.id, (event) => {
+        if ((event.type === "sync" && !followSync) || timers.has(target.id)) return;
         timers.set(
           target.id,
           setTimeout(() => {
@@ -102,7 +105,7 @@ export function useInboxOverviews(): ReadonlyArray<EnvironmentInbox> {
       for (const stop of stops) stop();
       for (const timer of timers.values()) clearTimeout(timer);
     };
-  }, [connectedKey]);
+  }, [connectedKey, followSync]);
 
   const connectedIds = new Set(connected.map((target) => target.id));
   return [...overviews.values()].filter((overview) => connectedIds.has(overview.environmentId));

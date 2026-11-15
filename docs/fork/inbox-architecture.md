@@ -96,15 +96,18 @@ Nothing pushes data to the browser. Every source below only says that a channel 
 `{ type: "inbox", channelId }` on `/api/fork/inbox/events`. The client waits 250 ms, then fetches
 again.
 
-| Source                                                 | Raised by                    |
-| ------------------------------------------------------ | ---------------------------- |
-| Adapter `/events` (any event, or a reconnect)          | `ChannelHub.onEvent`         |
-| Channel status or health changed                       | `ChannelHub.check`           |
-| Only `lastSyncAt` moved (sent as `{ type: "sync" }`)   | `ChannelHub.check`           |
-| A thread wrote to its context folder (300 ms debounce) | `fs.watch` in `InboxRuntime` |
-| A linked thread ran, was archived, or was deleted      | `linkedThreads.ts`           |
-| Save, remove, delegate, send, or mark                  | the operation itself         |
+| Source                                                              | Raised by                    |
+| ------------------------------------------------------------------- | ---------------------------- |
+| Adapter `/events` (any event, or a reconnect)                       | `ChannelHub.onEvent`         |
+| Channel status or health changed                                    | `ChannelHub.check`           |
+| Only `lastSyncAt` moved (sent as `{ type: "sync" }`)                | `ChannelHub.check`           |
+| A thread wrote to its context folder (300 ms debounce)              | `fs.watch` in `InboxRuntime` |
+| A linked thread's run status changed, or it was archived or deleted | `linkedThreads.ts`           |
+| Save, remove, delegate, send, or mark                               | the operation itself         |
 
-Item state is derived on every fetch, so a missed signal is fixed by the next one, or by the
-client's 60 s poll while the page is visible. `inbox.sqlite` stores only what cannot be derived:
+Item state is derived on fetch. Requests for one channel share a derivation until the hub's
+`revision` for it moves (any signal above except `sync`) or it is 10 s old, so a missed signal is
+fixed by the next one, or by the client's 60 s poll while the page is visible. Wait times are not
+sent: the client works them out from `lastMessageAt`, so an unchanged list keeps its ETag and the
+browser's revalidation gets a 304. `inbox.sqlite` stores only what cannot be derived:
 done and ignored marks, and links between topics and threads.

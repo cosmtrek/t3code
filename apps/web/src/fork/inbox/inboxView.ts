@@ -67,8 +67,18 @@ export const STATE_LABELS: Readonly<Record<ItemState, string>> = {
   ignored: "Ignored",
 };
 
-export function waitLabel(item: Pick<InboxItem, "state" | "waitMs">): string {
-  const span = formatSpan(item.waitMs);
+const WAITING_HIGHLIGHT_MS = 24 * 3_600_000;
+
+/** Worked out here, not sent: a time-free list answers an unchanged read with a 304. */
+const waitMsOf = (item: Pick<InboxItem, "lastMessageAt">, now: number) =>
+  Math.max(0, now - Date.parse(item.lastMessageAt)) || 0;
+
+/** A topic I answered that has waited on them for over a day. */
+export const isOverdue = (item: Pick<InboxItem, "state" | "lastMessageAt">, now: number) =>
+  item.state === "waiting" && waitMsOf(item, now) > WAITING_HIGHLIGHT_MS;
+
+export function waitLabel(item: Pick<InboxItem, "state" | "lastMessageAt">, now: number): string {
+  const span = formatSpan(waitMsOf(item, now));
   if (item.state === "waiting") return span === "now" ? "just sent" : `sent ${span} ago`;
   return span;
 }
