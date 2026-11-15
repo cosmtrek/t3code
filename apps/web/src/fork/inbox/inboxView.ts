@@ -40,6 +40,21 @@ export function skippedNotice(skipped: number): string | null {
   return `${skipped} ${skipped === 1 ? "item" : "items"} from the adapter could not be read.`;
 }
 
+/** The selected topic's conversation, oldest first like a chat, so the latest sits at the bottom. */
+export function conversationTopicsOf(
+  items: ReadonlyArray<InboxItem>,
+  selected: Pick<InboxItem, "conversationId"> | null,
+): ReadonlyArray<InboxItem> {
+  if (selected === null) return [];
+  return items
+    .filter((item) => item.conversationId === selected.conversationId)
+    .toSorted(
+      (left, right) =>
+        Date.parse(left.lastMessageAt) - Date.parse(right.lastMessageAt) ||
+        left.id.localeCompare(right.id),
+    );
+}
+
 const PENDING: ReadonlySet<ItemState> = new Set(["needs_reply", "drafted", "investigating"]);
 
 export function inView(view: InboxView, filter: InboxFilter, item: InboxItem): boolean {
