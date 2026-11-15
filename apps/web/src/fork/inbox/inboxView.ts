@@ -69,6 +69,9 @@ export const STATE_LABELS: Readonly<Record<ItemState, string>> = {
 
 const WAITING_HIGHLIGHT_MS = 24 * 3_600_000;
 
+/** `useNowMinute` gives UTC "YYYY-MM-DDTHH:mm" with no zone, which Date.parse reads as local. */
+export const minuteToMs = (minute: string) => Date.parse(`${minute}:00Z`);
+
 /** Worked out here, not sent: a time-free list answers an unchanged read with a 304. */
 const waitMsOf = (item: Pick<InboxItem, "lastMessageAt">, now: number) =>
   Math.max(0, now - Date.parse(item.lastMessageAt)) || 0;
