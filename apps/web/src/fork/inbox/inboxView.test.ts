@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { emptyViewTitle, itemMeta, nextReplyText, type DraftSource } from "./inboxView";
+import { emptyViewTitle, itemMeta, minuteToMs, nextReplyText, type DraftSource } from "./inboxView";
 
 const draft = (threadId: string, text: string): DraftSource => ({ threadId, text });
 
@@ -37,5 +37,11 @@ describe("itemMeta", () => {
     ["leaves the author to a waiting topic's label", 1, "Sam", "waiting", "1 reply"],
   ] as const)("%s", (_case, replyCount, name, state, meta) => {
     expect(itemMeta({ replyCount, lastAuthor: author(name), state })).toBe(meta);
+  });
+});
+
+describe("minuteToMs", () => {
+  it("reads useNowMinute's zoneless minute as UTC", () => {
+    expect(minuteToMs("2026-11-15T14:41")).toBe(Date.UTC(2026, 10, 15, 14, 41));
   });
 });

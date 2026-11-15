@@ -176,7 +176,8 @@ const symbols: ReadonlyArray<Check> = [
     name: "SETTINGS_NAV_GROUPS",
     file: "apps/web/src/components/settings/settingsSearch.ts",
     ok: (text) =>
-      /export const SETTINGS_NAV_GROUPS\b/.test(text) && text.includes('heading: "Connections"'),
+      /export const SETTINGS_NAV_GROUPS\b/.test(text) &&
+      /heading: (msg\("Connections"\)|"Connections")/.test(text),
     fix: "Channels is listed in the Connections group; move the spread with it.",
   },
   {
@@ -203,6 +204,18 @@ const symbols: ReadonlyArray<Check> = [
     file: "apps/web/src/state/entities.ts",
     ok: (text) => /export function useThreadShell\b/.test(text),
     fix: "The thread card reads the linked thread's live state with it (TopicDetail.tsx).",
+  },
+  {
+    name: "useNowMinute",
+    file: "apps/web/src/hooks/useNowMinute.ts",
+    ok: (text) => /export function useNowMinute\b/.test(text),
+    fix: "Wait labels and the overdue highlight tick with it (InboxList.tsx, InboxPage.tsx).",
+  },
+  {
+    name: "@legendapp/list in the web app",
+    file: "apps/web/package.json",
+    ok: (text) => text.includes('"@legendapp/list"'),
+    fix: "The inbox list is a LegendList (InboxList.tsx); follow the web app's list component.",
   },
   {
     name: "formatRelativeElapsed",

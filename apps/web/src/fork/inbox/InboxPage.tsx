@@ -54,6 +54,7 @@ import {
   STATE_LABELS,
   channelBanner,
   emptyViewTitle,
+  minuteToMs,
   inView,
   itemMeta,
   nameOrUnknown,
@@ -522,7 +523,7 @@ function TopicCard({
   readonly onDelegate: () => void;
   readonly onMark: (state: MarkTarget) => void;
 }) {
-  const now = Date.parse(useNowMinute());
+  const now = minuteToMs(useNowMinute());
   const marked = item.state === "done" || item.state === "ignored";
   return (
     <li
