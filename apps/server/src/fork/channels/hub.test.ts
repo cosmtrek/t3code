@@ -192,6 +192,53 @@ describe("ChannelHub checks", () => {
     hub.stop();
   });
 
+  it("shares one adapter request among concurrent reads of a path, success or failure", async () => {
+    let listed = 0;
+    let failing = false;
+    const { hub } = await hubWith((request) => {
+      if (request.path === "/health") return json(200, HEALTH);
+      if (request.path === "/config") return json(200, CONFIG);
+      listed += 1;
+      return failing
+        ? json(500, { error: { code: "broken", message: "no" } })
+        : json(200, { items: [], nextCursor: null });
+    });
+    await hub.test("chat");
+    const readAll = () =>
+      Promise.allSettled(
+        Array.from({ length: 5 }, () => hub.getJson("chat", "/conversations", RawPage)),
+      );
+    expect((await readAll()).map((result) => result.status)).toEqual(Array(5).fill("fulfilled"));
+    expect(listed).toBe(1);
+    hub.invalidate("chat");
+    failing = true;
+    const failed = await readAll();
+    expect(failed.map((result) => result.status)).toEqual(Array(5).fill("rejected"));
+    expect(new Set(failed.map((result) => (result as PromiseRejectedResult).reason)).size).toBe(1);
+    expect(listed).toBe(2);
+    // A failure is not cached.
+    await hub.getJson("chat", "/conversations", RawPage).catch(() => undefined);
+    expect(listed).toBe(3);
+    hub.stop();
+  });
+
+  it("announces a moved lastSyncAt as a sync, not as changed lists", async () => {
+    let lastSyncAt = HEALTH.lastSyncAt;
+    const { hub } = await hubWith((request) =>
+      json(200, request.path === "/health" ? { ...HEALTH, lastSyncAt } : CONFIG),
+    );
+    await hub.test("chat");
+    const events: unknown[] = [];
+    hub.subscribe((event) => events.push(event));
+    await hub.test("chat");
+    expect(events).toEqual([]);
+    lastSyncAt = "2026-11-14T08:05:00.000Z";
+    await hub.test("chat");
+    expect(events).toEqual([{ type: "sync", channelId: "chat" }]);
+    expect(hub.get("chat")?.health?.lastSyncAt).toBe(lastSyncAt);
+    hub.stop();
+  });
+
   it("keeps ids stable and refuses duplicates", async () => {
     const { hub } = await hubWith((request) =>
       json(200, request.path === "/health" ? HEALTH : CONFIG),
@@ -428,6 +475,68 @@ describe("ChannelHub token redaction", () => {
 });
 
 describe("ChannelHub events", () => {
+  async function streamingHub() {
+    const asked: string[] = [];
+    let send!: (event: ChannelEvent) => void;
+    let opened!: () => void;
+    const streamOpen = new Promise<void>((resolve) => (opened = resolve));
+    const dir = await tempDir();
+    const tokenFile = NodePath.join(dir, "token");
+    await NodeFSP.writeFile(tokenFile, "secret-token\n", { mode: 0o600 });
+    const hub = new ChannelHub({
+      configPath: NodePath.join(dir, "channels.json"),
+      transportFor: () => ({
+        request: async (request) => {
+          if (request.path === "/health") return json(200, HEALTH);
+          if (request.path === "/config") return json(200, CONFIG);
+          asked.push(request.path);
+          return json(200, { items: [], nextCursor: null });
+        },
+        events: (_token, onEvent) => {
+          send = onEvent;
+          opened();
+          return new Promise(() => undefined);
+        },
+      }),
+    });
+    await hub.start();
+    await hub.save(
+      {
+        id: "chat",
+        kind: "http-adapter",
+        name: "Chat",
+        baseUrl: "http://127.0.0.1:7341",
+        tokenFile,
+        enabled: true,
+      },
+      { create: true },
+    );
+    await streamOpen;
+    return { hub, asked, send: (event: ChannelEvent) => send(event) };
+  }
+
+  it("reads again only the conversation a new message names", async () => {
+    const { hub, asked, send } = await streamingHub();
+    const paths = [
+      "/conversations?relevant=1",
+      "/conversations/c%201/topics?limit=200",
+      "/conversations/c%201/messages?topic=t",
+      "/conversations/c2/topics?limit=200",
+      "/conversations/c2/messages?topic=t",
+    ];
+    const readAll = () => Promise.all(paths.map((path) => hub.getJson("chat", path, RawPage)));
+    await readAll();
+    asked.length = 0;
+    send({ type: "message.created", conversationId: "c 1", topicId: "t" });
+    await readAll();
+    expect(asked).toEqual(paths.slice(0, 3));
+    asked.length = 0;
+    send({ type: "message.created" });
+    await readAll();
+    expect(asked).toEqual(paths);
+    hub.stop();
+  });
+
   it("reads lists again once the event stream (re)connects", async () => {
     let listed = 0;
     let send!: (event: ChannelEvent) => void;
@@ -723,7 +832,7 @@ describe("SSE parsing", () => {
     parse('event: message.created\ndata: {"conversationId":"c",');
     parse('"topicId":"t","messageId":"m"}\n\n: ping\n\nevent: health.changed\ndata: {}\n\n');
     expect(frames.map(([event, data]) => parseChannelEvent(event, data))).toEqual([
-      { type: "message.created" },
+      { type: "message.created", conversationId: "c", topicId: "t" },
       { type: "health.changed" },
     ]);
     // A known event counts whatever its data; it only says that something changed.
@@ -797,6 +906,9 @@ describe("protocol fixtures", () => {
     createSseParser((event, data) => events.push(parseChannelEvent(event, data)))(
       await fixture("events.sse"),
     );
-    expect(events).toEqual([{ type: "message.created" }, { type: "health.changed" }]);
+    expect(events).toEqual([
+      { type: "message.created", conversationId: "oc_platform", topicId: "omt_cache" },
+      { type: "health.changed" },
+    ]);
   });
 });

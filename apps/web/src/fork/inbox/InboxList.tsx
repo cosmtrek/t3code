@@ -14,12 +14,13 @@ import { Button } from "../../components/ui/button";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../../components/ui/menu";
 import { cn } from "../../lib/utils";
 import type { InboxItem } from "../types";
-import { copyItemContext, markItem, openItemInApp } from "./itemActions";
+import { copyItemContext, openItemInApp, type MarkTarget } from "./itemActions";
 import { STATE_LABELS, itemMeta, nameOrUnknown, waitLabel } from "./inboxView";
 
 export interface ItemHandlers {
   readonly onSelect: (item: InboxItem) => void;
   readonly onDelegate: (item: InboxItem) => void;
+  readonly onMark: (item: InboxItem, state: MarkTarget) => void;
 }
 
 const SWIPE_REVEAL = 136;
@@ -40,11 +41,13 @@ export function ItemMenu({
   item,
   readOnly,
   onDelegate,
+  onMark,
 }: {
   readonly environmentId: EnvironmentId;
   readonly item: InboxItem;
   readonly readOnly: boolean;
   readonly onDelegate: (item: InboxItem) => void;
+  readonly onMark: ItemHandlers["onMark"];
 }) {
   const marked = item.state === "done" || item.state === "ignored";
   return (
@@ -67,17 +70,17 @@ export function ItemMenu({
           Delegate…
         </MenuItem>
         {marked ? (
-          <MenuItem onClick={() => void markItem(environmentId, item, null)}>
+          <MenuItem onClick={() => onMark(item, null)}>
             <RotateCcwIcon />
             Reopen
           </MenuItem>
         ) : (
           <>
-            <MenuItem onClick={() => void markItem(environmentId, item, "done")}>
+            <MenuItem onClick={() => onMark(item, "done")}>
               <CheckIcon />
               Mark done
             </MenuItem>
-            <MenuItem onClick={() => void markItem(environmentId, item, "ignored")}>
+            <MenuItem onClick={() => onMark(item, "ignored")}>
               <EyeOffIcon />
               Ignore
             </MenuItem>
@@ -151,7 +154,7 @@ function ItemRow({
           className="w-[68px] bg-success text-xs font-medium text-white"
           onClick={() => {
             setOffset(0);
-            void markItem(environmentId, item, marked ? null : "done");
+            handlers.onMark(item, marked ? null : "done");
           }}
         >
           {marked ? "Reopen" : "Done"}
@@ -162,7 +165,7 @@ function ItemRow({
           className="w-[68px] bg-muted-foreground text-xs font-medium text-white"
           onClick={() => {
             setOffset(0);
-            void markItem(environmentId, item, "ignored");
+            handlers.onMark(item, "ignored");
           }}
         >
           Ignore
@@ -220,6 +223,7 @@ function ItemRow({
           item={item}
           readOnly={readOnly}
           onDelegate={handlers.onDelegate}
+          onMark={handlers.onMark}
         />
       </div>
     </li>

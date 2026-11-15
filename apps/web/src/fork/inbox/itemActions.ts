@@ -22,11 +22,14 @@ function fail(title: string, error: unknown) {
   });
 }
 
+export type MarkTarget = "done" | "ignored" | null;
+
+/** False when the server refused; the user has been told. */
 export async function markItem(
   environmentId: EnvironmentId,
   item: InboxItem,
-  state: "done" | "ignored" | null,
-) {
+  state: MarkTarget,
+): Promise<boolean> {
   try {
     await forkRequest(environmentId, "/inbox/mark", {
       method: "POST",
@@ -35,10 +38,14 @@ export async function markItem(
         conversationId: item.conversationId,
         topicId: item.topicId,
         state,
+        // The watermark is what the user saw, and the server need not read the channel for it.
+        lastMessageAt: item.lastMessageAt,
       },
     });
+    return true;
   } catch (error) {
     fail("Could not update the item", error);
+    return false;
   }
 }
 
