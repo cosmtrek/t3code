@@ -318,6 +318,11 @@ seam files. Then try the example channel end to end in a browser before releasin
   thread's conclusion shows as history. One delegation per item runs at a time, and "Start a new
   thread" replaces only the thread the dialog showed. A topic longer than the message page cap is
   refused rather than delegated with part of the conversation.
+- The dialog chooses the thread's checkout: the project's, a new worktree, or an existing one.
+  Another delegation of the same topic defaults to the worktree its last thread worked in, read
+  from that thread rather than stored.
+- A question asked from the topic's thread card goes to the current thread with a note to update
+  its files; the topic detail shows the latest five questions and answers without that note.
 - The thread writes `conclusion.md` and `draft.md` into its folder. When it cannot (a sandbox
   limited to the workspace), it ends its reply with `<conclusion>` and `<draft>` tags; the inbox
   reads each finished run once and writes the files (`.fallback.json` records the run and what it
