@@ -382,7 +382,12 @@ export function createExampleChannel(
           richSummary: item.richSummary ?? null,
           openUrl: `${OPEN_URL_BASE}/${conversation.id}/${item.topicId}/${item.id}`,
         }));
-      return json(200, paginate(items, url));
+      // Seed messages are not stored in time order.
+      const ordered =
+        url.searchParams.get("order") === "desc"
+          ? items.toSorted((left, right) => right.createdAt.localeCompare(left.createdAt))
+          : items;
+      return json(200, paginate(ordered, url));
     }
     if (head === "media" && segments.length === 3 && tail === "chart") {
       const owner = conversations.some((item) =>

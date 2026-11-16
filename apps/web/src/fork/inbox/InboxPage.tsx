@@ -1,18 +1,13 @@
-import type { EnvironmentId } from "@t3tools/contracts";
 import { Link } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
   BotIcon,
-  CheckIcon,
-  CopyIcon,
-  ExternalLinkIcon,
-  EyeOffIcon,
   InboxIcon,
   ListFilterIcon,
   MessagesSquareIcon,
   PlugZapIcon,
 } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 import { WorkspacePageHeader } from "../../components/WorkspacePageHeader";
 import { Button } from "../../components/ui/button";
@@ -41,11 +36,11 @@ import {
 import { SidebarInset } from "../../components/ui/sidebar";
 import { Toggle, ToggleGroup } from "../../components/ui/toggle-group";
 import { isElectron } from "../../env";
-import { useNowMinute } from "../../hooks/useNowMinute";
 import { cn } from "../../lib/utils";
 import { ChannelStatusDot, formatSince } from "../presentation";
 import type { InboxItem, ItemsResponse, TopicDetail as TopicDetailData } from "../types";
 import { useForkResource } from "../useForkResource";
+import { ConversationPane } from "./ConversationPane";
 import { DelegateDialog } from "./DelegateDialog";
 import { InboxList, ItemMenu } from "./InboxList";
 import {
@@ -53,24 +48,14 @@ import {
   INBOX_VIEWS,
   STATE_LABELS,
   channelBanner,
-  conversationTopicsOf,
   emptyViewTitle,
-  minuteToMs,
   inView,
-  itemMeta,
   nameOrUnknown,
   skippedNotice,
-  waitLabel,
   type InboxFilter,
   type InboxView,
 } from "./inboxView";
-import {
-  copyItemContext,
-  markItem,
-  openItemInApp,
-  topicPath,
-  type MarkTarget,
-} from "./itemActions";
+import { markItem, topicPath, type MarkTarget } from "./itemActions";
 import { TopicDetail } from "./TopicDetail";
 import { useInboxOverviews, type EnvironmentInbox } from "./useInboxOverviews";
 
@@ -239,24 +224,6 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
     onDelegate: (item: InboxItem) => setDelegating(item),
     onMark: (item: InboxItem, state: MarkTarget) => void onMark(item, state),
   };
-  const conversationTopics = conversationTopicsOf(items, selected);
-  // A conversation with one topic would only repeat the list's card.
-  const showConversation = conversationTopics.length > 1;
-  const conversationRef = useRef<HTMLElement>(null);
-  const selectedTopicId = selected?.id ?? null;
-
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- scrolls the DOM to the newly selected topic; list refreshes must not pull a reader back down
-  useEffect(() => {
-    const container = conversationRef.current;
-    if (!showConversation || container === null) return;
-    const card =
-      selectedTopicId === null
-        ? null
-        : container.querySelector(`[data-item-id="${CSS.escape(selectedTopicId)}"]`);
-    if (card) card.scrollIntoView({ block: "nearest" });
-    else container.scrollTop = container.scrollHeight;
-  }, [conversationRef, selectedTopicId, showConversation]);
-
   let list: ReactNode;
   if (!channel.access.read) {
     list = <InboxEmpty icon={<PlugZapIcon />} title="Channel unavailable" settingsLink />;
@@ -401,37 +368,22 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
           </div>
         </section>
 
-        {showConversation && selected ? (
-          <section
-            ref={conversationRef}
-            aria-label="Conversation"
-            className="scrollbar-gutter-both hidden min-h-0 min-w-0 flex-1 flex-col overflow-y-auto overscroll-contain @5xl/inbox:flex"
-          >
-            <h2 className="sticky top-0 border-b bg-background px-4 py-2 text-xs font-medium">
-              {nameOrUnknown(selected.conversationName)}
-            </h2>
-            <ul className="flex flex-col gap-2 p-3">
-              {conversationTopics.map((topic) => (
-                <TopicCard
-                  key={topic.id}
-                  environmentId={environmentId}
-                  item={topic}
-                  selected={topic.id === selected.id}
-                  readOnly={readOnly}
-                  onSelect={() => setSelectedId(topic.id)}
-                  onDelegate={() => setDelegating(topic)}
-                  onMark={(state) => handlers.onMark(topic, state)}
-                />
-              ))}
-            </ul>
-          </section>
+        {selected ? (
+          <ConversationPane
+            environmentId={environmentId}
+            selected={selected}
+            items={items}
+            readOnly={readOnly}
+            handlers={handlers}
+            refreshOn={refreshChannel}
+          />
         ) : null}
 
         <section
           aria-label="Topic"
           className={cn(
             "min-h-0 min-w-0 flex-1 flex-col",
-            showConversation && "@5xl/inbox:w-[28rem] @5xl/inbox:flex-none @5xl/inbox:border-l",
+            selected && "@5xl/inbox:w-[28rem] @5xl/inbox:flex-none @5xl/inbox:border-l",
             selected ? "flex" : "hidden @2xl/inbox:flex",
           )}
         >
@@ -515,97 +467,5 @@ function ReadError({
         Retry
       </Button>
     </div>
-  );
-}
-
-function TopicCard({
-  environmentId,
-  item,
-  selected,
-  readOnly,
-  onSelect,
-  onDelegate,
-  onMark,
-}: {
-  readonly environmentId: EnvironmentId;
-  readonly item: InboxItem;
-  readonly selected: boolean;
-  readonly readOnly: boolean;
-  readonly onSelect: () => void;
-  readonly onDelegate: () => void;
-  readonly onMark: (state: MarkTarget) => void;
-}) {
-  const now = minuteToMs(useNowMinute());
-  const marked = item.state === "done" || item.state === "ignored";
-  return (
-    <li
-      data-item-id={item.id}
-      className={cn(
-        "group relative scroll-mt-12 rounded-lg border border-border/70 p-3",
-        selected && "border-primary/50 bg-accent/40",
-      )}
-    >
-      <button
-        type="button"
-        className="flex w-full min-w-0 flex-col gap-1 text-left"
-        onClick={onSelect}
-      >
-        <span className="flex min-w-0 items-baseline gap-2 text-xs text-muted-foreground">
-          <span className="truncate">{STATE_LABELS[item.state]}</span>
-          <span className="ms-auto shrink-0 tabular-nums">{waitLabel(item, now)}</span>
-        </span>
-        <span className="text-sm break-words whitespace-pre-wrap">{item.preview}</span>
-        {itemMeta(item) ? (
-          <span className="text-xs text-muted-foreground">{itemMeta(item)}</span>
-        ) : null}
-      </button>
-      <div className="absolute -top-3 right-2 hidden gap-0.5 rounded-md border bg-popover p-0.5 shadow-sm group-focus-within:flex group-hover:flex">
-        <Button
-          size="icon-xs"
-          variant="ghost"
-          aria-label="Delegate"
-          disabled={readOnly}
-          onClick={onDelegate}
-        >
-          <BotIcon />
-        </Button>
-        {marked ? null : (
-          <>
-            <Button
-              size="icon-xs"
-              variant="ghost"
-              aria-label="Mark done"
-              onClick={() => onMark("done")}
-            >
-              <CheckIcon />
-            </Button>
-            <Button
-              size="icon-xs"
-              variant="ghost"
-              aria-label="Ignore"
-              onClick={() => onMark("ignored")}
-            >
-              <EyeOffIcon />
-            </Button>
-          </>
-        )}
-        <Button
-          size="icon-xs"
-          variant="ghost"
-          aria-label="Copy context"
-          onClick={() => void copyItemContext(environmentId, item)}
-        >
-          <CopyIcon />
-        </Button>
-        <Button
-          size="icon-xs"
-          variant="ghost"
-          aria-label="Open in app"
-          onClick={() => void openItemInApp(environmentId, item)}
-        >
-          <ExternalLinkIcon />
-        </Button>
-      </div>
-    </li>
   );
 }

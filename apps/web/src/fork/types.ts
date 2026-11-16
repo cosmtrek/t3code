@@ -177,6 +177,15 @@ export interface ItemsResponse {
   readonly status: ChannelStatus;
 }
 
+export interface ConversationResponse {
+  /** One page, oldest first. */
+  readonly messages: ReadonlyArray<InboxMessage>;
+  /** Reads the next older page; null at the conversation's start. */
+  readonly nextCursor: string | null;
+  readonly stale: boolean;
+  readonly skipped: number;
+}
+
 export interface SendResult {
   readonly messageId: string;
   /** false when the copy in the item folder could not be written; null for a topic-less send. */
