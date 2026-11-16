@@ -208,6 +208,14 @@ export interface TopicDetail {
   readonly draft: string | null;
   readonly conclusionIsHistorical: boolean;
   readonly previousThreads: ReadonlyArray<LinkedThread>;
+  /** Questions asked from the inbox and the agent's answers, latest five rounds. */
+  readonly followUps: ReadonlyArray<FollowUp>;
+}
+
+export interface FollowUp {
+  readonly role: "user" | "assistant";
+  readonly text: string;
+  readonly at: string;
 }
 
 export type WorkspaceStrategy =
