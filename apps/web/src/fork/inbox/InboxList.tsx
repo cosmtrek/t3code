@@ -255,6 +255,8 @@ export function InboxList({
   readonly handlers: ItemHandlers;
 }) {
   const now = minuteToMs(useNowMinute());
+  // New topics land on top: a reader at the top sees them, one further down keeps their place.
+  const [scrolledDown, setScrolledDown] = useState(false);
   // "All" can hold a thousand topics per conversation; only the rows in view are mounted.
   return (
     <LegendList<InboxItem>
@@ -271,6 +273,8 @@ export function InboxList({
           handlers={handlers}
         />
       )}
+      maintainVisibleContentPosition={{ data: scrolledDown }}
+      onScroll={(event) => setScrolledDown(event.nativeEvent.contentOffset.y > 0)}
       estimatedItemSize={78}
       drawDistance={600}
       className="min-h-0 flex-1 overscroll-contain"
