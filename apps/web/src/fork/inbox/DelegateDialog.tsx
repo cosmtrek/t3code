@@ -19,14 +19,26 @@ import {
   SelectTrigger,
   SelectValue,
 } from "../../components/ui/select";
+import { Input } from "../../components/ui/input";
 import { Textarea } from "../../components/ui/textarea";
+import { WorktreeBaseBranchPicker } from "../../components/WorktreeBaseBranchPicker";
+import { useEnvironmentQuery } from "../../state/query";
+import { vcsEnvironment } from "../../state/vcs";
 import { ForkApiError, forkRequest } from "../forkApiAccess";
-import type { DelegateOptions, InboxItem, ModelChoice } from "../types";
+import type { DelegateOptions, InboxItem, ModelChoice, WorkspaceStrategy } from "../types";
 import { useForkResource } from "../useForkResource";
 import { nameOrUnknown } from "./inboxView";
 
 const modelKey = (choice: ModelChoice | null) =>
   choice === null ? "" : `${choice.instanceId}\u0000${choice.model}`;
+
+type WorkspaceMode = WorkspaceStrategy["type"];
+
+const WORKSPACE_MODE_LABELS: Readonly<Record<WorkspaceMode, string>> = {
+  root: "Project checkout",
+  worktree: "New worktree",
+  existing_worktree: "Existing worktree",
+};
 
 function parseModelKey(key: string): ModelChoice | null {
   const [instanceId, model] = key.split("\u0000");
@@ -58,6 +70,11 @@ export function DelegateDialog({
   const [templateId, setTemplateId] = useState<string | null>(null);
   const [model, setModel] = useState<string | null>(null);
   const [note, setNote] = useState("");
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode | null>(null);
+  const [baseRef, setBaseRef] = useState<string | null>(null);
+  const [newBranch, setNewBranch] = useState("");
+  const [startFromOrigin, setStartFromOrigin] = useState(false);
+  const [worktreePath, setWorktreePath] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -67,6 +84,49 @@ export function DelegateDialog({
   const chosenTemplate = templateId ?? data?.templates[0]?.id ?? null;
   const defaultModel = modelKey(project?.defaultModel ?? null);
   const chosenModel = model ?? defaultModel;
+  // The last thread's checkout belongs to its project; another project starts in its own.
+  const defaultWorkspace: WorkspaceStrategy =
+    data && chosenProject === data.defaultProjectId
+      ? data.defaultWorkspaceStrategy
+      : { type: "root" };
+  const chosenMode = workspaceMode ?? defaultWorkspace.type;
+  const refs = useEnvironmentQuery(
+    project && chosenMode !== "root"
+      ? vcsEnvironment.listRefs({
+          environmentId,
+          input: { cwd: project.workspaceRoot, refKind: "local", limit: 200 },
+        })
+      : null,
+  ).data?.refs;
+  const worktrees = [
+    ...(defaultWorkspace.type === "existing_worktree"
+      ? [{ path: defaultWorkspace.worktreePath, branch: null as string | null }]
+      : []),
+    ...(refs ?? []).flatMap((ref) =>
+      ref.worktreePath && ref.worktreePath !== project?.workspaceRoot
+        ? [{ path: ref.worktreePath, branch: ref.name }]
+        : [],
+    ),
+  ].filter((entry, index, all) => all.findIndex((other) => other.path === entry.path) === index);
+  const chosenWorktreePath =
+    worktreePath ??
+    (defaultWorkspace.type === "existing_worktree"
+      ? defaultWorkspace.worktreePath
+      : (worktrees[0]?.path ?? null));
+  const chosenBaseRef = baseRef ?? refs?.find((ref) => ref.current)?.name ?? "main";
+  const workspaceStrategy: WorkspaceStrategy | null =
+    chosenMode === "root"
+      ? { type: "root" }
+      : chosenMode === "worktree"
+        ? {
+            type: "worktree",
+            baseRef: chosenBaseRef,
+            startFromOrigin,
+            ...(newBranch.trim() ? { branch: newBranch.trim() } : {}),
+          }
+        : chosenWorktreePath === null
+          ? null
+          : { type: "existing_worktree", worktreePath: chosenWorktreePath };
 
   const openThread = (threadId: string) => {
     onClose();
@@ -77,7 +137,7 @@ export function DelegateDialog({
   };
 
   const submit = async () => {
-    if (chosenProject === null || chosenTemplate === null) return;
+    if (chosenProject === null || chosenTemplate === null || workspaceStrategy === null) return;
     setSubmitting(true);
     setError(null);
     try {
@@ -94,6 +154,7 @@ export function DelegateDialog({
             templateId: chosenTemplate,
             note,
             modelSelection: chosenModel === defaultModel ? null : parseModelKey(chosenModel),
+            workspaceStrategy,
             replaceThreadId: forceNew ? (data?.existing?.threadId ?? null) : null,
           },
         },
@@ -145,7 +206,12 @@ export function DelegateDialog({
         <Labeled label="Project">
           <Select
             value={chosenProject ?? ""}
-            onValueChange={(value) => value && setProjectId(value)}
+            onValueChange={(value) => {
+              if (!value) return;
+              setProjectId(value);
+              setBaseRef(null);
+              setWorktreePath(null);
+            }}
           >
             <SelectTrigger aria-label="Project" size="sm">
               <SelectValue>{project?.title}</SelectValue>
@@ -159,6 +225,71 @@ export function DelegateDialog({
             </SelectPopup>
           </Select>
         </Labeled>
+        <Labeled label="Workspace">
+          <Select
+            value={chosenMode}
+            onValueChange={(value) => value && setWorkspaceMode(value as WorkspaceMode)}
+          >
+            <SelectTrigger aria-label="Workspace" size="sm">
+              <SelectValue>{WORKSPACE_MODE_LABELS[chosenMode]}</SelectValue>
+            </SelectTrigger>
+            <SelectPopup>
+              {(Object.keys(WORKSPACE_MODE_LABELS) as WorkspaceMode[]).map((mode) => (
+                <SelectItem key={mode} value={mode}>
+                  {WORKSPACE_MODE_LABELS[mode]}
+                </SelectItem>
+              ))}
+            </SelectPopup>
+          </Select>
+        </Labeled>
+        {chosenMode === "worktree" && project ? (
+          <>
+            <Labeled label="Base branch" group>
+              <WorktreeBaseBranchPicker
+                key={project.id}
+                environmentId={environmentId}
+                cwd={project.workspaceRoot}
+                value={chosenBaseRef}
+                onValueChange={setBaseRef}
+                startFromOrigin={startFromOrigin}
+                onStartFromOriginChange={setStartFromOrigin}
+              />
+            </Labeled>
+            <Labeled label="New branch (optional)">
+              <Input
+                value={newBranch}
+                placeholder="A temporary branch when left empty"
+                onChange={(event) => setNewBranch(event.target.value)}
+              />
+            </Labeled>
+          </>
+        ) : null}
+        {chosenMode === "existing_worktree" ? (
+          <Labeled label="Worktree">
+            {worktrees.length === 0 ? (
+              <p className="text-xs text-muted-foreground">
+                {refs === undefined ? "Loading…" : "This project has no other worktrees."}
+              </p>
+            ) : (
+              <Select
+                value={chosenWorktreePath ?? ""}
+                onValueChange={(value) => value && setWorktreePath(value)}
+              >
+                <SelectTrigger aria-label="Worktree" size="sm">
+                  <SelectValue>{chosenWorktreePath}</SelectValue>
+                </SelectTrigger>
+                <SelectPopup>
+                  {worktrees.map((entry) => (
+                    <SelectItem key={entry.path} value={entry.path}>
+                      {entry.branch ? `${entry.branch} · ` : ""}
+                      {entry.path}
+                    </SelectItem>
+                  ))}
+                </SelectPopup>
+              </Select>
+            )}
+          </Labeled>
+        ) : null}
         <Labeled label="How">
           <Select
             value={chosenTemplate ?? ""}
@@ -261,7 +392,8 @@ export function DelegateDialog({
                   data === null ||
                   chosenProject === null ||
                   chosenTemplate === null ||
-                  chosenModel === ""
+                  chosenModel === "" ||
+                  workspaceStrategy === null
                 }
               >
                 {submitting ? "Starting…" : "Delegate"}
@@ -281,11 +413,21 @@ function modelLabel(data: DelegateOptions, choice: ModelChoice | null): string |
   return provider ? `${provider.name} · ${model?.name ?? choice.model}` : choice.model;
 }
 
-function Labeled({ label, children }: { readonly label: string; readonly children: ReactNode }) {
+function Labeled({
+  label,
+  group = false,
+  children,
+}: {
+  readonly label: string;
+  /** Several controls: a label would forward its clicks to the first one. */
+  readonly group?: boolean;
+  readonly children: ReactNode;
+}) {
+  const Element = group ? "div" : "label";
   return (
-    <label className="flex min-w-0 flex-col gap-1.5">
+    <Element className="flex min-w-0 flex-col gap-1.5">
       <span className="text-xs font-medium">{label}</span>
       {children}
-    </label>
+    </Element>
   );
 }

@@ -8,6 +8,7 @@ import {
   CommandId,
   MessageId,
   ModelSelection,
+  OrchestrationV2ThreadLaunchWorkspaceStrategy,
   ProjectId,
   ThreadId,
   isProviderAvailable,
@@ -23,6 +24,7 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 
 import { resolveRuntimeMode } from "../../mcp/delegatedTaskModes.ts";
+import { ThreadLaunchBaseRefError } from "../../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../../orchestration-v2/ThreadManagementService.ts";
 import * as ThreadMessageIntake from "../../orchestration-v2/ThreadMessageIntake.ts";
 import * as Project from "../../project/ProjectService.ts";
@@ -92,6 +94,8 @@ export class ForkHttpError extends Schema.TaggedError<ForkHttpError>()("ForkHttp
 
 const isForkHttpError = Schema.is(ForkHttpError);
 
+const isBaseRefError = Schema.is(ThreadLaunchBaseRefError);
+
 function toForkError(error: unknown): ForkHttpError {
   if (isForkHttpError(error)) return error;
   if (error instanceof ChannelUnavailableError) {
@@ -103,6 +107,14 @@ function toForkError(error: unknown): ForkHttpError {
   }
   if (error instanceof AdapterRequestError) {
     return new ForkHttpError({ status: 502, code: error.code, detail: error.message });
+  }
+  if (isBaseRefError(error)) {
+    return new ForkHttpError({
+      status: 400,
+      code: "bad_request",
+      detail: error.message,
+      field: "workspaceStrategy",
+    });
   }
   if (error instanceof ChannelConfigError) {
     return new ForkHttpError({
@@ -139,6 +151,10 @@ const SENDER_HISTORY_MS = 7 * 24 * 3_600_000;
 
 const decodeSendResultOption = Schema.decodeUnknownOption(SendResult);
 const decodeModelSelection = Schema.decodeUnknownEffect(ModelSelection);
+const decodeWorkspaceStrategy = Schema.decodeUnknownEffect(
+  OrchestrationV2ThreadLaunchWorkspaceStrategy,
+);
+type WorkspaceStrategy = OrchestrationV2ThreadLaunchWorkspaceStrategy;
 
 const enc = encodeURIComponent;
 const conversationsPath = `/conversations?relevant=1&limit=${CONVERSATION_LIMIT}`;
@@ -861,6 +877,12 @@ export const delegateOptions = Effect.fn("ForkInbox.delegateOptions")(function* 
   const lastProjectId = links[0]?.projectId ?? null;
   const active = activeLinkOf(links);
   const existing = active ? yield* inspectLink(active, { current: true }) : null;
+  const threads = yield* ThreadManagement.ThreadManagementService;
+  const lastShell = links[0]
+    ? yield* threads
+        .getThreadShell(ThreadId.make(links[0].threadId))
+        .pipe(Effect.orElseSucceed(() => null))
+    : null;
   return {
     itemId: item.id,
     projects: projects.map((project) => ({
@@ -874,6 +896,10 @@ export const delegateOptions = Effect.fn("ForkInbox.delegateOptions")(function* 
       projects.find((project) => project.id === lastProjectId)?.id ??
       matches.find((match) => match.projectId !== null)?.projectId ??
       null,
+    // The last thread's checkout: a new worktree once made is the place to continue.
+    defaultWorkspaceStrategy: (lastShell?.worktreePath && lastShell.deletedAt === null
+      ? { type: "existing_worktree", worktreePath: lastShell.worktreePath }
+      : { type: "root" }) satisfies WorkspaceStrategy,
     templates: channel.config?.delegateTemplates ?? [],
     providers: providers
       .filter((provider) => provider.enabled && provider.installed)
@@ -894,6 +920,8 @@ const DelegateInput = Schema.Struct({
   templateId: Schema.String,
   note: Schema.optional(Schema.String),
   modelSelection: Schema.optional(Schema.NullOr(Schema.Unknown)),
+  /** Where the thread works; the project checkout when left out. */
+  workspaceStrategy: Schema.optional(Schema.NullOr(Schema.Unknown)),
   /** Start another thread in place of this linked one; ignored once another took its place. */
   replaceThreadId: Schema.optional(Schema.NullOr(Schema.String)),
 });
@@ -1020,6 +1048,23 @@ export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown
     if (modelSelection === null) {
       return yield* badRequest("This project has no default model; choose one.", "modelSelection");
     }
+    const workspaceStrategy: WorkspaceStrategy =
+      input.workspaceStrategy === undefined || input.workspaceStrategy === null
+        ? { type: "root" }
+        : yield* decodeWorkspaceStrategy(input.workspaceStrategy).pipe(
+            Effect.mapError(() => badRequest("The workspace is not valid.", "workspaceStrategy")),
+          );
+    if (workspaceStrategy.type === "existing_worktree") {
+      const isDirectory = yield* Effect.promise(() =>
+        NodeFSP.stat(workspaceStrategy.worktreePath).then(
+          (stat) => stat.isDirectory(),
+          () => false,
+        ),
+      );
+      if (!isDirectory) {
+        return yield* badRequest("That checkout does not exist.", "workspaceStrategy");
+      }
+    }
     const runtimeMode = yield* resolveRuntimeMode(defaults.runtimeMode, undefined, {
       modelSelection,
       supportedRuntimeModes: defaults.providers.find(
@@ -1087,6 +1132,7 @@ export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown
             note: input.note ?? "",
             modelSelection,
             runtimeMode,
+            workspaceStrategy,
             threadId,
             replacesThreadId: replacing?.threadId ?? null,
           }),
@@ -1102,7 +1148,7 @@ export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown
       modelSelection,
       runtimeMode,
       interactionMode: "default",
-      workspaceStrategy: { type: "root" },
+      workspaceStrategy,
       initialMessage: { messageId: MessageId.make(commandId), text, attachments: [] },
       createdBy: "user",
       creationSource: "server",
