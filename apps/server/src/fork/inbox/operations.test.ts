@@ -3,7 +3,7 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import type { OrchestrationV2ThreadShell } from "@t3tools/contracts";
+import { DEFAULT_SERVER_SETTINGS, type OrchestrationV2ThreadShell } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -423,7 +423,10 @@ describe("delegating", () => {
         projectId: "p-second",
         createdAt: at(1),
       });
-      h.shells.set("thread-1", idleShell("thread-1"));
+      h.shells.set("thread-1", {
+        ...idleShell("thread-1"),
+        worktreePath: "/code/p-second-worktree",
+      } as OrchestrationV2ThreadShell);
       const project = (id: string) => ({
         id,
         title: id,
@@ -445,6 +448,82 @@ describe("delegating", () => {
         ),
       );
       expect(options.defaultProjectId).toBe("p-second");
+      // The last thread's checkout, so another thread continues where it worked.
+      expect(options.defaultWorkspaceStrategy).toEqual({
+        type: "existing_worktree",
+        worktreePath: "/code/p-second-worktree",
+      });
+    }),
+  );
+
+  it.effect("starts the thread in the checkout asked for, the project's when none is", () =>
+    Effect.gen(function* () {
+      const h = yield* Effect.promise(() =>
+        harness(() =>
+          ["t-root", "t-worktree", "t-bad"].map((topicId) => ({
+            conversationId: "c",
+            topicId,
+            messages: [{ id: `m-${topicId}`, minute: 1, author: THEM }],
+          })),
+        ),
+      );
+      const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+      const layer = Layer.mergeAll(
+        h.layer,
+        Layer.mock(Project.ProjectService)({
+          listShells: () =>
+            Effect.succeed([
+              { id: "p", title: "p", workspaceRoot: "/code/p", archivedAt: null },
+            ] as never),
+        }),
+        Layer.mock(ServerSettings.ServerSettingsService)({
+          getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
+        }),
+        Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+        Layer.succeed(ServerConfig.ServerConfig, {} as never),
+        Layer.mock(ThreadLaunch.ThreadLaunchService)({
+          launch: (input) => {
+            launched.push(input);
+            return Effect.succeed({ threadId: input.threadId } as never);
+          },
+        }),
+        Layer.mock(DocumentText.DocumentText)({}),
+        FileSystem.layerNoop({}),
+      );
+      const delegate = (topicId: string, workspaceStrategy?: unknown) =>
+        Inbox.delegate({
+          ...h.keyOf("c", topicId),
+          projectId: "p",
+          templateId: "t",
+          modelSelection: { instanceId: "codex", model: "gpt" },
+          ...(workspaceStrategy === undefined ? {} : { workspaceStrategy }),
+        }).pipe(Effect.provide(layer));
+
+      yield* delegate("t-root");
+      const worktree = { type: "worktree", baseRef: "main", startFromOrigin: true };
+      yield* delegate("t-worktree", worktree);
+      expect(launched.map((input) => input.workspaceStrategy)).toEqual([
+        { type: "root" },
+        worktree,
+      ]);
+      const request = yield* Effect.promise(() =>
+        NodeFSP.readFile(
+          NodePath.join(
+            threadContextDir(
+              h.runtime.itemsDir,
+              itemIdFor(h.keyOf("c", "t-worktree")),
+              launched[1]!.threadId!,
+            ),
+            "request.json",
+          ),
+          "utf8",
+        ),
+      );
+      expect(JSON.parse(request).workspaceStrategy).toEqual(worktree);
+
+      const error = yield* delegate("t-bad", { type: "worktree" }).pipe(Effect.flip);
+      expect(error).toMatchObject({ status: 400, field: "workspaceStrategy" });
+      expect(launched).toHaveLength(2);
     }),
   );
 
