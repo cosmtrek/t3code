@@ -220,6 +220,12 @@ const routes = (runtime: InboxRuntimeShape) => {
     ),
     route(
       "GET",
+      `${INBOX}/conversation`,
+      AuthOrchestrationReadScope,
+      query.pipe(Effect.flatMap(Inbox.readConversation)),
+    ),
+    route(
+      "GET",
       `${INBOX}/delegate-options`,
       AuthOrchestrationReadScope,
       query.pipe(Effect.flatMap(Inbox.delegateOptions)),

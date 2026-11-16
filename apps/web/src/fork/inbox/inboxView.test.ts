@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import type { InboxItem } from "../types";
+import type { InboxItem, InboxMessage } from "../types";
 import {
-  conversationTopicsOf,
+  conversationRows,
   emptyViewTitle,
+  mergeConversationPages,
+  quoteOf,
   itemMeta,
   minuteToMs,
   nextReplyText,
@@ -54,24 +56,84 @@ describe("minuteToMs", () => {
   });
 });
 
-describe("conversationTopicsOf", () => {
-  const topic = (id: string, conversationId: string, lastMessageAt: string) =>
-    ({ id, conversationId, lastMessageAt }) as InboxItem;
-  const items = [
-    topic("c", "group", "2026-11-15T10:05:00Z"),
-    topic("other", "dm", "2026-11-15T10:03:00Z"),
-    topic("b", "group", "2026-11-15T10:01:00Z"),
-    topic("a", "group", "2026-11-15T10:01:00Z"),
-    topic("old", "group", "2026-11-15T09:00:00Z"),
+describe("conversationRows", () => {
+  const message = (id: string, topicId: string, author = "Sam") =>
+    ({
+      id,
+      topicId,
+      text: `text ${id}`,
+      author: { id: author, name: author, isSelf: false },
+    }) as InboxMessage;
+  const item = (topicId: string, rootMessageId: string) =>
+    ({ id: `item-${topicId}`, topicId, rootMessageId, preview: `preview ${topicId}` }) as InboxItem;
+  // Oldest first; t1's root r1 has a reply, t-old's root is older than what was read.
+  const messages = [
+    message("r1", "t1"),
+    message("x1", "t-unlisted"),
+    message("a1", "t1", "Kim"),
+    message("o2", "t-old"),
+    message("o3", "t-old"),
   ];
+  const items = [item("t1", "r1"), item("t-old", "o1")];
+  const shape = (kind: "dm" | "group" | "topic_group") =>
+    conversationRows(messages, items, kind).map((row) => [
+      row.message.id,
+      row.item?.id ?? null,
+      row.anchor,
+      row.quote,
+    ]);
 
-  it("lists the selected conversation oldest first, ties by id", () => {
-    expect(conversationTopicsOf(items, { conversationId: "group" }).map((item) => item.id)).toEqual(
-      ["old", "a", "b", "c"],
-    );
+  it("shows a topic group's topics once each, by root or the earliest message read", () => {
+    expect(shape("topic_group")).toEqual([
+      ["r1", "item-t1", true, null],
+      ["x1", null, true, null],
+      ["o2", "item-t-old", true, null],
+    ]);
   });
 
-  it("is empty without a selection", () => {
-    expect(conversationTopicsOf(items, null)).toEqual([]);
+  it("shows every message of a group, a reply quoting its topic's root", () => {
+    expect(shape("group")).toEqual([
+      ["r1", "item-t1", true, null],
+      ["x1", null, true, null],
+      ["a1", "item-t1", false, "Sam: text r1"],
+      ["o2", "item-t-old", true, "preview t-old"],
+      ["o3", "item-t-old", false, "preview t-old"],
+    ]);
+  });
+
+  it("shows every message of a DM without quotes", () => {
+    expect(shape("dm").map(([id, , anchor, quote]) => [id, anchor, quote])).toEqual([
+      ["r1", true, null],
+      ["x1", true, null],
+      ["a1", false, null],
+      ["o2", true, null],
+      ["o3", false, null],
+    ]);
+  });
+
+  it("cuts a quote at 40 characters", () => {
+    expect(quoteOf("Sam", "a".repeat(41))).toBe(`Sam: ${"a".repeat(40)}…`);
+  });
+});
+
+describe("mergeConversationPages", () => {
+  const message = (id: string) => ({ id }) as InboxMessage;
+  const newest = { messages: [message("m3"), message("m4")], nextCursor: "c3" };
+
+  it("puts older pages above the newest one, once each", () => {
+    const older = {
+      messages: [message("m1"), message("m2"), message("m3")],
+      nextCursor: "c1",
+      joinId: "m3",
+    };
+    expect(mergeConversationPages(newest, older)).toMatchObject({
+      messages: ["m1", "m2", "m3", "m4"].map(message),
+      nextCursor: "c1",
+    });
+  });
+
+  it("drops older pages once the newest page no longer reaches them", () => {
+    const older = { messages: [message("m1")], nextCursor: null, joinId: "m2" };
+    expect(mergeConversationPages(newest, older)).toEqual({ ...newest, older: null });
   });
 });

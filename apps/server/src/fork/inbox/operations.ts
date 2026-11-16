@@ -40,6 +40,7 @@ import {
 import {
   Conversation,
   Message,
+  RawPage,
   SendResult,
   Timestamp,
   Topic,
@@ -128,6 +129,8 @@ const badRequest = (detail: string, field?: string) =>
 const CONVERSATION_LIMIT = 100;
 const TOPIC_LIMIT = 200;
 const MESSAGE_LIMIT = 200;
+/** One page of a conversation's chat; older pages load as the reader scrolls up. */
+const CONVERSATION_MESSAGE_LIMIT = 100;
 /** Page caps: far above a real inbox, low enough that a looping adapter cannot hang a request. */
 const CONVERSATION_PAGES = 20;
 const TOPIC_PAGES = 5;
@@ -143,6 +146,10 @@ const topicsPath = (conversationId: string) =>
   `/conversations/${enc(conversationId)}/topics?limit=${TOPIC_LIMIT}`;
 const messagesPath = (conversationId: string, topicId: string) =>
   `/conversations/${enc(conversationId)}/messages?topic=${enc(topicId)}&limit=${MESSAGE_LIMIT}`;
+const conversationMessagesPath = (conversationId: string, cursor: string | undefined) =>
+  `/conversations/${enc(conversationId)}/messages?order=desc&limit=${CONVERSATION_MESSAGE_LIMIT}${
+    cursor === undefined ? "" : `&cursor=${enc(cursor)}`
+  }`;
 
 export interface ProjectPathMatch {
   readonly path: string;
@@ -687,6 +694,46 @@ export const readTopic = Effect.fn("ForkInbox.readTopic")(function* (query: URLS
     // A conclusion outlives a deleted thread; the detail shows it as history.
     conclusionIsHistorical: artifacts.conclusion !== null && !current,
     previousThreads: history,
+  };
+});
+
+const ConversationInput = Schema.Struct({
+  channelId: Schema.String,
+  conversationId: Schema.String,
+  cursor: Schema.optional(Schema.String),
+});
+const decodeConversationInput = Schema.decodeUnknownEffect(ConversationInput);
+const decodeMessageExit = Schema.decodeUnknownExit(Message);
+
+/** One page of the conversation, newest first from the adapter, oldest first to the client. */
+export const readConversation = Effect.fn("ForkInbox.readConversation")(function* (
+  query: URLSearchParams,
+) {
+  const input = yield* decodeConversationInput(Object.fromEntries(query)).pipe(
+    Effect.mapError(() => badRequest("Name the channel and conversation.")),
+  );
+  const { hub } = yield* InboxRuntime;
+  const page = yield* attempt(() =>
+    hub.getJson(
+      input.channelId,
+      conversationMessagesPath(input.conversationId, input.cursor),
+      RawPage,
+      { cacheMs: 5_000 },
+    ),
+  );
+  const messages: Array<MessageType> = [];
+  let skipped = 0;
+  for (const raw of page.value.items) {
+    const decoded = decodeMessageExit(raw);
+    if (decoded._tag === "Success") messages.push(decoded.value);
+    else skipped += 1;
+  }
+  yield* warnSkipped(input.channelId, "messages", skipped);
+  return {
+    messages: sortMessages(messages),
+    nextCursor: page.value.nextCursor,
+    stale: page.stale,
+    skipped,
   };
 });
 
