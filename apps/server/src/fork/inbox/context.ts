@@ -36,7 +36,7 @@ export function fillTemplate(
 export const nameOrUnknown = (name: string) => (name.trim().length > 0 ? name.trim() : "Unknown");
 
 const skippedLine = (skipped: number, where: string) =>
-  `${skipped} ${skipped === 1 ? "message" : "messages"} in this topic could not be read and ${skipped === 1 ? "is" : "are"} missing ${where}.`;
+  `${skipped} ${skipped === 1 ? "message" : "messages"} in this conversation could not be read and ${skipped === 1 ? "is" : "are"} missing ${where}.`;
 
 export function firstMessage(input: {
   readonly template: string;
@@ -189,12 +189,20 @@ export function buildContextMarkdown(input: {
   readonly contextDir: string;
   readonly openUrl: string | null;
   readonly skippedMessages: number;
+  /** The reply thread's first message is gone from the adapter; only its replies are here. */
+  readonly rootMissing?: boolean;
 }): string {
   const conversationName = nameOrUnknown(input.conversation.name);
   const lines: string[] = [
     `# ${conversationName}`,
     "",
     ...(input.skippedMessages > 0 ? [skippedLine(input.skippedMessages, "below"), ""] : []),
+    ...(input.rootMissing
+      ? [
+          "The message this reply thread started from is no longer available; only its replies are below.",
+          "",
+        ]
+      : []),
     `- Channel: ${input.channelName}`,
     `- Conversation: ${conversationName} (${KIND_LABEL[input.conversation.kind]})`,
     ...(input.openUrl ? [`- Open in app: ${input.openUrl}`] : []),

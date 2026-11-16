@@ -113,7 +113,7 @@ async function errorFrom(response: Response): Promise<ForkApiError> {
   }
 }
 
-/** `path` is below `/api/fork`, such as `/inbox/items?channelId=x`. Renews the ticket once on 401. */
+/** `path` is below `/api/fork`, such as `/inbox/conversations?channelId=x`. Renews the ticket once on 401. */
 export async function forkRequest<T>(
   environmentId: EnvironmentId,
   path: string,

@@ -1,19 +1,19 @@
 import type {
   ConversationKind,
   InboxChannelSummary,
-  InboxItem,
+  InboxConversation,
+  InboxDelegation,
   InboxMessage,
-  TopicDetail,
 } from "../types";
 import { formatSince, formatSpan } from "../presentation";
 
-export type InboxView = "unread" | "waiting" | "all";
+export type InboxView = "unread" | "all" | "agent";
 export type InboxFilter = "all" | "dm" | "groups";
 
 export const INBOX_VIEWS: ReadonlyArray<{ readonly id: InboxView; readonly label: string }> = [
   { id: "unread", label: "Unread" },
-  { id: "waiting", label: "Waiting" },
   { id: "all", label: "All" },
+  { id: "agent", label: "Agent" },
 ];
 
 export const INBOX_FILTERS: ReadonlyArray<{ readonly id: InboxFilter; readonly label: string }> = [
@@ -24,20 +24,27 @@ export const INBOX_FILTERS: ReadonlyArray<{ readonly id: InboxFilter; readonly l
 
 const EMPTY_VIEW_TITLES: Readonly<Record<InboxView, string>> = {
   unread: "Nothing unread",
-  waiting: "Nothing waiting",
-  all: "No topics",
+  all: "No conversations",
+  agent: "No delegations",
 };
 
 const FILTER_NOUNS: Readonly<Record<Exclude<InboxFilter, "all">, string>> = {
   dm: "DMs",
-  groups: "group topics",
+  groups: "groups",
 };
 
 /** "Nothing unread", or "No unread DMs" when a filter is what empties the list. */
 export function emptyViewTitle(view: InboxView, filter: InboxFilter): string {
   if (filter === "all") return EMPTY_VIEW_TITLES[view];
   const noun = FILTER_NOUNS[filter];
-  return view === "all" ? `No ${noun}` : `No ${view} ${noun}`;
+  switch (view) {
+    case "unread":
+      return `No unread ${noun}`;
+    case "all":
+      return `No ${noun}`;
+    case "agent":
+      return `No delegations from ${noun}`;
+  }
 }
 
 /** "3 items from the adapter could not be read." */
@@ -46,14 +53,53 @@ export function skippedNotice(skipped: number): string | null {
   return `${skipped} ${skipped === 1 ? "item" : "items"} from the adapter could not be read.`;
 }
 
-export interface ConversationRow {
-  readonly message: InboxMessage;
-  /** The message's topic as the inbox lists it; null when the inbox does not list that topic. */
-  readonly item: InboxItem | null;
-  /** The row that carries the topic's state, actions, and selection. */
-  readonly anchor: boolean;
-  /** The message this one answers, in a group that shows replies inline. */
-  readonly quote: string | null;
+export const matchesFilter = (filter: InboxFilter, kind: ConversationKind | undefined) =>
+  filter === "all" || (filter === "dm" ? kind === "dm" : kind !== undefined && kind !== "dm");
+
+/** What a conversation's delegations show on its row. */
+export interface AgentSignals {
+  /** Delegations whose thread finished a run the user has not looked at. */
+  readonly unseen: number;
+  readonly drafts: number;
+  /** Delegations with a thread still linked. */
+  readonly live: number;
+}
+
+export function agentSignalsByConversation(
+  delegations: ReadonlyArray<InboxDelegation>,
+): ReadonlyMap<string, AgentSignals> {
+  const signals = new Map<string, AgentSignals>();
+  for (const delegation of delegations) {
+    const current = signals.get(delegation.conversationId) ?? { unseen: 0, drafts: 0, live: 0 };
+    const live = delegation.thread !== null && delegation.thread.detachedAt === null;
+    signals.set(delegation.conversationId, {
+      unseen: current.unseen + (delegation.agentUnseen ? 1 : 0),
+      drafts: current.drafts + (delegation.hasDraft ? 1 : 0),
+      live: current.live + (live ? 1 : 0),
+    });
+  }
+  return signals;
+}
+
+/**
+ * Whether the conversation belongs in Unread or All. The selected one stays in Unread once
+ * opened, so reading it does not pull it out from under the pointer.
+ */
+export function inView(
+  view: Exclude<InboxView, "agent">,
+  filter: InboxFilter,
+  conversation: Pick<InboxConversation, "id" | "kind" | "unread" | "mentioned">,
+  agent: AgentSignals | undefined,
+  selectedId: string | null = null,
+): boolean {
+  if (!matchesFilter(filter, conversation.kind)) return false;
+  if (view === "all") return true;
+  return (
+    conversation.unread ||
+    conversation.mentioned ||
+    (agent?.unseen ?? 0) > 0 ||
+    conversation.id === selectedId
+  );
 }
 
 const QUOTE_CHARS = 40;
@@ -66,45 +112,57 @@ export function quoteOf(author: string | null, text: string): string {
   return author === null ? head : `${nameOrUnknown(author)}: ${head}`;
 }
 
+/** The message as a quote: who wrote it and how it starts. */
+export const quoteOfMessage = (message: InboxMessage) =>
+  quoteOf(message.author.name, message.text || (message.richSummary ?? ""));
+
+export interface ConversationRow {
+  readonly message: InboxMessage;
+  /** What the message answers, as the chat app shows it above the message. */
+  readonly quote: string | null;
+  /** The delegations that start at this message. */
+  readonly delegations: ReadonlyArray<InboxDelegation>;
+}
+
 /**
- * A conversation as its chat app shows it. DMs and plain groups show every message, a reply
- * quoting what it answers; a topic group shows each topic once, by its root. A topic whose root
- * is older than what was read stands on its earliest message read.
+ * A conversation as its chat app shows it: every message, a reply quoting what it answers. The
+ * adapter names the answered message; one older than what was loaded is quoted from that.
  */
 export function conversationRows(
   messages: ReadonlyArray<InboxMessage>,
-  items: ReadonlyArray<InboxItem>,
-  kind: ConversationKind,
+  delegations: ReadonlyArray<InboxDelegation>,
 ): ReadonlyArray<ConversationRow> {
-  const itemsByTopic = new Map(items.map((item) => [item.topicId, item] as const));
   const byId = new Map(messages.map((message) => [message.id, message] as const));
-  const anchored = new Set<string>();
-  const rows: ConversationRow[] = [];
-  for (const message of messages) {
-    const item = itemsByTopic.get(message.topicId) ?? null;
-    const anchor = !anchored.has(message.topicId);
-    anchored.add(message.topicId);
-    if (kind === "topic_group" && !anchor) continue;
-    const root = item === null ? undefined : byId.get(item.rootMessageId);
-    const quote =
-      kind === "group" && item !== null && message.id !== item.rootMessageId
-        ? root
-          ? quoteOf(root.author.name, root.text || (root.richSummary ?? ""))
-          : quoteOf(null, item.preview)
-        : null;
-    rows.push({ message, item, anchor, quote });
+  const byAnchor = new Map<string, InboxDelegation[]>();
+  for (const delegation of delegations) {
+    const list = byAnchor.get(delegation.anchorMessageId) ?? [];
+    list.push(delegation);
+    byAnchor.set(delegation.anchorMessageId, list);
   }
-  return rows;
+  return messages.map((message) => {
+    const replyTo = message.replyTo ?? null;
+    const loaded = replyTo === null ? undefined : byId.get(replyTo.id);
+    const quote =
+      replyTo === null
+        ? null
+        : loaded
+          ? quoteOfMessage(loaded)
+          : replyTo.preview !== null
+            ? quoteOf(replyTo.authorName, replyTo.preview)
+            : "An earlier message";
+    return { message, quote, delegations: byAnchor.get(message.id) ?? [] };
+  });
 }
 
-/** What a reply in this topic answers, as the chat app will show it; none in a DM. */
-export function replyTargetOf(
-  detail: Pick<TopicDetail, "item" | "messages" | "conversation">,
-): string | null {
-  if (detail.conversation.kind === "dm") return null;
-  const root = detail.messages.find((message) => message.id === detail.item.rootMessageId);
-  return root ? quoteOf(root.author.name, root.text || (root.richSummary ?? "")) : null;
-}
+/**
+ * Where a delegation of this message starts. A reply thread is delegated from its root, so every
+ * message in it delegates the same thing; a range starts at the message itself.
+ */
+export const anchorOf = (message: InboxMessage, scope: "chain" | "range") =>
+  scope === "chain" ? (message.rootId ?? message.id) : message.id;
+
+/** A DM has no reply threads to speak of; a group's message usually starts or joins one. */
+export const defaultScope = (kind: ConversationKind) => (kind === "dm" ? "range" : "chain");
 
 export interface ConversationPage {
   readonly messages: ReadonlyArray<InboxMessage>;
@@ -136,66 +194,25 @@ export function mergeConversationPages(
   };
 }
 
-/**
- * Whether the item belongs in the list. The selected item stays in Unread once opened, so
- * reading it does not pull it out from under the pointer.
- */
-export function inView(
-  view: InboxView,
-  filter: InboxFilter,
-  item: InboxItem,
-  selectedId: string | null = null,
-): boolean {
-  const kindMatches =
-    filter === "all" ||
-    (filter === "dm" ? item.conversationKind === "dm" : item.conversationKind !== "dm");
-  if (!kindMatches) return false;
-  switch (view) {
-    case "unread":
-      return item.unread || item.id === selectedId;
-    case "waiting":
-      return item.awaitingReply;
-    case "all":
-      return true;
-  }
-}
-
-const WAITING_HIGHLIGHT_MS = 24 * 3_600_000;
-
 /** `useNowMinute` gives UTC "YYYY-MM-DDTHH:mm" with no zone, which Date.parse reads as local. */
 export const minuteToMs = (minute: string) => Date.parse(`${minute}:00Z`);
 
-/** Worked out here, not sent: a time-free list answers an unchanged read with a 304. */
-const waitMsOf = (item: Pick<InboxItem, "lastMessageAt">, now: number) =>
-  Math.max(0, now - Date.parse(item.lastMessageAt)) || 0;
-
-/** A topic I answered that has waited on them for over a day. */
-export const isOverdue = (item: Pick<InboxItem, "awaitingReply" | "lastMessageAt">, now: number) =>
-  item.awaitingReply && waitMsOf(item, now) > WAITING_HIGHLIGHT_MS;
-
-export function waitLabel(
-  item: Pick<InboxItem, "awaitingReply" | "lastMessageAt">,
-  now: number,
-): string {
-  const span = formatSpan(waitMsOf(item, now));
-  if (item.awaitingReply) return span === "now" ? "just sent" : `sent ${span} ago`;
-  return span;
-}
+/** How long ago, worked out here so an unchanged list answers a read with a 304. */
+export const agoLabel = (at: string, now: number) =>
+  formatSpan(Math.max(0, now - Date.parse(at)) || 0);
 
 /** Adapters may send an empty name. */
 export const nameOrUnknown = (name: string) => (name.trim().length > 0 ? name.trim() : "Unknown");
 
-/** "1 reply · Sam Okafor"; a waiting topic's last author is me, which its wait label says. */
-export function itemMeta(
-  item: Pick<InboxItem, "awaitingReply" | "replyCount" | "lastAuthor">,
-): string | null {
-  const parts: string[] = [];
-  if (item.replyCount > 0) {
-    parts.push(`${item.replyCount} ${item.replyCount === 1 ? "reply" : "replies"}`);
-  }
-  const author = item.lastAuthor.isSelf ? "You" : item.lastAuthor.name.trim();
-  if (!item.awaitingReply && author.length > 0) parts.push(author);
-  return parts.length > 0 ? parts.join(" · ") : null;
+/** The row's second line: the last message, with its author unless it is the DM's other person. */
+export function lastMessageLine(conversation: Pick<InboxConversation, "kind" | "lastMessage">) {
+  const last = conversation.lastMessage;
+  if (last === null) return "";
+  if (last.author.isSelf) return `You: ${last.preview}`;
+  const author = last.author.name.trim();
+  return conversation.kind === "dm" || author.length === 0
+    ? last.preview
+    : `${author}: ${last.preview}`;
 }
 
 export interface ChannelBanner {
@@ -232,31 +249,8 @@ export function channelBanner(
   }
 }
 
-/** A draft the reply box shows, and which thread wrote it. */
-export interface DraftSource {
-  readonly threadId: string | null;
-  readonly text: string;
-}
-
-/**
- * The reply box text after the topic's draft changes. A draft the user has not touched follows
- * the thread: it is replaced by the new draft, or cleared when the draft is withdrawn or another
- * thread takes over. Anything the user typed stays.
- */
-export function nextReplyText(
-  text: string,
-  shown: DraftSource | null,
-  next: DraftSource | null,
-): string {
-  const untouched = text === (shown?.text ?? "");
-  return untouched ? (next?.text ?? "") : text;
-}
-
-export const sameDraftSource = (left: DraftSource | null, right: DraftSource | null) =>
-  left?.threadId === right?.threadId && left?.text === right?.text;
-
-/** The topic as plain text, for pasting into another tool. */
-export function topicAsText(
+/** The messages as plain text, for pasting into another tool. */
+export function messagesAsText(
   conversationName: string,
   messages: ReadonlyArray<InboxMessage>,
 ): string {

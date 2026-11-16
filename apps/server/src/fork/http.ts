@@ -205,18 +205,18 @@ const routes = (runtime: InboxRuntimeShape) => {
     route("GET", `${INBOX}/overview`, AuthOrchestrationReadScope, Inbox.overview()),
     route(
       "GET",
-      `${INBOX}/items`,
+      `${INBOX}/conversations`,
       AuthOrchestrationReadScope,
       query.pipe(
         Effect.flatMap((params) => channelIdOf({ channelId: params.get("channelId") })),
-        Effect.flatMap(Inbox.listItems),
+        Effect.flatMap(Inbox.listInbox),
       ),
     ),
     route(
       "GET",
-      `${INBOX}/topic`,
+      `${INBOX}/delegation`,
       AuthOrchestrationReadScope,
-      query.pipe(Effect.flatMap(Inbox.readTopic)),
+      query.pipe(Effect.flatMap(Inbox.readDelegation)),
     ),
     route(
       "GET",
@@ -235,6 +235,12 @@ const routes = (runtime: InboxRuntimeShape) => {
       `${INBOX}/read`,
       AuthOrchestrationOperateScope,
       body.pipe(Effect.flatMap(Inbox.setRead)),
+    ),
+    route(
+      "POST",
+      `${INBOX}/seen`,
+      AuthOrchestrationOperateScope,
+      body.pipe(Effect.flatMap(Inbox.markSeen)),
     ),
     route(
       "POST",

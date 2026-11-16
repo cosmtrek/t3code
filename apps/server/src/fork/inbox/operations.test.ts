@@ -24,7 +24,7 @@ import * as ServerSettings from "../../serverSettings.ts";
 import { ChannelHub } from "../channels/hub.ts";
 import type { AdapterRequest, AdapterResponse } from "../channels/transport.ts";
 import { threadContextDir } from "./artifacts.ts";
-import { itemIdFor } from "./derive.ts";
+import { delegationIdFor } from "./derive.ts";
 import { InboxRuntime } from "./InboxRuntime.ts";
 import { followLinkedThreads } from "./linkedThreads.ts";
 import * as Inbox from "./operations.ts";
@@ -48,17 +48,23 @@ interface FakeMessage {
   readonly author: typeof ME | typeof THEM;
   readonly mentionsSelf?: boolean;
   readonly image?: { readonly key: string; readonly name: string };
+  /** The message this one answers. */
+  readonly replyTo?: string;
 }
 
-interface FakeTopic {
-  readonly conversationId: string;
+interface FakeConversation {
+  readonly id: string;
   readonly kind?: "dm" | "group" | "topic_group";
-  readonly topicId: string;
   readonly messages: ReadonlyArray<FakeMessage>;
+  /** Where the chat app shows I read through. */
+  readonly readThroughMinute?: number;
 }
 
 /** An adapter that serves one item per page, so every list takes several requests. */
-function fakeAdapter(topics: () => ReadonlyArray<FakeTopic>, sendAnswer: () => AdapterResponse) {
+function fakeAdapter(
+  conversations: () => ReadonlyArray<FakeConversation>,
+  sendAnswer: () => AdapterResponse,
+) {
   const paged = (items: ReadonlyArray<unknown>, url: URL) => {
     const index = Number(url.searchParams.get("cursor") ?? "0");
     return json(200, {
@@ -66,23 +72,58 @@ function fakeAdapter(topics: () => ReadonlyArray<FakeTopic>, sendAnswer: () => A
       nextCursor: index + 1 < items.length ? String(index + 1) : null,
     });
   };
-  const messageJson = (message: FakeMessage, topicId: string) => ({
-    id: message.id,
-    topicId,
-    createdAt: at(message.minute),
-    author: message.author,
-    mentionsSelf: message.mentionsSelf ?? false,
-    text: `text of ${message.id}`,
-    attachments: message.image ? [{ ...message.image, kind: "image" }] : [],
-    links: [],
-  });
+  const rootOf = (conversation: FakeConversation, message: FakeMessage): string => {
+    const parent = conversation.messages.find((candidate) => candidate.id === message.replyTo);
+    return parent ? rootOf(conversation, parent) : message.id;
+  };
+  const messageJson = (conversation: FakeConversation, message: FakeMessage) => {
+    const root = rootOf(conversation, message);
+    return {
+      id: message.id,
+      createdAt: at(message.minute),
+      rootId: root === message.id ? null : root,
+      replyTo:
+        message.replyTo === undefined
+          ? null
+          : { id: message.replyTo, authorName: null, preview: null },
+      author: message.author,
+      mentionsSelf: message.mentionsSelf ?? false,
+      text: `text of ${message.id}`,
+      attachments: message.image ? [{ ...message.image, kind: "image" }] : [],
+      links: [],
+    };
+  };
+  const timeOf = (message: FakeMessage | undefined) => (message ? at(message.minute) : null);
+  const summary = (conversation: FakeConversation) => {
+    const sorted = conversation.messages.toSorted((a, b) => a.minute - b.minute);
+    const last = sorted.at(-1);
+    const others = sorted.filter((message) => !message.author.isSelf);
+    return {
+      id: conversation.id,
+      kind: conversation.kind ?? "group",
+      name: conversation.id,
+      lastActivityAt: timeOf(last) ?? at(0),
+      relevant: true,
+      muted: false,
+      lastMessage: last
+        ? { id: last.id, createdAt: at(last.minute), author: last.author, preview: last.id }
+        : null,
+      lastOtherMessageAt: timeOf(others.at(-1)),
+      lastSelfMessageAt: timeOf(sorted.findLast((message) => message.author.isSelf)),
+      lastMentionAt: timeOf(sorted.findLast((message) => message.mentionsSelf === true)),
+      selfReadThroughAt:
+        conversation.readThroughMinute === undefined
+          ? null
+          : timeOf(others.findLast((message) => message.minute <= conversation.readThroughMinute!)),
+    };
+  };
   return (request: AdapterRequest): AdapterResponse => {
     const url = new URL(request.path, "http://adapter.invalid");
     const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
     if (request.method === "POST") return sendAnswer();
     if (url.pathname === "/health") {
       return json(200, {
-        protocol: 1,
+        protocol: 2,
         adapterVersion: "1",
         online: true,
         loggedIn: true,
@@ -98,59 +139,21 @@ function fakeAdapter(topics: () => ReadonlyArray<FakeTopic>, sendAnswer: () => A
         relevanceSummary: "All",
       });
     }
-    const all = topics();
+    const all = conversations();
     if (parts.length === 1 && parts[0] === "conversations") {
-      const ids = [...new Set(all.map((topic) => topic.conversationId))];
       return paged(
-        ids.map((id) => ({
-          id,
-          kind: all.find((topic) => topic.conversationId === id)?.kind ?? "group",
-          name: id,
-          lastActivityAt: at(0),
-          relevant: true,
-          muted: false,
-        })),
+        all.map(summary).toSorted((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt)),
         url,
       );
     }
-    if (parts[2] === "topics") {
-      return paged(
-        all
-          .filter((topic) => topic.conversationId === parts[1])
-          .map((topic) => {
-            const sorted = topic.messages.toSorted((a, b) => a.minute - b.minute);
-            const last = sorted[sorted.length - 1]!;
-            const lastOwn = sorted.findLastIndex((message) => message.author.isSelf);
-            const lastOther = sorted.findLast((message) => !message.author.isSelf);
-            return {
-              id: topic.topicId,
-              rootMessageId: sorted[0]!.id,
-              rootPreview: topic.topicId,
-              replyCount: sorted.length - 1,
-              lastMessageAt: at(last.minute),
-              lastAuthor: last.author,
-              participatedBySelf: lastOwn !== -1,
-              lastOtherMessageAt: lastOther ? at(lastOther.minute) : null,
-              mentionsSelfSinceOwn: sorted
-                .slice(lastOwn + 1)
-                .some((message) => message.mentionsSelf === true),
-            };
-          }),
-        url,
-      );
-    }
-    if (parts[2] === "messages") {
-      const wanted = url.searchParams.get("topic");
+    const conversation = all.find((candidate) => candidate.id === parts[1]);
+    if (conversation && parts[2] === "messages") {
+      const root = url.searchParams.get("root");
       // Newest first, as some adapters page: the inbox must sort before reading.
-      const messages = all
-        .filter(
-          (candidate) =>
-            candidate.conversationId === parts[1] &&
-            (wanted === null || candidate.topicId === wanted),
-        )
-        .flatMap((topic) => topic.messages.map((message) => ({ message, topic })))
-        .toSorted((a, b) => b.message.minute - a.message.minute)
-        .map(({ message, topic }) => messageJson(message, topic.topicId));
+      const messages = conversation.messages
+        .filter((message) => root === null || rootOf(conversation, message) === root)
+        .toSorted((a, b) => b.minute - a.minute)
+        .map((message) => messageJson(conversation, message));
       return paged(messages, url);
     }
     return json(404, { error: { code: "unknown", message: "Not found" } });
@@ -163,6 +166,8 @@ interface Harness {
   readonly channelId: string;
   /** Every path asked of the adapter. */
   readonly requests: string[];
+  /** Every body posted to the adapter. */
+  readonly posted: unknown[];
   readonly runtime: InboxRuntime["Service"];
   readonly shells: Map<string, OrchestrationV2ThreadShell | null>;
   /** Each thread's messages, as `getThreadRecords` reads them. */
@@ -172,30 +177,28 @@ interface Harness {
   readonly layer: Layer.Layer<
     InboxRuntime | ThreadManagement.ThreadManagementService | Project.ProjectService
   >;
-  readonly keyOf: (
-    conversationId: string,
-    topicId: string,
-  ) => {
+  readonly keyOf: (conversationId: string) => {
     readonly channelId: string;
     readonly conversationId: string;
-    readonly topicId: string;
   };
 }
 
 async function harness(
-  topics: () => ReadonlyArray<FakeTopic>,
+  conversations: () => ReadonlyArray<FakeConversation>,
   sendAnswer: () => AdapterResponse = () => json(200, { messageId: "sent-1" }),
 ): Promise<Harness> {
   const dir = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-inbox-"));
   const tokenFile = NodePath.join(dir, "token");
   await NodeFSP.writeFile(tokenFile, `${TOKEN}\n`, { mode: 0o600 });
-  const handle = fakeAdapter(topics, sendAnswer);
+  const handle = fakeAdapter(conversations, sendAnswer);
   const requests: string[] = [];
+  const posted: unknown[] = [];
   const hub = new ChannelHub({
     configPath: NodePath.join(dir, "channels.json"),
     transportFor: () => ({
       request: async (request) => {
         requests.push(request.path);
+        if (request.method === "POST") posted.push(request.body);
         return handle(request);
       },
       events: () => new Promise(() => undefined),
@@ -245,12 +248,13 @@ async function harness(
   return {
     channelId,
     requests,
+    posted,
     runtime,
     shells,
     threadMessages,
     sent,
     layer,
-    keyOf: (conversationId, topicId) => ({ channelId, conversationId, topicId }),
+    keyOf: (conversationId) => ({ channelId, conversationId }),
   };
 }
 
@@ -266,63 +270,119 @@ const idleShell = (threadId: string) =>
     latestRunCompletedAt: null,
   }) as unknown as OrchestrationV2ThreadShell;
 
+/** Saves a delegation anchored at `anchorMessageId`; null scope is one made from a v1 topic. */
+const saveDelegation = (
+  h: Harness,
+  conversationId: string,
+  anchorMessageId: string,
+  scope: "chain" | "range" | null = "chain",
+) => {
+  const key = { ...h.keyOf(conversationId), anchorMessageId };
+  const id = delegationIdFor(key);
+  if (h.runtime.store.getDelegation(id) === null) {
+    h.runtime.store.saveDelegation({
+      ...key,
+      id,
+      scope,
+      untilAt: null,
+      preview: null,
+      createdAt: at(0),
+    });
+    // As a delegation publishes once saved.
+    h.runtime.hub.invalidate(h.channelId);
+  }
+  return id;
+};
+
 const linkThread = (
   h: Harness,
-  key: ReturnType<Harness["keyOf"]>,
+  conversationId: string,
+  anchorMessageId: string,
   threadId: string,
   minute: number,
+  scope: "chain" | "range" | null = "chain",
 ) =>
   Effect.promise(async () => {
-    const itemId = itemIdFor(key);
-    h.runtime.store.addLink({ ...key, itemId, threadId, projectId: "p", createdAt: at(minute) });
+    const delegationId = saveDelegation(h, conversationId, anchorMessageId, scope);
+    h.runtime.store.addLink({
+      ...h.keyOf(conversationId),
+      delegationId,
+      threadId,
+      projectId: "p",
+      createdAt: at(minute),
+    });
     h.shells.set(threadId, idleShell(threadId));
-    const dir = threadContextDir(h.runtime.itemsDir, itemId, threadId);
+    const dir = threadContextDir(h.runtime.itemsDir, delegationId, threadId);
     await NodeFSP.mkdir(dir, { recursive: true });
-    return dir;
+    return { dir, delegationId };
   });
 
+const delegationQuery = (h: Harness, delegationId: string) =>
+  new URLSearchParams({ channelId: h.channelId, delegationId });
+
+const listOf = (h: Harness) => Inbox.listInbox(h.channelId).pipe(Effect.provide(h.layer));
+
+const launchLayer = (h: Harness, launched: Array<ThreadLaunch.ThreadLaunchInput>) =>
+  Layer.mergeAll(
+    h.layer,
+    Layer.mock(Project.ProjectService)({
+      listShells: () =>
+        Effect.succeed([
+          { id: "p", title: "p", workspaceRoot: "/code/p", archivedAt: null },
+        ] as never),
+    }),
+    Layer.mock(ServerSettings.ServerSettingsService)({
+      getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
+    }),
+    Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+    Layer.succeed(ServerConfig.ServerConfig, {} as never),
+    Layer.mock(ThreadLaunch.ThreadLaunchService)({
+      launch: (input) => {
+        launched.push(input);
+        return Effect.succeed({ threadId: input.threadId } as never);
+      },
+    }),
+    Layer.mock(DocumentText.DocumentText)({}),
+    FileSystem.layerNoop({}),
+  );
+
 describe("inbox listing", () => {
-  it.effect("reads every page of conversations, topics, and messages", () =>
+  it.effect("lists one row per conversation and reads every page", () =>
     Effect.gen(function* () {
       const h = yield* Effect.promise(() =>
         harness(() => [
+          { id: "c-first", messages: [{ id: "a1", minute: 1, author: THEM }] },
           {
-            conversationId: "c-first",
-            topicId: "t-a",
-            messages: [{ id: "a1", minute: 1, author: THEM }],
-          },
-          {
-            conversationId: "c-second",
-            topicId: "t-joined",
+            id: "c-second",
             messages: [
-              // Oldest first: the adapter pages newest first, so these come last.
               { id: "j1", minute: 1, author: ME },
-              { id: "j2", minute: 2, author: THEM },
-              { id: "j3", minute: 3, author: THEM },
+              { id: "j2", minute: 2, author: THEM, replyTo: "j1" },
+              { id: "j3", minute: 3, author: THEM, replyTo: "j2" },
               { id: "j4", minute: 4, author: THEM, mentionsSelf: true },
-            ],
-          },
-          {
-            conversationId: "c-second",
-            topicId: "t-second-page",
-            messages: [
               { id: "s1", minute: 5, author: THEM, image: { key: "k", name: "same.png" } },
               { id: "s2", minute: 6, author: ME },
             ],
           },
+          {
+            id: "c-read-there",
+            readThroughMinute: 2,
+            messages: [{ id: "r1", minute: 2, author: THEM }],
+          },
         ]),
       );
-      const result = yield* Inbox.listItems(h.channelId).pipe(Effect.provide(h.layer));
-      const byTopic = new Map(result.items.map((item) => [item.topicId, item] as const));
-      expect([...byTopic.keys()].toSorted()).toEqual(["t-a", "t-joined", "t-second-page"]);
-      // A topic I joined that mentions me after my last message is direct, not participated.
-      expect(byTopic.get("t-joined")).toMatchObject({ category: "direct", unread: true });
-      expect(byTopic.get("t-second-page")).toMatchObject({ unread: false, awaitingReply: true });
-
-      const topic = yield* Inbox.readTopic(
-        new URLSearchParams(h.keyOf("c-second", "t-joined")),
-      ).pipe(Effect.provide(h.layer));
-      expect(topic.messages.map((message) => message.id)).toEqual(["j1", "j2", "j3", "j4"]);
+      const result = yield* listOf(h);
+      expect(result.conversations.map((row) => row.id)).toEqual([
+        "c-second",
+        "c-read-there",
+        "c-first",
+      ]);
+      const byId = new Map(result.conversations.map((row) => [row.id, row] as const));
+      // My last message reads it; the mention before it is answered.
+      expect(byId.get("c-second")).toMatchObject({ unread: false, mentioned: false });
+      expect(byId.get("c-first")).toMatchObject({ unread: true, mentioned: false });
+      // Read in the chat app.
+      expect(byId.get("c-read-there")).toMatchObject({ unread: false });
+      expect(h.requests.some((path) => path.includes("/topics"))).toBe(false);
 
       // The chat view reads one page at a time, newest page first, and pages back by cursor.
       const conversation = (cursor?: string) =>
@@ -339,54 +399,63 @@ describe("inbox listing", () => {
       const older = yield* conversation(newest.nextCursor!);
       expect(older.messages.map((message) => message.id)).toEqual(["s1"]);
       expect(h.requests.filter((path) => path.includes("order=desc"))).toHaveLength(2);
+
+      // A delegation reads its whole reply thread, every page, oldest first.
+      const delegationId = saveDelegation(h, "c-second", "j1");
+      const detail = yield* Inbox.readDelegation(delegationQuery(h, delegationId)).pipe(
+        Effect.provide(h.layer),
+      );
+      expect(detail.messages.map((message) => message.id)).toEqual(["j1", "j2", "j3"]);
+      expect(detail).toMatchObject({ complete: true, rootMissing: false });
     }),
   );
 
-  it.effect("reads a topic up to what the client saw, and unreads it on a newer message", () =>
-    Effect.gen(function* () {
-      const messages: FakeMessage[] = [{ id: "m1", minute: 1, author: THEM }];
-      const h = yield* Effect.promise(() =>
-        harness(() => [{ conversationId: "c", topicId: "t", messages }]),
-      );
-      const key = h.keyOf("c", "t");
-      const list = () =>
-        Inbox.listItems(h.channelId).pipe(
-          Effect.map((result) => result.items[0]),
+  it.effect(
+    "reads a conversation up to what the client saw, and unreads it on a newer message",
+    () =>
+      Effect.gen(function* () {
+        const messages: FakeMessage[] = [{ id: "m1", minute: 1, author: THEM }];
+        const h = yield* Effect.promise(() => harness(() => [{ id: "c", kind: "dm", messages }]));
+        const key = h.keyOf("c");
+        const row = () => listOf(h).pipe(Effect.map((result) => result.conversations[0]));
+        h.requests.length = 0;
+        yield* Inbox.setRead({ ...key, read: true, lastMessageAt: at(1) }).pipe(
           Effect.provide(h.layer),
         );
-      h.requests.length = 0;
-      yield* Inbox.setRead({ ...key, read: true, lastMessageAt: at(1) }).pipe(
-        Effect.provide(h.layer),
-      );
-      expect(h.requests).toEqual([]);
-      expect(yield* list()).toMatchObject({ unread: false });
-      messages.push({ id: "m2", minute: 2, author: THEM });
-      h.runtime.hub.invalidate(h.channelId);
-      expect(yield* list()).toMatchObject({ unread: true });
-      yield* Inbox.setRead({ ...key, read: true, lastMessageAt: at(2) }).pipe(
-        Effect.provide(h.layer),
-      );
-      yield* Inbox.setRead({ ...key, read: false }).pipe(Effect.provide(h.layer));
-      expect(yield* list()).toMatchObject({ unread: true });
-      yield* Inbox.markAllRead({ channelId: h.channelId, before: at(2) }).pipe(
-        Effect.provide(h.layer),
-      );
-      expect(yield* list()).toMatchObject({ unread: false });
-      // Overview counts only what is still unread.
-      const overview = yield* Inbox.overview().pipe(Effect.provide(h.layer));
-      expect(overview.channels.find((channel) => channel.id === h.channelId)?.unreadCount).toBe(0);
-    }),
+        expect(h.requests).toEqual([]);
+        expect(yield* row()).toMatchObject({ unread: false });
+        messages.push({ id: "m2", minute: 2, author: THEM });
+        h.runtime.hub.invalidate(h.channelId);
+        expect(yield* row()).toMatchObject({ unread: true });
+        // An unread DM counts toward the badge.
+        const badge = () =>
+          Inbox.overview().pipe(
+            Effect.map(
+              (overview) =>
+                overview.channels.find((channel) => channel.id === h.channelId)?.unreadCount,
+            ),
+            Effect.provide(h.layer),
+          );
+        expect(yield* badge()).toBe(1);
+        yield* Inbox.setRead({ ...key, read: true, lastMessageAt: at(2) }).pipe(
+          Effect.provide(h.layer),
+        );
+        yield* Inbox.setRead({ ...key, read: false }).pipe(Effect.provide(h.layer));
+        expect(yield* row()).toMatchObject({ unread: true });
+        yield* Inbox.markAllRead({ channelId: h.channelId, before: at(2) }).pipe(
+          Effect.provide(h.layer),
+        );
+        expect(yield* row()).toMatchObject({ unread: false });
+        expect(yield* badge()).toBe(0);
+      }),
   );
 
   it.effect("shows a finished run until the client reports seeing it", () =>
     Effect.gen(function* () {
       const h = yield* Effect.promise(() =>
-        harness(() => [
-          { conversationId: "c", topicId: "t", messages: [{ id: "m1", minute: 1, author: ME }] },
-        ]),
+        harness(() => [{ id: "c", messages: [{ id: "m1", minute: 1, author: ME }] }]),
       );
-      const key = h.keyOf("c", "t");
-      yield* linkThread(h, key, "thread-1", 1);
+      const { delegationId } = yield* linkThread(h, "c", "m1", "thread-1", 1);
       const finished = (status: string, extra: Record<string, unknown> = {}) => {
         h.shells.set("thread-1", {
           ...idleShell("thread-1"),
@@ -397,14 +466,10 @@ describe("inbox listing", () => {
         } as never);
         h.runtime.hub.invalidate(h.channelId);
       };
-      const item = () =>
-        Inbox.listItems(h.channelId).pipe(
-          Effect.map((result) => result.items[0]),
-          Effect.provide(h.layer),
-        );
+      const item = () => listOf(h).pipe(Effect.map((result) => result.delegations[0]));
       finished("completed");
       expect(yield* item()).toMatchObject({
-        unread: true,
+        id: delegationId,
         agentUnseen: true,
         thread: { runCompletedAt: at(5) },
       });
@@ -419,33 +484,34 @@ describe("inbox listing", () => {
         expect(yield* item()).toMatchObject({ agentUnseen: false });
       }
       finished("failed");
-      yield* Inbox.setRead({ ...key, read: true, runCompletedAt: at(5) }).pipe(
+      yield* Inbox.markSeen({ channelId: h.channelId, delegationId, runCompletedAt: at(5) }).pipe(
         Effect.provide(h.layer),
       );
-      expect(yield* item()).toMatchObject({ unread: false, agentUnseen: false });
+      expect(yield* item()).toMatchObject({ agentUnseen: false });
     }),
   );
 
   it.effect("shares one read of the channel until something in it changes", () =>
     Effect.gen(function* () {
       const messages: FakeMessage[] = [{ id: "m1", minute: 1, author: THEM }];
-      const h = yield* Effect.promise(() =>
-        harness(() => [{ conversationId: "c", topicId: "t", messages }]),
-      );
-      const key = h.keyOf("c", "t");
-      const reads = vi.spyOn(h.runtime.store, "listReads");
+      const h = yield* Effect.promise(() => harness(() => [{ id: "c", messages }]));
+      const delegationId = saveDelegation(h, "c", "m1");
+      const reads = vi.spyOn(h.runtime.store, "listConversationReads");
       yield* Effect.all(
-        [Inbox.overview(), Inbox.listItems(h.channelId), Inbox.readTopic(new URLSearchParams(key))],
+        [
+          Inbox.overview(),
+          Inbox.listInbox(h.channelId),
+          Inbox.readDelegation(delegationQuery(h, delegationId)),
+        ],
         { concurrency: "unbounded" },
       ).pipe(Effect.provide(h.layer));
       expect(reads).toHaveBeenCalledTimes(1);
-      yield* Inbox.setRead({ ...key, read: true, lastMessageAt: at(1) }).pipe(
+      yield* Inbox.setRead({ ...h.keyOf("c"), read: true, lastMessageAt: at(1) }).pipe(
         Effect.provide(h.layer),
       );
-      const result = yield* Inbox.listItems(h.channelId).pipe(Effect.provide(h.layer));
+      const result = yield* listOf(h);
       expect(reads).toHaveBeenCalledTimes(2);
-      expect(result.items[0]).toMatchObject({ unread: false });
-      expect(result.items[0]).not.toHaveProperty("waitMs");
+      expect(result.conversations[0]).toMatchObject({ unread: false });
     }),
   );
 
@@ -454,37 +520,58 @@ describe("inbox listing", () => {
       const h = yield* Effect.promise(() =>
         harness(() =>
           Array.from({ length: 21 }, (_, index) => ({
-            conversationId: `c${index}`,
-            topicId: "t",
+            id: `c${index}`,
             messages: [{ id: `m${index}`, minute: 1, author: THEM }],
           })),
         ),
       );
-      const result = yield* Inbox.listItems(h.channelId).pipe(Effect.provide(h.layer));
-      expect(result.items).toHaveLength(20);
+      const result = yield* listOf(h);
+      expect(result.conversations).toHaveLength(20);
       expect(result.truncatedAtPages).toBe(20);
+    }),
+  );
+
+  it.effect("reads a delegation made from a v1 DM topic as its six-hour window", () =>
+    Effect.gen(function* () {
+      const h = yield* Effect.promise(() =>
+        harness(() => [
+          {
+            id: "c",
+            kind: "dm",
+            messages: [
+              { id: "before", minute: 0, author: THEM },
+              { id: "anchor", minute: 1, author: THEM },
+              { id: "inside", minute: 300, author: ME },
+              { id: "after", minute: 1_000, author: THEM },
+            ],
+          },
+        ]),
+      );
+      const delegationId = saveDelegation(h, "c", "anchor", null);
+      const detail = yield* Inbox.readDelegation(delegationQuery(h, delegationId)).pipe(
+        Effect.provide(h.layer),
+      );
+      expect(detail.messages.map((message) => message.id)).toEqual(["anchor", "inside"]);
     }),
   );
 });
 
 describe("delegating", () => {
-  it.effect("offers the project the topic's last thread used", () =>
+  it.effect("offers the project the delegation's last thread used", () =>
     Effect.gen(function* () {
       const h = yield* Effect.promise(() =>
-        harness(() => [
-          { conversationId: "c", topicId: "t", messages: [{ id: "m1", minute: 1, author: THEM }] },
-        ]),
+        harness(() => [{ id: "c", messages: [{ id: "m1", minute: 1, author: THEM }] }]),
       );
-      const key = h.keyOf("c", "t");
+      yield* linkThread(h, "c", "m1", "thread-1", 1);
       h.runtime.store.addLink({
-        ...key,
-        itemId: itemIdFor(key),
-        threadId: "thread-1",
+        ...h.keyOf("c"),
+        delegationId: delegationIdFor({ ...h.keyOf("c"), anchorMessageId: "m1" }),
+        threadId: "thread-2",
         projectId: "p-second",
-        createdAt: at(1),
+        createdAt: at(2),
       });
-      h.shells.set("thread-1", {
-        ...idleShell("thread-1"),
+      h.shells.set("thread-2", {
+        ...idleShell("thread-2"),
         worktreePath: "/code/p-second-worktree",
       } as OrchestrationV2ThreadShell);
       const project = (id: string) => ({
@@ -493,7 +580,9 @@ describe("delegating", () => {
         workspaceRoot: `/code/${id}`,
         archivedAt: null,
       });
-      const options = yield* Inbox.delegateOptions(new URLSearchParams(key)).pipe(
+      const options = yield* Inbox.delegateOptions(
+        new URLSearchParams({ ...h.keyOf("c"), anchorMessageId: "m1" }),
+      ).pipe(
         Effect.provide(
           Layer.mergeAll(
             h.layer,
@@ -507,7 +596,7 @@ describe("delegating", () => {
           ),
         ),
       );
-      expect(options.defaultProjectId).toBe("p-second");
+      expect(options).toMatchObject({ scope: "chain", defaultProjectId: "p-second" });
       // The last thread's checkout, so another thread continues where it worked.
       expect(options.defaultWorkspaceStrategy).toEqual({
         type: "existing_worktree",
@@ -519,49 +608,32 @@ describe("delegating", () => {
   it.effect("starts the thread in the checkout asked for, the project's when none is", () =>
     Effect.gen(function* () {
       const h = yield* Effect.promise(() =>
-        harness(() =>
-          ["t-root", "t-worktree", "t-bad"].map((topicId) => ({
-            conversationId: "c",
-            topicId,
-            messages: [{ id: `m-${topicId}`, minute: 1, author: THEM }],
-          })),
-        ),
+        harness(() => [
+          {
+            id: "c",
+            messages: ["root", "worktree", "bad"].map((id, index) => ({
+              id,
+              minute: index,
+              author: THEM,
+            })),
+          },
+        ]),
       );
       const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
-      const layer = Layer.mergeAll(
-        h.layer,
-        Layer.mock(Project.ProjectService)({
-          listShells: () =>
-            Effect.succeed([
-              { id: "p", title: "p", workspaceRoot: "/code/p", archivedAt: null },
-            ] as never),
-        }),
-        Layer.mock(ServerSettings.ServerSettingsService)({
-          getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
-        }),
-        Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
-        Layer.succeed(ServerConfig.ServerConfig, {} as never),
-        Layer.mock(ThreadLaunch.ThreadLaunchService)({
-          launch: (input) => {
-            launched.push(input);
-            return Effect.succeed({ threadId: input.threadId } as never);
-          },
-        }),
-        Layer.mock(DocumentText.DocumentText)({}),
-        FileSystem.layerNoop({}),
-      );
-      const delegate = (topicId: string, workspaceStrategy?: unknown) =>
+      const delegate = (anchorMessageId: string, workspaceStrategy?: unknown) =>
         Inbox.delegate({
-          ...h.keyOf("c", topicId),
+          ...h.keyOf("c"),
+          anchorMessageId,
+          scope: "chain",
           projectId: "p",
           templateId: "t",
           modelSelection: { instanceId: "codex", model: "gpt" },
           ...(workspaceStrategy === undefined ? {} : { workspaceStrategy }),
-        }).pipe(Effect.provide(layer));
+        }).pipe(Effect.provide(launchLayer(h, launched)));
 
-      yield* delegate("t-root");
+      yield* delegate("root");
       const worktree = { type: "worktree", baseRef: "main", startFromOrigin: true };
-      yield* delegate("t-worktree", worktree);
+      const second = yield* delegate("worktree", worktree);
       expect(launched.map((input) => input.workspaceStrategy)).toEqual([
         { type: "root" },
         worktree,
@@ -569,11 +641,7 @@ describe("delegating", () => {
       const request = yield* Effect.promise(() =>
         NodeFSP.readFile(
           NodePath.join(
-            threadContextDir(
-              h.runtime.itemsDir,
-              itemIdFor(h.keyOf("c", "t-worktree")),
-              launched[1]!.threadId!,
-            ),
+            threadContextDir(h.runtime.itemsDir, second.delegationId, launched[1]!.threadId!),
             "request.json",
           ),
           "utf8",
@@ -581,30 +649,100 @@ describe("delegating", () => {
       );
       expect(JSON.parse(request).workspaceStrategy).toEqual(worktree);
 
-      const error = yield* delegate("t-bad", { type: "worktree" }).pipe(Effect.flip);
+      const error = yield* delegate("bad", { type: "worktree" }).pipe(Effect.flip);
       expect(error).toMatchObject({ status: 400, field: "workspaceStrategy" });
       expect(launched).toHaveLength(2);
     }),
   );
 
-  it.effect("refuses a topic longer than the pages it reads, before starting anything", () =>
+  it.effect("gives the thread the reply thread, or the range asked for, and nothing else", () =>
     Effect.gen(function* () {
       const h = yield* Effect.promise(() =>
         harness(() => [
           {
-            conversationId: "c",
-            kind: "dm",
-            topicId: "t",
-            messages: Array.from({ length: 51 }, (_, index) => ({
-              id: `m${index}`,
-              minute: index,
-              author: THEM,
-            })),
+            id: "c",
+            messages: [
+              { id: "root", minute: 1, author: THEM },
+              { id: "aside", minute: 2, author: THEM },
+              { id: "reply", minute: 3, author: ME, replyTo: "root" },
+              { id: "late", minute: 4, author: THEM },
+            ],
           },
         ]),
       );
+      const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+      const delegate = (input: Record<string, unknown>) =>
+        Inbox.delegate({ ...h.keyOf("c"), projectId: "p", templateId: "t", ...input }).pipe(
+          Effect.provide(launchLayer(h, launched)),
+        );
+      const contextOf = (result: { delegationId: string; threadId: string }) =>
+        Effect.promise(() =>
+          NodeFSP.readFile(
+            NodePath.join(
+              threadContextDir(h.runtime.itemsDir, result.delegationId, result.threadId),
+              "context.md",
+            ),
+            "utf8",
+          ),
+        );
+      const mentioned = (context: string) =>
+        ["root", "aside", "reply", "late"].filter((id) => context.includes(`text of ${id}\n`));
+      const modelSelection = { instanceId: "codex", model: "gpt" };
+
+      const chain = yield* delegate({ anchorMessageId: "root", scope: "chain", modelSelection });
+      expect(mentioned(yield* contextOf(chain))).toEqual(["root", "reply"]);
+
+      const range = yield* delegate({
+        anchorMessageId: "aside",
+        scope: "range",
+        untilMessageId: "reply",
+        modelSelection,
+      });
+      expect(mentioned(yield* contextOf(range))).toEqual(["aside", "reply"]);
+      expect(h.runtime.store.getDelegation(range.delegationId)).toMatchObject({
+        scope: "range",
+        untilAt: at(3),
+        preview: "text of aside",
+      });
+      // Read again later, the range stays where it was delegated.
+      const detail = yield* Inbox.readDelegation(delegationQuery(h, range.delegationId)).pipe(
+        Effect.provide(h.layer),
+      );
+      expect(detail.messages.map((message) => message.id)).toEqual(["aside", "reply"]);
+
+      const backwards = yield* delegate({
+        anchorMessageId: "reply",
+        scope: "range",
+        untilMessageId: "aside",
+        modelSelection,
+      }).pipe(Effect.flip);
+      expect(backwards).toMatchObject({ status: 400, field: "untilMessageId" });
+    }),
+  );
+
+  it.effect.each([
+    [
+      "a reply thread longer than the pages it reads",
+      "chain",
+      Array.from({ length: 51 }, (_, index) => ({
+        id: `m${index}`,
+        minute: index,
+        author: THEM,
+        ...(index === 0 ? {} : { replyTo: "m0" }),
+      })),
+    ],
+    [
+      "a range starting further back than it reads",
+      "range",
+      Array.from({ length: 21 }, (_, index) => ({ id: `m${index}`, minute: index, author: THEM })),
+    ],
+  ] as const)("refuses %s, before starting anything", ([_name, scope, messages]) =>
+    Effect.gen(function* () {
+      const h = yield* Effect.promise(() => harness(() => [{ id: "c", kind: "dm", messages }]));
       const error = yield* Inbox.delegate({
-        ...h.keyOf("c", "t"),
+        ...h.keyOf("c"),
+        anchorMessageId: "m0",
+        scope,
         projectId: "p",
         templateId: "t",
       }).pipe(
@@ -622,62 +760,56 @@ describe("delegating", () => {
         ),
         Effect.flip,
       );
-      expect(error.code).toBe("topic_too_long");
+      expect(error.code).toBe("scope_too_long");
       expect(h.runtime.store.listLinks(h.channelId)).toEqual([]);
+      expect(h.runtime.store.listDelegations(h.channelId)).toEqual([]);
     }),
   );
 });
 
 describe("linked threads and their files", () => {
-  const oneTopic = (): ReadonlyArray<FakeTopic> => [
-    {
-      conversationId: "c",
-      kind: "dm",
-      topicId: "t",
-      messages: [{ id: "m1", minute: 1, author: THEM }],
-    },
+  const oneConversation = (): ReadonlyArray<FakeConversation> => [
+    { id: "c", kind: "dm", messages: [{ id: "m1", minute: 1, author: THEM }] },
   ];
 
   it.effect("shows only the current thread's draft, whatever an older thread writes", () =>
     Effect.gen(function* () {
-      const h = yield* Effect.promise(() => harness(oneTopic));
-      const key = h.keyOf("c", "t");
-      const oldDir = yield* linkThread(h, key, "thread-old", 1);
-      yield* Effect.promise(() => NodeFSP.writeFile(NodePath.join(oldDir, "draft.md"), "old\n"));
+      const h = yield* Effect.promise(() => harness(oneConversation));
+      const old = yield* linkThread(h, "c", "m1", "thread-old", 1);
+      yield* Effect.promise(() => NodeFSP.writeFile(NodePath.join(old.dir, "draft.md"), "old\n"));
       // A second delegation replaced the first.
-      h.runtime.store.detachLink(itemIdFor(key), "thread-old", "replaced", at(2));
-      yield* linkThread(h, key, "thread-new", 2);
-      const query = new URLSearchParams(key);
-      const fresh = yield* Inbox.readTopic(query).pipe(Effect.provide(h.layer));
+      h.runtime.store.detachLink(old.delegationId, "thread-old", "replaced", at(2));
+      yield* linkThread(h, "c", "m1", "thread-new", 2);
+      const query = delegationQuery(h, old.delegationId);
+      const fresh = yield* Inbox.readDelegation(query).pipe(Effect.provide(h.layer));
       expect(fresh.draft).toBeNull();
-      expect(fresh.item.hasDraft).toBe(false);
+      expect(fresh.delegation.hasDraft).toBe(false);
       expect(fresh.previousThreads.map((thread) => thread.threadId)).toEqual(["thread-old"]);
       // The old thread finishes later and writes again.
-      yield* Effect.promise(() => NodeFSP.writeFile(NodePath.join(oldDir, "draft.md"), "late\n"));
-      expect((yield* Inbox.readTopic(query).pipe(Effect.provide(h.layer))).draft).toBeNull();
+      yield* Effect.promise(() => NodeFSP.writeFile(NodePath.join(old.dir, "draft.md"), "late\n"));
+      expect((yield* Inbox.readDelegation(query).pipe(Effect.provide(h.layer))).draft).toBeNull();
     }),
   );
 
-  it.effect("treats a deleted thread's files as history, not as the item's state", () =>
+  it.effect("treats a deleted thread's files as history, not as the delegation's state", () =>
     Effect.gen(function* () {
-      const h = yield* Effect.promise(() => harness(oneTopic));
-      const key = h.keyOf("c", "t");
-      const dir = yield* linkThread(h, key, "thread-1", 1);
+      const h = yield* Effect.promise(() => harness(oneConversation));
+      const { dir, delegationId } = yield* linkThread(h, "c", "m1", "thread-1", 1);
       yield* Effect.promise(() =>
         Promise.all([
           NodeFSP.writeFile(NodePath.join(dir, "draft.md"), "reply\n"),
           NodeFSP.writeFile(NodePath.join(dir, "conclusion.md"), "cause\n"),
         ]),
       );
-      const query = new URLSearchParams(key);
-      expect((yield* Inbox.readTopic(query).pipe(Effect.provide(h.layer))).item.hasDraft).toBe(
-        true,
-      );
+      const query = delegationQuery(h, delegationId);
+      expect(
+        (yield* Inbox.readDelegation(query).pipe(Effect.provide(h.layer))).delegation.hasDraft,
+      ).toBe(true);
       h.shells.set("thread-1", null);
       // What followLinkedThreads publishes on thread.deleted.
       h.runtime.hub.publish({ type: "inbox", channelId: h.channelId });
-      const after = yield* Inbox.readTopic(query).pipe(Effect.provide(h.layer));
-      expect(after.item).toMatchObject({ hasDraft: false });
+      const after = yield* Inbox.readDelegation(query).pipe(Effect.provide(h.layer));
+      expect(after.delegation).toMatchObject({ hasDraft: false });
       expect(after).toMatchObject({
         draft: null,
         conclusion: "cause",
@@ -688,11 +820,11 @@ describe("linked threads and their files", () => {
 
   it.effect("does not count a blank draft", () =>
     Effect.gen(function* () {
-      const h = yield* Effect.promise(() => harness(oneTopic));
-      const dir = yield* linkThread(h, h.keyOf("c", "t"), "thread-1", 1);
+      const h = yield* Effect.promise(() => harness(oneConversation));
+      const { dir } = yield* linkThread(h, "c", "m1", "thread-1", 1);
       yield* Effect.promise(() => NodeFSP.writeFile(NodePath.join(dir, "draft.md"), " \n\n"));
-      const result = yield* Inbox.listItems(h.channelId).pipe(Effect.provide(h.layer));
-      expect(result.items[0]).toMatchObject({ hasDraft: false });
+      const result = yield* listOf(h);
+      expect(result.delegations[0]).toMatchObject({ hasDraft: false });
     }),
   );
 });
@@ -701,7 +833,7 @@ describe("following linked threads", () => {
   it.effect("refreshes a channel when one of its linked threads changes, and only then", () =>
     Effect.gen(function* () {
       const h = yield* Effect.promise(() => harness(() => []));
-      yield* linkThread(h, h.keyOf("c", "t"), "thread-linked", 1);
+      yield* linkThread(h, "c", "m1", "thread-linked", 1);
       const published: unknown[] = [];
       h.runtime.hub.subscribe((event) => published.push(event));
       const event = (type: string, threadId: string, status = "running", runId = "run-1") =>
@@ -726,17 +858,18 @@ describe("following linked threads", () => {
 });
 
 describe("sending", () => {
-  const oneTopic = () => [
-    { conversationId: "c", topicId: "t", messages: [{ id: "m1", minute: 1, author: THEM }] },
+  const oneConversation = (): ReadonlyArray<FakeConversation> => [
+    { id: "c", messages: [{ id: "m1", minute: 1, author: THEM }] },
   ];
 
   it.effect("keeps the draft when the adapter does not confirm a message id", () =>
     Effect.gen(function* () {
-      const h = yield* Effect.promise(() => harness(oneTopic, () => json(200, { ok: true })));
-      const key = h.keyOf("c", "t");
-      const dir = yield* linkThread(h, key, "thread-1", 1);
+      const h = yield* Effect.promise(() =>
+        harness(oneConversation, () => json(200, { ok: true })),
+      );
+      const { dir, delegationId } = yield* linkThread(h, "c", "m1", "thread-1", 1);
       yield* Effect.promise(() => NodeFSP.writeFile(NodePath.join(dir, "draft.md"), "reply\n"));
-      const error = yield* Inbox.send({ ...key, text: "reply" }).pipe(
+      const error = yield* Inbox.send({ ...h.keyOf("c"), delegationId, text: "reply" }).pipe(
         Effect.provide(h.layer),
         Effect.flip,
       );
@@ -747,22 +880,27 @@ describe("sending", () => {
     }),
   );
 
-  it.effect("records what was actually sent, edited draft or typed reply", () =>
+  it.effect("records what was actually sent from a delegation, edited draft or typed reply", () =>
     Effect.gen(function* () {
-      const h = yield* Effect.promise(() => harness(oneTopic));
-      const key = h.keyOf("c", "t");
-      const dir = yield* linkThread(h, key, "thread-1", 1);
+      const h = yield* Effect.promise(() => harness(oneConversation));
+      const { dir, delegationId } = yield* linkThread(h, "c", "m1", "thread-1", 1);
       yield* Effect.promise(() =>
         NodeFSP.writeFile(NodePath.join(dir, "draft.md"), "draft text\n"),
       );
-      const sent = yield* Inbox.send({ ...key, text: "edited text" }).pipe(Effect.provide(h.layer));
+      const sent = yield* Inbox.send({
+        ...h.keyOf("c"),
+        delegationId,
+        replyToId: "m1",
+        text: "edited text",
+      }).pipe(Effect.provide(h.layer));
       expect(sent.messageId).toBe("sent-1");
-      const itemDir = NodePath.join(h.runtime.itemsDir, itemIdFor(key));
-      const files = yield* Effect.promise(() => NodeFSP.readdir(itemDir));
+      expect(h.posted).toEqual([{ conversationId: "c", replyToId: "m1", text: "edited text" }]);
+      const delegationDir = NodePath.join(h.runtime.itemsDir, delegationId);
+      const files = yield* Effect.promise(() => NodeFSP.readdir(delegationDir));
       const record = files.find((file) => file.startsWith("sent."));
       expect(record).toBeDefined();
       const text = yield* Effect.promise(() =>
-        NodeFSP.readFile(NodePath.join(itemDir, record!), "utf8"),
+        NodeFSP.readFile(NodePath.join(delegationDir, record!), "utf8"),
       );
       expect(text).toContain("edited text");
       expect(text).toContain('messageId: "sent-1"');
@@ -771,37 +909,47 @@ describe("sending", () => {
       expect(threadFiles).not.toContain("draft.md");
       expect(threadFiles.some((file) => /^draft\..+\.md$/.test(file))).toBe(true);
 
-      const typed = yield* Effect.promise(() => harness(oneTopic));
-      const typedKey = typed.keyOf("c", "t");
-      yield* Inbox.send({ ...typedKey, text: "by hand" }).pipe(Effect.provide(typed.layer));
-      const typedDir = NodePath.join(typed.runtime.itemsDir, itemIdFor(typedKey));
+      const typed = yield* Effect.promise(() => harness(oneConversation));
+      const typedId = saveDelegation(typed, "c", "m1");
+      yield* Inbox.send({ ...typed.keyOf("c"), delegationId: typedId, text: "by hand" }).pipe(
+        Effect.provide(typed.layer),
+      );
+      const typedDir = NodePath.join(typed.runtime.itemsDir, typedId);
       const [typedRecord] = yield* Effect.promise(() => NodeFSP.readdir(typedDir));
       expect(
         yield* Effect.promise(() =>
           NodeFSP.readFile(NodePath.join(typedDir, typedRecord!), "utf8"),
         ),
       ).toContain("source: typed");
+
+      // A reply outside any delegation keeps no copy.
+      const plain = yield* Inbox.send({ ...typed.keyOf("c"), text: "hi" }).pipe(
+        Effect.provide(typed.layer),
+      );
+      expect(plain).toEqual({ messageId: "sent-1", archived: null });
     }),
   );
 
   it.effect("reports a sent message whose copy could not be saved, without failing the send", () =>
     Effect.gen(function* () {
-      const h = yield* Effect.promise(() => harness(oneTopic));
-      const key = h.keyOf("c", "t");
-      // A file where the item folder should be: the copy cannot be written.
+      const h = yield* Effect.promise(() => harness(oneConversation));
+      const delegationId = saveDelegation(h, "c", "m1");
+      // A file where the delegation's folder should be: the copy cannot be written.
       yield* Effect.promise(async () => {
         await NodeFSP.mkdir(h.runtime.itemsDir, { recursive: true });
-        await NodeFSP.writeFile(NodePath.join(h.runtime.itemsDir, itemIdFor(key)), "");
+        await NodeFSP.writeFile(NodePath.join(h.runtime.itemsDir, delegationId), "");
       });
-      const sent = yield* Inbox.send({ ...key, text: "reply" }).pipe(Effect.provide(h.layer));
+      const sent = yield* Inbox.send({ ...h.keyOf("c"), delegationId, text: "reply" }).pipe(
+        Effect.provide(h.layer),
+      );
       expect(sent).toEqual({ messageId: "sent-1", archived: false });
     }),
   );
 });
 
-describe("asking a topic's thread", () => {
-  const oneTopic = (): ReadonlyArray<FakeTopic> => [
-    { conversationId: "c", topicId: "t", messages: [{ id: "m1", minute: 1, author: THEM }] },
+describe("asking a delegation's thread", () => {
+  const oneConversation = (): ReadonlyArray<FakeConversation> => [
+    { id: "c", messages: [{ id: "m1", minute: 1, author: THEM }] },
   ];
   const askLayer = (h: Harness) =>
     Layer.mergeAll(
@@ -811,15 +959,17 @@ describe("asking a topic's thread", () => {
       FileSystem.layerNoop({}),
     );
 
-  it.effect("asks only a topic that has a thread, and queues behind a running one", () =>
+  it.effect("asks only a delegation that has a thread, and queues behind a running one", () =>
     Effect.gen(function* () {
-      const h = yield* Effect.promise(() => harness(oneTopic));
-      const key = h.keyOf("c", "t");
-      const ask = Inbox.ask({ ...key, text: " Why? " }).pipe(Effect.provide(askLayer(h)));
+      const h = yield* Effect.promise(() => harness(oneConversation));
+      const delegationId = saveDelegation(h, "c", "m1");
+      const ask = Inbox.ask({ channelId: h.channelId, delegationId, text: " Why? " }).pipe(
+        Effect.provide(askLayer(h)),
+      );
       expect(yield* Effect.flip(ask)).toMatchObject({ status: 400 });
       expect(h.sent).toEqual([]);
 
-      const dir = yield* linkThread(h, key, "thread-1", 1);
+      const { dir } = yield* linkThread(h, "c", "m1", "thread-1", 1);
       yield* ask;
       expect(h.sent).toHaveLength(1);
       expect(h.sent[0]).toMatchObject({ threadId: "thread-1", projectId: "p", mode: "queue" });
@@ -830,10 +980,11 @@ describe("asking a topic's thread", () => {
 
   it.effect("shows the questions asked after the delegation without the note sent with them", () =>
     Effect.gen(function* () {
-      const h = yield* Effect.promise(() => harness(oneTopic));
-      const key = h.keyOf("c", "t");
-      yield* linkThread(h, key, "thread-1", 1);
-      yield* Inbox.ask({ ...key, text: "Why?" }).pipe(Effect.provide(askLayer(h)));
+      const h = yield* Effect.promise(() => harness(oneConversation));
+      const { delegationId } = yield* linkThread(h, "c", "m1", "thread-1", 1);
+      yield* Inbox.ask({ channelId: h.channelId, delegationId, text: "Why?" }).pipe(
+        Effect.provide(askLayer(h)),
+      );
       const message = (role: string, text: string, runId: string | null, minute: number) => ({
         role,
         text,
@@ -849,8 +1000,10 @@ describe("asking a topic's thread", () => {
         message("assistant", "Because of the cache", "run-2", 5),
         message("user", "And then?", null, 6),
       ]);
-      const topic = yield* Inbox.readTopic(new URLSearchParams(key)).pipe(Effect.provide(h.layer));
-      expect(topic.followUps.map(({ role, text }) => [role, text])).toEqual([
+      const detail = yield* Inbox.readDelegation(delegationQuery(h, delegationId)).pipe(
+        Effect.provide(h.layer),
+      );
+      expect(detail.followUps.map(({ role, text }) => [role, text])).toEqual([
         ["user", "Why?"],
         ["assistant", "Because of the cache"],
         ["user", "And then?"],
@@ -876,13 +1029,13 @@ describe("channel settings", () => {
 });
 
 describe("delegateExclusively", () => {
-  it.effect("launches once when the same topic is delegated twice at once", () =>
+  it.effect("launches once when the same message is delegated twice at once", () =>
     Effect.gen(function* () {
       const links: Array<{ threadId: string; projectId: string }> = [];
       const gate = yield* Deferred.make<void>();
       let launches = 0;
       const run = Inbox.delegateExclusively({
-        itemId: "item-concurrent",
+        key: "delegation-concurrent",
         replaceThreadId: null,
         current: Effect.sync(() => links.at(-1) ?? null),
         start: () =>
@@ -910,7 +1063,7 @@ describe("delegateExclusively", () => {
       const links = [{ threadId: "thread-0", projectId: "p" }];
       let launches = 0;
       const run = Inbox.delegateExclusively({
-        itemId: "item-replace",
+        key: "delegation-replace",
         replaceThreadId: "thread-0",
         current: Effect.sync(() => links.at(-1) ?? null),
         start: (replacing) =>
@@ -934,12 +1087,9 @@ describe("tagged replies", () => {
   it.effect("fills only the current thread's folder from its finished run", () =>
     Effect.gen(function* () {
       const h = yield* Effect.promise(() =>
-        harness(() => [
-          { conversationId: "c", topicId: "t", messages: [{ id: "m1", minute: 1, author: THEM }] },
-        ]),
+        harness(() => [{ id: "c", messages: [{ id: "m1", minute: 1, author: THEM }] }]),
       );
-      const key = h.keyOf("c", "t");
-      const dir = yield* linkThread(h, key, "thread-1", 1);
+      const { dir, delegationId } = yield* linkThread(h, "c", "m1", "thread-1", 1);
       h.shells.set("thread-1", {
         ...idleShell("thread-1"),
         latestRunId: "run-1",
@@ -961,8 +1111,10 @@ describe("tagged replies", () => {
             } as never),
         }),
       );
-      const topic = yield* Inbox.readTopic(new URLSearchParams(key)).pipe(Effect.provide(layer));
-      expect(topic).toMatchObject({ conclusion: "cause", draft: "fixed it" });
+      const detail = yield* Inbox.readDelegation(delegationQuery(h, delegationId)).pipe(
+        Effect.provide(layer),
+      );
+      expect(detail).toMatchObject({ conclusion: "cause", draft: "fixed it" });
       expect(
         yield* Effect.promise(() => NodeFSP.readFile(NodePath.join(dir, "draft.md"), "utf8")),
       ).toBe("fixed it\n");

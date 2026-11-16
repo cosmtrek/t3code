@@ -1,28 +1,44 @@
 // @effect-diagnostics nodeBuiltinImport:off - node:sqlite is synchronous; a separate small file keeps fork data out of the main database.
 /**
- * The inbox keeps only what it cannot derive: how far each topic has been read and the links
- * between topics and T3 threads. Its own file, so the main database never carries fork migrations.
+ * The inbox keeps only what it cannot derive: how far each conversation has been read, the
+ * delegations made from its messages, and the links between delegations and T3 threads. Its own
+ * file, so the main database never carries fork migrations.
  */
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeSqlite from "node:sqlite";
 
-export interface TopicKey {
+export interface ConversationKey {
   readonly channelId: string;
   readonly conversationId: string;
-  readonly topicId: string;
 }
 
-export interface Read extends TopicKey {
+export interface ConversationRead extends ConversationKey {
   /** The newest message seen, by its own time. */
   readonly readAt: string | null;
-  /** When the thread's last run the user saw had finished. */
-  readonly agentSeenAt: string | null;
   readonly pinnedUnread: boolean;
 }
 
-export interface Link extends TopicKey {
-  readonly itemId: string;
+/**
+ * `chain` is the anchor and every reply under it. `range` runs from the anchor through
+ * `untilAt`. Null comes from a v1 topic and is read by the conversation's kind.
+ */
+export type DelegationScope = "chain" | "range";
+
+export interface Delegation extends ConversationKey {
+  readonly id: string;
+  readonly anchorMessageId: string;
+  readonly scope: DelegationScope | null;
+  readonly untilAt: string | null;
+  /** The anchor's text when delegated; null for one made from a v1 topic. */
+  readonly preview: string | null;
+  readonly createdAt: string;
+  /** When the thread's last run the user saw had finished. */
+  readonly agentSeenAt: string | null;
+}
+
+export interface Link extends ConversationKey {
+  readonly delegationId: string;
   readonly threadId: string;
   readonly projectId: string;
   readonly createdAt: string;
@@ -70,6 +86,40 @@ const MIGRATIONS: ReadonlyArray<string> = [
    INSERT INTO reads (channel_id, conversation_id, topic_id, read_at)
      SELECT channel_id, conversation_id, topic_id, watermark_message_at FROM marks;
    DROP TABLE marks;`,
+  // Protocol v2 drops topics. A v1 topic id is its first message's id, so a linked topic becomes
+  // a delegation anchored there and keeps its id and folder. MAX compares strings: adapters
+  // write one zone, and a mark that lands early only shows a message as unread again.
+  `CREATE TABLE conversation_reads (
+     channel_id TEXT NOT NULL,
+     conversation_id TEXT NOT NULL,
+     read_at TEXT,
+     pinned_unread INTEGER NOT NULL DEFAULT 0,
+     PRIMARY KEY (channel_id, conversation_id)
+   );
+   INSERT INTO conversation_reads (channel_id, conversation_id, read_at, pinned_unread)
+     SELECT channel_id, conversation_id, MAX(read_at), MAX(pinned_unread)
+     FROM reads GROUP BY channel_id, conversation_id;
+   CREATE TABLE delegations (
+     id TEXT PRIMARY KEY,
+     channel_id TEXT NOT NULL,
+     conversation_id TEXT NOT NULL,
+     anchor_message_id TEXT NOT NULL,
+     scope TEXT CHECK (scope IN ('chain', 'range')),
+     until_at TEXT,
+     preview TEXT,
+     created_at TEXT NOT NULL,
+     agent_seen_at TEXT
+   );
+   CREATE INDEX delegations_by_channel ON delegations (channel_id);
+   INSERT INTO delegations (id, channel_id, conversation_id, anchor_message_id, created_at, agent_seen_at)
+     SELECT links.item_id, links.channel_id, links.conversation_id, links.topic_id,
+       MIN(links.created_at), MAX(reads.agent_seen_at)
+     FROM links LEFT JOIN reads ON reads.channel_id = links.channel_id
+       AND reads.conversation_id = links.conversation_id AND reads.topic_id = links.topic_id
+     GROUP BY links.item_id;
+   ALTER TABLE links DROP COLUMN topic_id;
+   ALTER TABLE links RENAME COLUMN item_id TO delegation_id;
+   DROP TABLE reads;`,
 ];
 
 type Row = Record<string, NodeSqlite.SQLOutputValue>;
@@ -77,14 +127,27 @@ type Row = Record<string, NodeSqlite.SQLOutputValue>;
 const text = (row: Row, key: string) => String(row[key]);
 const nullableText = (row: Row, key: string) => (row[key] === null ? null : String(row[key]));
 
-function toRead(row: Row): Read {
+function toConversationRead(row: Row): ConversationRead {
   return {
     channelId: text(row, "channel_id"),
     conversationId: text(row, "conversation_id"),
-    topicId: text(row, "topic_id"),
     readAt: nullableText(row, "read_at"),
-    agentSeenAt: nullableText(row, "agent_seen_at"),
     pinnedUnread: Number(row.pinned_unread) === 1,
+  };
+}
+
+function toDelegation(row: Row): Delegation {
+  const scope = nullableText(row, "scope");
+  return {
+    id: text(row, "id"),
+    channelId: text(row, "channel_id"),
+    conversationId: text(row, "conversation_id"),
+    anchorMessageId: text(row, "anchor_message_id"),
+    scope: scope === "chain" || scope === "range" ? scope : null,
+    untilAt: nullableText(row, "until_at"),
+    preview: nullableText(row, "preview"),
+    createdAt: text(row, "created_at"),
+    agentSeenAt: nullableText(row, "agent_seen_at"),
   };
 }
 
@@ -97,10 +160,9 @@ function later(current: string | null, next: string | undefined): string | null 
 
 function toLink(row: Row): Link {
   return {
-    itemId: text(row, "item_id"),
+    delegationId: text(row, "delegation_id"),
     channelId: text(row, "channel_id"),
     conversationId: text(row, "conversation_id"),
-    topicId: text(row, "topic_id"),
     threadId: text(row, "thread_id"),
     projectId: text(row, "project_id"),
     createdAt: text(row, "created_at"),
@@ -129,15 +191,21 @@ export class InboxStore {
       );
     }
     for (let index = version; index < MIGRATIONS.length; index++) {
-      this.db.exec("BEGIN");
-      try {
+      this.transaction(() => {
         this.db.exec(MIGRATIONS[index]!);
         this.db.exec(`PRAGMA user_version = ${index + 1}`);
-        this.db.exec("COMMIT");
-      } catch (error) {
-        this.db.exec("ROLLBACK");
-        throw error;
-      }
+      });
+    }
+  }
+
+  private transaction(run: () => void) {
+    this.db.exec("BEGIN");
+    try {
+      run();
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
     }
   }
 
@@ -145,62 +213,46 @@ export class InboxStore {
     this.db.close();
   }
 
-  listReads(channelId: string): ReadonlyArray<Read> {
+  listConversationReads(channelId: string): ReadonlyArray<ConversationRead> {
     return (
-      this.db.prepare("SELECT * FROM reads WHERE channel_id = ?").all(channelId) as Row[]
-    ).map(toRead);
+      this.db
+        .prepare("SELECT * FROM conversation_reads WHERE channel_id = ?")
+        .all(channelId) as Row[]
+    ).map(toConversationRead);
   }
 
-  private getRead(key: TopicKey): Read | null {
+  private getConversationRead(key: ConversationKey): ConversationRead | null {
     const row = this.db
-      .prepare("SELECT * FROM reads WHERE channel_id = ? AND conversation_id = ? AND topic_id = ?")
-      .get(key.channelId, key.conversationId, key.topicId) as Row | undefined;
-    return row ? toRead(row) : null;
+      .prepare("SELECT * FROM conversation_reads WHERE channel_id = ? AND conversation_id = ?")
+      .get(key.channelId, key.conversationId) as Row | undefined;
+    return row ? toConversationRead(row) : null;
   }
 
-  private putRead(read: Read) {
+  private putConversationRead(read: ConversationRead) {
     this.db
       .prepare(
-        `INSERT INTO reads (channel_id, conversation_id, topic_id, read_at, agent_seen_at, pinned_unread)
-         VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT (channel_id, conversation_id, topic_id) DO UPDATE SET
+        `INSERT INTO conversation_reads (channel_id, conversation_id, read_at, pinned_unread)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT (channel_id, conversation_id) DO UPDATE SET
            read_at = excluded.read_at,
-           agent_seen_at = excluded.agent_seen_at,
            pinned_unread = excluded.pinned_unread`,
       )
-      .run(
-        read.channelId,
-        read.conversationId,
-        read.topicId,
-        read.readAt,
-        read.agentSeenAt,
-        read.pinnedUnread ? 1 : 0,
-      );
+      .run(read.channelId, read.conversationId, read.readAt, read.pinnedUnread ? 1 : 0);
   }
 
-  /** Both marks only move forward: a stale client view never unreads what was seen. */
-  markRead(key: TopicKey, seen: { readonly readAt?: string; readonly agentSeenAt?: string }) {
-    const current = this.getRead(key);
-    this.putRead({
-      channelId: key.channelId,
-      conversationId: key.conversationId,
-      topicId: key.topicId,
-      readAt: later(current?.readAt ?? null, seen.readAt),
-      agentSeenAt: later(current?.agentSeenAt ?? null, seen.agentSeenAt),
+  /** Only moves forward: a stale client view never unreads what was seen. */
+  markConversationRead(key: ConversationKey, readAt: string | undefined) {
+    const current = this.getConversationRead(key);
+    this.putConversationRead({
+      ...key,
+      readAt: later(current?.readAt ?? null, readAt),
       pinnedUnread: false,
     });
   }
 
-  pinUnread(key: TopicKey) {
-    const current = this.getRead(key);
-    this.putRead({
-      channelId: key.channelId,
-      conversationId: key.conversationId,
-      topicId: key.topicId,
-      readAt: current?.readAt ?? null,
-      agentSeenAt: current?.agentSeenAt ?? null,
-      pinnedUnread: true,
-    });
+  pinConversationUnread(key: ConversationKey) {
+    const current = this.getConversationRead(key);
+    this.putConversationRead({ ...key, readAt: current?.readAt ?? null, pinnedUnread: true });
   }
 
   /** Everything before it counts as read; set to `initial` the first time a channel is read. */
@@ -216,17 +268,64 @@ export class InboxStore {
 
   markAllRead(channelId: string, before: string) {
     const current = this.readAllBefore(channelId, before);
-    this.db.exec("BEGIN");
-    try {
+    this.transaction(() => {
       this.db
         .prepare("UPDATE channel_reads SET read_all_before = ? WHERE channel_id = ?")
         .run(later(current, before), channelId);
-      this.db.prepare("UPDATE reads SET pinned_unread = 0 WHERE channel_id = ?").run(channelId);
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+      this.db
+        .prepare("UPDATE conversation_reads SET pinned_unread = 0 WHERE channel_id = ?")
+        .run(channelId);
+    });
+  }
+
+  listDelegations(channelId: string): ReadonlyArray<Delegation> {
+    return (
+      this.db
+        .prepare("SELECT * FROM delegations WHERE channel_id = ? ORDER BY created_at DESC")
+        .all(channelId) as Row[]
+    ).map(toDelegation);
+  }
+
+  getDelegation(id: string): Delegation | null {
+    const row = this.db.prepare("SELECT * FROM delegations WHERE id = ?").get(id) as
+      | Row
+      | undefined;
+    return row ? toDelegation(row) : null;
+  }
+
+  /** A new delegation, or the same anchor delegated again with the range it has now. */
+  saveDelegation(
+    delegation: Omit<Delegation, "agentSeenAt" | "createdAt"> & { readonly createdAt: string },
+  ) {
+    this.db
+      .prepare(
+        `INSERT INTO delegations
+           (id, channel_id, conversation_id, anchor_message_id, scope, until_at, preview, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (id) DO UPDATE SET
+           scope = excluded.scope,
+           until_at = excluded.until_at,
+           preview = COALESCE(excluded.preview, delegations.preview)`,
+      )
+      .run(
+        delegation.id,
+        delegation.channelId,
+        delegation.conversationId,
+        delegation.anchorMessageId,
+        delegation.scope,
+        delegation.untilAt,
+        delegation.preview,
+        delegation.createdAt,
+      );
+  }
+
+  /** Only moves forward, as reads do. */
+  markAgentSeen(id: string, at: string) {
+    const current = this.getDelegation(id);
+    if (current === null) return;
+    this.db
+      .prepare("UPDATE delegations SET agent_seen_at = ? WHERE id = ?")
+      .run(later(current.agentSeenAt, at), id);
   }
 
   /** Every link of the channel, detached ones included, newest first. */
@@ -238,15 +337,15 @@ export class InboxStore {
     ).map(toLink);
   }
 
-  linksForItem(itemId: string): ReadonlyArray<Link> {
+  linksForDelegation(delegationId: string): ReadonlyArray<Link> {
     return (
       this.db
-        .prepare("SELECT * FROM links WHERE item_id = ? ORDER BY created_at DESC")
-        .all(itemId) as Row[]
+        .prepare("SELECT * FROM links WHERE delegation_id = ? ORDER BY created_at DESC")
+        .all(delegationId) as Row[]
     ).map(toLink);
   }
 
-  /** The channel whose item this thread works on, while the link is attached. */
+  /** The channel whose delegation this thread works on, while the link is attached. */
   channelOfThread(threadId: string): string | null {
     const row = this.db
       .prepare("SELECT channel_id FROM links WHERE thread_id = ? AND detached_at IS NULL LIMIT 1")
@@ -258,26 +357,25 @@ export class InboxStore {
     this.db
       .prepare(
         `INSERT OR REPLACE INTO links
-           (item_id, channel_id, conversation_id, topic_id, thread_id, project_id, created_at, detached_at, detached_reason)
-         VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)`,
+           (delegation_id, channel_id, conversation_id, thread_id, project_id, created_at, detached_at, detached_reason)
+         VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)`,
       )
       .run(
-        link.itemId,
+        link.delegationId,
         link.channelId,
         link.conversationId,
-        link.topicId,
         link.threadId,
         link.projectId,
         link.createdAt,
       );
   }
 
-  detachLink(itemId: string, threadId: string, reason: string, at: string) {
+  detachLink(delegationId: string, threadId: string, reason: string, at: string) {
     this.db
       .prepare(
         `UPDATE links SET detached_at = ?, detached_reason = ?
-         WHERE item_id = ? AND thread_id = ? AND detached_at IS NULL`,
+         WHERE delegation_id = ? AND thread_id = ? AND detached_at IS NULL`,
       )
-      .run(at, reason, itemId, threadId);
+      .run(at, reason, delegationId, threadId);
   }
 }

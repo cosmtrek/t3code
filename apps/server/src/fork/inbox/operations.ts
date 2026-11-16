@@ -45,10 +45,8 @@ import {
   RawPage,
   SendResult,
   Timestamp,
-  Topic,
   type Conversation as ConversationType,
   type Message as MessageType,
-  type Topic as TopicType,
 } from "../channels/protocol.ts";
 import {
   applyFallback,
@@ -72,15 +70,19 @@ import {
   type ContextImage,
 } from "./context.ts";
 import {
-  compareItems,
-  countsTowardBadge,
-  deriveItem,
-  itemIdFor,
+  agentUnseen,
+  compareConversations,
+  conversationCountsTowardBadge,
+  delegationIdFor,
+  deriveConversation,
+  messagesInRange,
+  rangeUntil,
+  scopeIsChain,
   sortMessages,
-  type DerivedItem,
+  type ConversationState,
 } from "./derive.ts";
 import { InboxRuntime } from "./InboxRuntime.ts";
-import type { Link, TopicKey } from "./store.ts";
+import type { Delegation, DelegationScope, Link } from "./store.ts";
 
 export class ForkHttpError extends Schema.TaggedError<ForkHttpError>()("ForkHttpError", {
   status: Schema.Number,
@@ -140,14 +142,15 @@ const badRequest = (detail: string, field?: string) =>
   new ForkHttpError({ status: 400, code: "bad_request", detail, ...(field ? { field } : {}) });
 
 const CONVERSATION_LIMIT = 100;
-const TOPIC_LIMIT = 200;
 const MESSAGE_LIMIT = 200;
 /** One page of a conversation's chat; older pages load as the reader scrolls up. */
 const CONVERSATION_MESSAGE_LIMIT = 100;
 /** Page caps: far above a real inbox, low enough that a looping adapter cannot hang a request. */
 const CONVERSATION_PAGES = 20;
-const TOPIC_PAGES = 5;
 const MESSAGE_PAGES = 50;
+/** How far back a range delegation reads to find its first message. */
+const RANGE_PAGES = 20;
+const PREVIEW_CHARS = 140;
 const SENDER_HISTORY_MS = 7 * 24 * 3_600_000;
 /** A channel read for the first time shows only its last week as unread. */
 const FIRST_READ_LOOKBACK_MS = 7 * 24 * 3_600_000;
@@ -161,10 +164,8 @@ type WorkspaceStrategy = OrchestrationV2ThreadLaunchWorkspaceStrategy;
 
 const enc = encodeURIComponent;
 const conversationsPath = `/conversations?relevant=1&limit=${CONVERSATION_LIMIT}`;
-const topicsPath = (conversationId: string) =>
-  `/conversations/${enc(conversationId)}/topics?limit=${TOPIC_LIMIT}`;
-const messagesPath = (conversationId: string, topicId: string) =>
-  `/conversations/${enc(conversationId)}/messages?topic=${enc(topicId)}&limit=${MESSAGE_LIMIT}`;
+const chainPath = (conversationId: string, rootId: string) =>
+  `/conversations/${enc(conversationId)}/messages?root=${enc(rootId)}&limit=${MESSAGE_LIMIT}`;
 const conversationMessagesPath = (conversationId: string, cursor: string | undefined) =>
   `/conversations/${enc(conversationId)}/messages?order=desc&limit=${CONVERSATION_MESSAGE_LIMIT}${
     cursor === undefined ? "" : `&cursor=${enc(cursor)}`
@@ -340,7 +341,7 @@ const applyFallbackFor = Effect.fn("ForkInbox.applyFallback")(function* (
 
 /**
  * The link's thread as it is now. A thread that no longer exists detaches the link. Only the
- * item's current link fills its folder from tags; older ones are history and stay as they are.
+ * delegation's current link fills its folder from tags; older ones are history and stay as they are.
  */
 const inspectLink = Effect.fn("ForkInbox.inspectLink")(function* (
   link: Link,
@@ -375,7 +376,7 @@ const inspectLink = Effect.fn("ForkInbox.inspectLink")(function* (
   if (shell === null || shell.deletedAt !== null) {
     const at = link.detachedAt ?? new Date().toISOString();
     if (link.detachedAt === null) {
-      runtime.store.detachLink(link.itemId, link.threadId, "deleted", at);
+      runtime.store.detachLink(link.delegationId, link.threadId, "deleted", at);
     }
     return {
       ...base,
@@ -386,7 +387,10 @@ const inspectLink = Effect.fn("ForkInbox.inspectLink")(function* (
     } satisfies LinkedThreadView;
   }
   if (options.current && link.detachedAt === null) {
-    yield* applyFallbackFor(threadContextDir(runtime.itemsDir, link.itemId, link.threadId), shell);
+    yield* applyFallbackFor(
+      threadContextDir(runtime.itemsDir, link.delegationId, link.threadId),
+      shell,
+    );
   }
   return {
     ...base,
@@ -402,40 +406,31 @@ const activeLinkOf = (links: ReadonlyArray<Link>) => links.find((link) => link.d
 const isCurrent = (thread: LinkedThreadView | null): thread is LinkedThreadView =>
   thread !== null && thread.detachedAt === null && thread.status !== "deleted";
 
-export interface InboxItem extends DerivedItem {
+export interface InboxConversation extends ConversationState {
+  readonly id: string;
+  readonly channelId: string;
+  readonly kind: ConversationType["kind"];
+  readonly name: string;
+  readonly lastActivityAt: string;
+  readonly lastMessage: ConversationType["lastMessage"];
+}
+
+export interface InboxDelegation {
   readonly id: string;
   readonly channelId: string;
   readonly conversationId: string;
+  /** Empty when the channel no longer lists the conversation. */
   readonly conversationName: string;
-  readonly conversationKind: ConversationType["kind"];
-  readonly topicId: string;
-  readonly rootMessageId: string;
-  readonly preview: string;
-  readonly replyCount: number;
-  readonly lastMessageAt: string;
-  readonly lastAuthor: TopicType["lastAuthor"];
-  readonly participatedBySelf: boolean;
+  readonly anchorMessageId: string;
+  readonly scope: DelegationScope | null;
+  readonly preview: string | null;
+  readonly createdAt: string;
   readonly thread: LinkedThreadView | null;
+  /** The thread finished a run after the user last looked. */
+  readonly agentUnseen: boolean;
   readonly hasConclusion: boolean;
   readonly hasDraft: boolean;
 }
-
-const readMessages = Effect.fn("ForkInbox.readMessages")(function* (
-  channelId: string,
-  conversationId: string,
-  topicId: string,
-  options: { readonly cacheMs?: number } = {},
-) {
-  const { hub } = yield* InboxRuntime;
-  const result = yield* attempt(() =>
-    hub.getAllPages(channelId, messagesPath(conversationId, topicId), Message, {
-      ...options,
-      maxPages: MESSAGE_PAGES,
-    }),
-  );
-  yield* warnSkipped(channelId, "messages", result.skipped);
-  return { ...result, items: sortMessages(result.items) };
-});
 
 /** The count only: the records themselves may hold message text. */
 const warnSkipped = (channelId: string, list: string, skipped: number) =>
@@ -448,44 +443,46 @@ const warnSkipped = (channelId: string, list: string, skipped: number) =>
         },
       );
 
-interface ChannelItems {
-  readonly items: ReadonlyArray<InboxItem>;
+interface ChannelListing {
+  readonly conversations: ReadonlyArray<InboxConversation>;
+  readonly delegations: ReadonlyArray<InboxDelegation>;
   readonly stale: boolean;
-  /** The page cap a list hit before it ended; null when every list was read to its end. */
+  /** The page cap the conversation list hit before it ended; null when it was read to its end. */
   readonly truncatedAtPages: number | null;
-  /** Conversations and topics left out because they did not decode. */
+  /** Conversations left out because they did not decode. */
   readonly skipped: number;
-  readonly conversations: ReadonlyArray<ConversationType>;
+  /** The conversations as the adapter sent them. */
+  readonly raw: ReadonlyArray<ConversationType>;
 }
 
-interface ItemsMemo {
+interface ListingMemo {
   readonly revision: number;
   readonly at: number;
-  readonly fiber: Fiber.Fiber<ChannelItems, ForkHttpError>;
+  readonly fiber: Fiber.Fiber<ChannelListing, ForkHttpError>;
 }
 
 /** Bounds a change no signal announced, as the client's poll does. */
-const ITEMS_MEMO_MS = 10_000;
-const itemsMemos = new WeakMap<ChannelHub, Map<string, ItemsMemo>>();
+const LISTING_MEMO_MS = 10_000;
+const listingMemos = new WeakMap<ChannelHub, Map<string, ListingMemo>>();
 
 /**
- * One event sends the overview, the list, and the open topic here at once. They share one read
- * of the channel, reused until the hub's revision for it moves (an adapter event, a read, a
+ * One event sends the overview, the list, and the open delegation here at once. They share one
+ * read of the channel, reused until the hub's revision for it moves (an adapter event, a read, a
  * link, a thread's run) or it gets old.
  */
-const readChannelItems = Effect.fn("ForkInbox.readChannelItems")(function* (channelId: string) {
+const readChannel = Effect.fn("ForkInbox.readChannel")(function* (channelId: string) {
   const { hub } = yield* InboxRuntime;
-  let memos = itemsMemos.get(hub);
+  let memos = listingMemos.get(hub);
   if (memos === undefined) {
     memos = new Map();
-    itemsMemos.set(hub, memos);
+    listingMemos.set(hub, memos);
   }
   const revision = hub.revision(channelId);
   const now = Date.now();
   let memo = memos.get(channelId);
-  if (memo === undefined || memo.revision !== revision || now - memo.at >= ITEMS_MEMO_MS) {
+  if (memo === undefined || memo.revision !== revision || now - memo.at >= LISTING_MEMO_MS) {
     // Detached: a client that gives up must not cancel the read the others are waiting on.
-    memo = { revision, at: now, fiber: yield* Effect.forkDetach(computeChannelItems(channelId)) };
+    memo = { revision, at: now, fiber: yield* Effect.forkDetach(computeChannel(channelId)) };
     memos.set(channelId, memo);
   }
   const joined = memo;
@@ -498,114 +495,100 @@ const readChannelItems = Effect.fn("ForkInbox.readChannelItems")(function* (chan
   );
 });
 
-const computeChannelItems = Effect.fn("ForkInbox.computeChannelItems")(function* (
-  channelId: string,
+const inspectDelegation = Effect.fn("ForkInbox.inspectDelegation")(function* (
+  delegation: Delegation,
+  links: ReadonlyArray<Link>,
 ) {
   const runtime = yield* InboxRuntime;
+  const shown = activeLinkOf(links) ?? links[0];
+  const thread = shown ? yield* inspectLink(shown, { current: shown.detachedAt === null }) : null;
+  const artifacts = thread
+    ? yield* Effect.promise(() =>
+        readArtifacts(threadContextDir(runtime.itemsDir, delegation.id, thread.threadId)),
+      )
+    : { conclusion: null, draft: null };
+  return { thread, artifacts };
+});
+
+const computeChannel = Effect.fn("ForkInbox.computeChannel")(function* (channelId: string) {
+  const runtime = yield* InboxRuntime;
   const { hub, store } = runtime;
-  const conversations = yield* attempt(() =>
-    hub.getAllPages(channelId, conversationsPath, Conversation, {
-      maxPages: CONVERSATION_PAGES,
-    }),
+  const listed = yield* attempt(() =>
+    hub.getAllPages(channelId, conversationsPath, Conversation, { maxPages: CONVERSATION_PAGES }),
   );
-  let stale = conversations.stale;
-  let topicsTruncated = false;
-  let skipped = conversations.skipped;
-  const reads = new Map(store.listReads(channelId).map((read) => [itemIdFor(read), read] as const));
-  const linksByItem = new Map<string, Link[]>();
-  // Newest first, so each item's list starts with its latest link.
-  for (const link of store.listLinks(channelId)) {
-    const list = linksByItem.get(link.itemId) ?? [];
-    list.push(link);
-    linksByItem.set(link.itemId, list);
-  }
-  const now = Date.now();
+  const reads = new Map(
+    store.listConversationReads(channelId).map((read) => [read.conversationId, read] as const),
+  );
   const readAllBefore = store.readAllBefore(
     channelId,
-    new Date(now - FIRST_READ_LOOKBACK_MS).toISOString(),
+    new Date(Date.now() - FIRST_READ_LOOKBACK_MS).toISOString(),
   );
-  const perConversation = yield* Effect.forEach(
-    conversations.items,
-    (conversation) =>
-      Effect.gen(function* () {
-        const topics = yield* attempt(() =>
-          hub.getAllPages(channelId, topicsPath(conversation.id), Topic, {
-            maxPages: TOPIC_PAGES,
+  const conversations = listed.items
+    .map(
+      (conversation) =>
+        ({
+          ...deriveConversation({
+            conversation,
+            read: reads.get(conversation.id) ?? null,
+            readAllBefore,
           }),
-        ).pipe(Effect.orElseSucceed(() => null));
-        if (topics === null) return [];
-        if (topics.stale) stale = true;
-        if (!topics.complete) topicsTruncated = true;
-        skipped += topics.skipped;
-        return yield* Effect.forEach(
-          topics.items,
-          (topic) =>
-            Effect.gen(function* () {
-              const key: TopicKey = {
-                channelId,
-                conversationId: conversation.id,
-                topicId: topic.id,
-              };
-              const id = itemIdFor(key);
-              const links = linksByItem.get(id) ?? [];
-              const shown = activeLinkOf(links) ?? links[0];
-              const thread = shown
-                ? yield* inspectLink(shown, { current: shown.detachedAt === null })
-                : null;
-              const artifacts = thread
-                ? yield* Effect.promise(() =>
-                    readArtifacts(threadContextDir(runtime.itemsDir, id, thread.threadId)),
-                  )
-                : { conclusion: null, draft: null };
-              // A deleted or replaced thread is history: its draft and runs no longer count.
-              const current = isCurrent(thread);
-              const derived = deriveItem({
-                conversation,
-                topic,
-                mentionsSelf: topic.mentionsSelfSinceOwn,
-                lastOtherMessageAt: topic.lastOtherMessageAt,
-                read: reads.get(id) ?? null,
-                readAllBefore,
-                runCompletedAt: current ? thread.runCompletedAt : null,
-                now,
-              });
-              return {
-                ...derived,
-                id,
-                channelId,
-                conversationId: conversation.id,
-                conversationName: conversation.name,
-                conversationKind: conversation.kind,
-                topicId: topic.id,
-                rootMessageId: topic.rootMessageId,
-                preview: topic.rootPreview,
-                replyCount: topic.replyCount,
-                lastMessageAt: topic.lastMessageAt,
-                lastAuthor: topic.lastAuthor,
-                participatedBySelf: topic.participatedBySelf,
-                thread,
-                hasConclusion: artifacts.conclusion !== null,
-                hasDraft: current && artifacts.draft !== null,
-              } satisfies InboxItem;
-            }),
-          { concurrency: 4 },
+          id: conversation.id,
+          channelId,
+          kind: conversation.kind,
+          name: conversation.name,
+          lastActivityAt: conversation.lastActivityAt,
+          lastMessage: conversation.lastMessage,
+        }) satisfies InboxConversation,
+    )
+    .toSorted(compareConversations);
+  const linksByDelegation = new Map<string, Link[]>();
+  // Newest first, so each delegation's list starts with its latest link.
+  for (const link of store.listLinks(channelId)) {
+    const list = linksByDelegation.get(link.delegationId) ?? [];
+    list.push(link);
+    linksByDelegation.set(link.delegationId, list);
+  }
+  const names = new Map(listed.items.map((conversation) => [conversation.id, conversation.name]));
+  const delegations = yield* Effect.forEach(
+    store.listDelegations(channelId),
+    (delegation) =>
+      Effect.gen(function* () {
+        const { thread, artifacts } = yield* inspectDelegation(
+          delegation,
+          linksByDelegation.get(delegation.id) ?? [],
         );
+        // A deleted or replaced thread is history: its draft and runs no longer count.
+        const current = isCurrent(thread) ? thread : null;
+        return {
+          id: delegation.id,
+          channelId,
+          conversationId: delegation.conversationId,
+          conversationName: names.get(delegation.conversationId) ?? "",
+          anchorMessageId: delegation.anchorMessageId,
+          scope: delegation.scope,
+          preview: delegation.preview,
+          createdAt: delegation.createdAt,
+          thread,
+          agentUnseen: agentUnseen({
+            delegation,
+            runCompletedAt: current?.runCompletedAt ?? null,
+            readAllBefore,
+          }),
+          hasConclusion: artifacts.conclusion !== null,
+          hasDraft: current !== null && artifacts.draft !== null,
+        } satisfies InboxDelegation;
       }),
     { concurrency: 4 },
   );
-  const items = perConversation.flat().toSorted(compareItems);
-  yield* warnSkipped(channelId, "conversations and topics", skipped);
+  yield* warnSkipped(channelId, "conversations", listed.skipped);
   return {
-    items,
-    stale,
-    truncatedAtPages: !conversations.complete
-      ? CONVERSATION_PAGES
-      : topicsTruncated
-        ? TOPIC_PAGES
-        : null,
-    skipped,
-    conversations: conversations.items,
-  } satisfies ChannelItems;
+    conversations,
+    delegations,
+    stale: listed.stale,
+    truncatedAtPages: listed.complete ? null : CONVERSATION_PAGES,
+    skipped: listed.skipped,
+    raw: listed.items,
+  } satisfies ChannelListing;
 });
 
 export interface InboxChannelSummary {
@@ -621,6 +604,11 @@ export interface InboxChannelSummary {
   readonly error: string | null;
 }
 
+const badgeCount = (listing: ChannelListing) =>
+  listing.conversations.filter((conversation) =>
+    conversationCountsTowardBadge(conversation.kind, conversation),
+  ).length + listing.delegations.filter((delegation) => delegation.agentUnseen).length;
+
 /** Enabled channels with their state; the sidebar badge sums `unreadCount`. */
 export const overview = Effect.fn("ForkInbox.overview")(function* () {
   const { hub } = yield* InboxRuntime;
@@ -631,7 +619,7 @@ export const overview = Effect.fn("ForkInbox.overview")(function* () {
       Effect.gen(function* () {
         const access = channelAccess(channel.status);
         const listing = access.read
-          ? yield* readChannelItems(channel.id).pipe(
+          ? yield* readChannel(channel.id).pipe(
               Effect.map((result) => ({ ok: true as const, result })),
               Effect.catch((error: ForkHttpError) =>
                 Effect.succeed({ ok: false as const, error: error.detail }),
@@ -647,8 +635,7 @@ export const overview = Effect.fn("ForkInbox.overview")(function* () {
           lastSyncAt: channel.health?.lastSyncAt ?? null,
           selfName: channel.health?.self.name ?? null,
           access,
-          unreadCount:
-            listing?.ok === true ? listing.result.items.filter(countsTowardBadge).length : null,
+          unreadCount: listing?.ok === true ? badgeCount(listing.result) : null,
           error:
             listing?.ok === false
               ? listing.error
@@ -660,57 +647,27 @@ export const overview = Effect.fn("ForkInbox.overview")(function* () {
   return { channels: summaries };
 });
 
-/**
- * An item as clients get it. Wait time and highlight move with the clock, so the client
- * works them out from `lastMessageAt`, and an unchanged list stays byte-identical for its ETag.
- */
-const toWire = ({ waitMs: _waitMs, highlight: _highlight, ...item }: InboxItem) => item;
-
-export const listItems = Effect.fn("ForkInbox.listItems")(function* (channelId: string) {
+const channelOrMissing = Effect.fn("ForkInbox.channel")(function* (channelId: string) {
   const { hub } = yield* InboxRuntime;
   const channel = hub.get(channelId);
   if (channel === null) {
     return yield* new ForkHttpError({ status: 404, code: "missing", detail: "No such channel." });
   }
-  const result = yield* readChannelItems(channelId);
+  return channel;
+});
+
+export const listInbox = Effect.fn("ForkInbox.list")(function* (channelId: string) {
+  const channel = yield* channelOrMissing(channelId);
+  const result = yield* readChannel(channelId);
   return {
-    items: result.items.map(toWire),
+    conversations: result.conversations,
+    delegations: result.delegations,
     stale: result.stale,
     truncatedAtPages: result.truncatedAtPages,
     skipped: result.skipped,
     access: channelAccess(channel.status),
     status: channel.status,
   };
-});
-
-const TopicKeyInput = Schema.Struct({
-  channelId: Schema.String,
-  conversationId: Schema.String,
-  topicId: Schema.String,
-});
-const decodeTopicKeyInput = Schema.decodeUnknownEffect(TopicKeyInput);
-
-const findTopic = Effect.fn("ForkInbox.findTopic")(function* (key: TopicKey) {
-  const { hub } = yield* InboxRuntime;
-  const listing = yield* readChannelItems(key.channelId);
-  const item = listing.items.find(
-    (candidate) =>
-      candidate.conversationId === key.conversationId && candidate.topicId === key.topicId,
-  );
-  const conversation = listing.conversations.find(
-    (candidate) => candidate.id === key.conversationId,
-  );
-  if (!item || !conversation) {
-    return yield* new ForkHttpError({
-      status: 404,
-      code: "missing",
-      detail:
-        listing.truncatedAtPages === null
-          ? "This topic is no longer listed by the channel."
-          : `This topic is not in the first ${listing.truncatedAtPages} pages the channel lists.`,
-    });
-  }
-  return { item, conversation, listing, channel: hub.get(key.channelId)! };
 });
 
 const readFollowUps = Effect.fn("ForkInbox.readFollowUps")(function* (
@@ -736,15 +693,157 @@ const readFollowUps = Effect.fn("ForkInbox.readFollowUps")(function* (
   );
 });
 
-export const readTopic = Effect.fn("ForkInbox.readTopic")(function* (query: URLSearchParams) {
-  const key = yield* decodeTopicKeyInput(Object.fromEntries(query)).pipe(
-    Effect.mapError(() => badRequest("Name the channel, conversation, and topic.")),
+const decodeMessageExit = Schema.decodeUnknownExit(Message);
+
+function decodeMessages(items: ReadonlyArray<unknown>) {
+  const messages: Array<MessageType> = [];
+  let skipped = 0;
+  for (const raw of items) {
+    const decoded = decodeMessageExit(raw);
+    if (decoded._tag === "Success") messages.push(decoded.value);
+    else skipped += 1;
+  }
+  return { messages, skipped };
+}
+
+interface ScopeMessages {
+  /** Oldest first. */
+  readonly messages: ReadonlyArray<MessageType>;
+  /** Every message the scope covers was read. */
+  readonly complete: boolean;
+  /** The adapter no longer has the chain's first message; only its replies were read. */
+  readonly rootMissing: boolean;
+  readonly skipped: number;
+  readonly stale: boolean;
+}
+
+const readChain = Effect.fn("ForkInbox.readChain")(function* (
+  channelId: string,
+  conversationId: string,
+  rootId: string,
+  options: { readonly cacheMs?: number },
+) {
+  const { hub } = yield* InboxRuntime;
+  const result = yield* attempt(() =>
+    hub.getAllPages(channelId, chainPath(conversationId, rootId), Message, {
+      ...options,
+      maxPages: MESSAGE_PAGES,
+    }),
+  );
+  yield* warnSkipped(channelId, "messages", result.skipped);
+  const messages = sortMessages(result.items);
+  return {
+    messages,
+    complete: result.complete,
+    rootMissing: !messages.some((message) => message.id === rootId),
+    skipped: result.skipped,
+    stale: result.stale,
+  } satisfies ScopeMessages;
+});
+
+/** Reads the conversation back, newest page first, until `anchorMessageId` turns up. */
+const readBackTo = Effect.fn("ForkInbox.readBackTo")(function* (
+  channelId: string,
+  conversationId: string,
+  anchorMessageId: string,
+  options: { readonly cacheMs?: number },
+) {
+  const { hub } = yield* InboxRuntime;
+  const messages: Array<MessageType> = [];
+  const cursors = new Set<string>();
+  let skipped = 0;
+  let stale = false;
+  let cursor: string | undefined;
+  let found = false;
+  for (let page = 0; page < RANGE_PAGES && !found; page++) {
+    const answer = yield* attempt(() =>
+      hub.getJson(channelId, conversationMessagesPath(conversationId, cursor), RawPage, options),
+    );
+    if (answer.stale) stale = true;
+    const decoded = decodeMessages(answer.value.items);
+    messages.push(...decoded.messages);
+    skipped += decoded.skipped;
+    found = decoded.messages.some((message) => message.id === anchorMessageId);
+    const next = answer.value.nextCursor;
+    if (next === null || cursors.has(next)) break;
+    cursors.add(next);
+    cursor = next;
+  }
+  yield* warnSkipped(channelId, "messages", skipped);
+  return { messages: sortMessages(messages), found, skipped, stale };
+});
+
+/** The messages a delegation covers, as it reads now. */
+const readScope = Effect.fn("ForkInbox.readScope")(function* (
+  delegation: Pick<
+    Delegation,
+    "channelId" | "conversationId" | "anchorMessageId" | "scope" | "untilAt"
+  >,
+  kind: ConversationType["kind"],
+  options: { readonly cacheMs?: number },
+) {
+  const { channelId, conversationId, anchorMessageId } = delegation;
+  if (scopeIsChain(delegation, kind)) {
+    return yield* readChain(channelId, conversationId, anchorMessageId, options);
+  }
+  const back = yield* readBackTo(channelId, conversationId, anchorMessageId, options);
+  const anchor = back.messages.find((message) => message.id === anchorMessageId);
+  return {
+    messages: messagesInRange(
+      back.messages,
+      anchorMessageId,
+      rangeUntil(delegation, anchor?.createdAt ?? null),
+    ),
+    complete: back.found,
+    rootMissing: false,
+    skipped: back.skipped,
+    stale: back.stale,
+  } satisfies ScopeMessages;
+});
+
+const DelegationQuery = Schema.Struct({ channelId: Schema.String, delegationId: Schema.String });
+const decodeDelegationQuery = Schema.decodeUnknownEffect(DelegationQuery);
+
+const missingDelegation = () =>
+  new ForkHttpError({ status: 404, code: "missing", detail: "No such delegation." });
+
+const findDelegation = Effect.fn("ForkInbox.findDelegation")(function* (
+  channelId: string,
+  delegationId: string,
+) {
+  const runtime = yield* InboxRuntime;
+  const channel = yield* channelOrMissing(channelId);
+  const delegation = runtime.store.getDelegation(delegationId);
+  if (delegation === null || delegation.channelId !== channelId) return yield* missingDelegation();
+  const listing = yield* readChannel(channelId);
+  const item = listing.delegations.find((candidate) => candidate.id === delegationId);
+  if (item === undefined) return yield* missingDelegation();
+  const conversation = listing.raw.find((candidate) => candidate.id === delegation.conversationId);
+  return {
+    delegation,
+    item,
+    // A conversation the channel stopped listing still has its delegations; read it as a group.
+    conversation: {
+      id: delegation.conversationId,
+      name: conversation?.name ?? "",
+      kind: conversation?.kind ?? "group",
+    },
+    channel,
+  };
+});
+
+export const readDelegation = Effect.fn("ForkInbox.readDelegation")(function* (
+  query: URLSearchParams,
+) {
+  const input = yield* decodeDelegationQuery(Object.fromEntries(query)).pipe(
+    Effect.mapError(() => badRequest("Name the channel and delegation.")),
   );
   const runtime = yield* InboxRuntime;
-  const { item, conversation, channel } = yield* findTopic(key);
-  const messages = yield* readMessages(key.channelId, key.conversationId, key.topicId, {
-    cacheMs: 5_000,
-  });
+  const { delegation, item, conversation, channel } = yield* findDelegation(
+    input.channelId,
+    input.delegationId,
+  );
+  const scoped = yield* readScope(delegation, conversation.kind, { cacheMs: 5_000 });
   const thread = item.thread;
   const artifacts = thread
     ? yield* Effect.promise(() =>
@@ -753,7 +852,7 @@ export const readTopic = Effect.fn("ForkInbox.readTopic")(function* (query: URLS
     : { conclusion: null, draft: null };
   const current = isCurrent(thread);
   const history = yield* Effect.forEach(
-    runtime.store.linksForItem(item.id).filter((link) => link.threadId !== thread?.threadId),
+    runtime.store.linksForDelegation(item.id).filter((link) => link.threadId !== thread?.threadId),
     (link) => inspectLink(link, { current: false }),
   );
   const followUps =
@@ -765,15 +864,16 @@ export const readTopic = Effect.fn("ForkInbox.readTopic")(function* (query: URLS
       : [];
   const access = channelAccess(channel.status);
   return {
-    item: toWire(item),
+    delegation: item,
     conversation,
-    messages: messages.items,
-    stale: messages.stale,
-    truncatedAtPages: messages.complete ? null : MESSAGE_PAGES,
-    skipped: messages.skipped,
+    messages: scoped.messages,
+    complete: scoped.complete,
+    rootMissing: scoped.rootMissing,
+    stale: scoped.stale,
+    skipped: scoped.skipped,
     canSend: access.send,
     conclusion: artifacts.conclusion,
-    // Only the current thread's draft fills the reply box.
+    // Only the current thread's draft can go into the reply box.
     draft: current ? artifacts.draft : null,
     // A conclusion outlives a deleted thread; the detail shows it as history.
     conclusionIsHistorical: artifacts.conclusion !== null && !current,
@@ -788,7 +888,6 @@ const ConversationInput = Schema.Struct({
   cursor: Schema.optional(Schema.String),
 });
 const decodeConversationInput = Schema.decodeUnknownEffect(ConversationInput);
-const decodeMessageExit = Schema.decodeUnknownExit(Message);
 
 /** One page of the conversation, newest first from the adapter, oldest first to the client. */
 export const readConversation = Effect.fn("ForkInbox.readConversation")(function* (
@@ -806,13 +905,7 @@ export const readConversation = Effect.fn("ForkInbox.readConversation")(function
       { cacheMs: 5_000 },
     ),
   );
-  const messages: Array<MessageType> = [];
-  let skipped = 0;
-  for (const raw of page.value.items) {
-    const decoded = decodeMessageExit(raw);
-    if (decoded._tag === "Success") messages.push(decoded.value);
-    else skipped += 1;
-  }
+  const { messages, skipped } = decodeMessages(page.value.items);
   yield* warnSkipped(input.channelId, "messages", skipped);
   return {
     messages: sortMessages(messages),
@@ -834,32 +927,39 @@ export const media = Effect.fn("ForkInbox.media")(function* (query: URLSearchPar
 const ReadInput = Schema.Struct({
   channelId: Schema.String,
   conversationId: Schema.String,
-  topicId: Schema.String,
   read: Schema.Boolean,
-  /** The topic as the client showed it: what is marked read is what the user saw. */
+  /** The newest message the client showed: what is marked read is what the user saw. */
   lastMessageAt: Schema.optional(Timestamp),
-  runCompletedAt: Schema.optional(Timestamp),
 });
 const decodeReadInput = Schema.decodeUnknownEffect(ReadInput);
 
 export const setRead = Effect.fn("ForkInbox.setRead")(function* (body: unknown) {
   const input = yield* decodeReadInput(body).pipe(
-    Effect.mapError(() => badRequest("Name the topic and whether it is read.")),
+    Effect.mapError(() => badRequest("Name the conversation and whether it is read.")),
   );
   const runtime = yield* InboxRuntime;
-  const key: TopicKey = {
-    channelId: input.channelId,
-    conversationId: input.conversationId,
-    topicId: input.topicId,
-  };
-  if (input.read) {
-    runtime.store.markRead(key, {
-      ...(input.lastMessageAt === undefined ? {} : { readAt: input.lastMessageAt }),
-      ...(input.runCompletedAt === undefined ? {} : { agentSeenAt: input.runCompletedAt }),
-    });
-  } else {
-    runtime.store.pinUnread(key);
-  }
+  const key = { channelId: input.channelId, conversationId: input.conversationId };
+  if (input.read) runtime.store.markConversationRead(key, input.lastMessageAt);
+  else runtime.store.pinConversationUnread(key);
+  runtime.hub.publish({ type: "inbox", channelId: input.channelId });
+  return { ok: true };
+});
+
+const SeenInput = Schema.Struct({
+  channelId: Schema.String,
+  delegationId: Schema.String,
+  /** The run end the client showed. */
+  runCompletedAt: Timestamp,
+});
+const decodeSeenInput = Schema.decodeUnknownEffect(SeenInput);
+
+/** The user looked at the delegation's result. */
+export const markSeen = Effect.fn("ForkInbox.markSeen")(function* (body: unknown) {
+  const input = yield* decodeSeenInput(body).pipe(
+    Effect.mapError(() => badRequest("Name the delegation and the run end it showed.")),
+  );
+  const runtime = yield* InboxRuntime;
+  runtime.store.markAgentSeen(input.delegationId, input.runCompletedAt);
   runtime.hub.publish({ type: "inbox", channelId: input.channelId });
   return { ok: true };
 });
@@ -922,14 +1022,22 @@ const projectDefaults = Effect.fn("ForkInbox.projectDefaults")(function* (
   return { selection, runtimeMode: resolved.defaultRuntimeMode, providers };
 });
 
+const AnchorInput = Schema.Struct({
+  channelId: Schema.String,
+  conversationId: Schema.String,
+  anchorMessageId: Schema.String,
+});
+const decodeAnchorInput = Schema.decodeUnknownEffect(AnchorInput);
+
 export const delegateOptions = Effect.fn("ForkInbox.delegateOptions")(function* (
   query: URLSearchParams,
 ) {
-  const key = yield* decodeTopicKeyInput(Object.fromEntries(query)).pipe(
-    Effect.mapError(() => badRequest("Name the channel, conversation, and topic.")),
+  const key = yield* decodeAnchorInput(Object.fromEntries(query)).pipe(
+    Effect.mapError(() => badRequest("Name the channel, conversation, and message.")),
   );
   const runtime = yield* InboxRuntime;
-  const { item, channel } = yield* findTopic(key);
+  const channel = yield* channelOrMissing(key.channelId);
+  const delegationId = delegationIdFor(key);
   const projects = yield* activeProjects;
   const matches = matchProjectPaths(channel.config?.defaultProjectPaths ?? [], projects);
   const defaults = yield* Effect.forEach(projects, (project) =>
@@ -941,7 +1049,7 @@ export const delegateOptions = Effect.fn("ForkInbox.delegateOptions")(function* 
   const providers = yield* ProviderRegistry.ProviderRegistry.pipe(
     Effect.flatMap((registry) => registry.getProviders),
   );
-  const links = runtime.store.linksForItem(item.id);
+  const links = runtime.store.linksForDelegation(delegationId);
   const lastProjectId = links[0]?.projectId ?? null;
   const active = activeLinkOf(links);
   const existing = active ? yield* inspectLink(active, { current: true }) : null;
@@ -952,14 +1060,15 @@ export const delegateOptions = Effect.fn("ForkInbox.delegateOptions")(function* 
         .pipe(Effect.orElseSucceed(() => null))
     : null;
   return {
-    itemId: item.id,
+    delegationId,
+    scope: runtime.store.getDelegation(delegationId)?.scope ?? null,
     projects: projects.map((project) => ({
       id: project.id,
       title: project.title,
       workspaceRoot: project.workspaceRoot,
       defaultModel: defaults.find(([id]) => id === project.id)?.[1] ?? null,
     })),
-    // Another thread for this topic most likely belongs where the last one ran.
+    // Another thread for this delegation most likely belongs where the last one ran.
     defaultProjectId:
       projects.find((project) => project.id === lastProjectId)?.id ??
       matches.find((match) => match.projectId !== null)?.projectId ??
@@ -983,7 +1092,11 @@ export const delegateOptions = Effect.fn("ForkInbox.delegateOptions")(function* 
 const DelegateInput = Schema.Struct({
   channelId: Schema.String,
   conversationId: Schema.String,
-  topicId: Schema.String,
+  /** For a chain, the root of the reply thread; the client picks it from the message. */
+  anchorMessageId: Schema.String,
+  scope: Schema.Literals(["chain", "range"]),
+  /** A range's last message; the newest one when left out. */
+  untilMessageId: Schema.optional(Schema.NullOr(Schema.String)),
   projectId: Schema.String,
   templateId: Schema.String,
   note: Schema.optional(Schema.String),
@@ -1041,20 +1154,20 @@ interface DelegatedThread {
 const delegateLocks = new Map<string, Semaphore.Semaphore>();
 
 /**
- * One delegation per item at a time: the linked-thread check and the launch run under the item's
+ * One launch per delegation at a time: the linked-thread check and the launch run under its
  * lock, so two clicks never start two paid threads that share a folder. A replacement goes
  * ahead only while `replaceThreadId` is still the linked thread.
  */
 export function delegateExclusively<E1, R1, E2, R2>(input: {
-  readonly itemId: string;
+  readonly key: string;
   readonly replaceThreadId: string | null;
   readonly current: Effect.Effect<DelegatedThread | null, E1, R1>;
   readonly start: (replacing: DelegatedThread | null) => Effect.Effect<DelegatedThread, E2, R2>;
 }): Effect.Effect<DelegatedThread & { readonly existing: boolean }, E1 | E2, R1 | R2> {
-  let lock = delegateLocks.get(input.itemId);
+  let lock = delegateLocks.get(input.key);
   if (lock === undefined) {
     lock = Semaphore.makeUnsafe(1);
-    delegateLocks.set(input.itemId, lock);
+    delegateLocks.set(input.key, lock);
   }
   return lock
     .withPermit(
@@ -1070,15 +1183,84 @@ export function delegateExclusively<E1, R1, E2, R2>(input: {
     .pipe(Effect.withSpan("ForkInbox.delegateExclusively"));
 }
 
+const clipPreview = (message: MessageType | undefined) =>
+  Array.from(
+    (message?.text.trim() || message?.richSummary || message?.attachments[0]?.name || "")
+      .replace(/\s+/g, " ")
+      .trim(),
+  )
+    .slice(0, PREVIEW_CHARS)
+    .join("");
+
+/** The messages a new delegation covers, read now, with the range's end fixed. */
+const readNewScope = Effect.fn("ForkInbox.readNewScope")(function* (
+  input: typeof DelegateInput.Type,
+) {
+  if (input.scope === "chain") {
+    const chain = yield* readChain(input.channelId, input.conversationId, input.anchorMessageId, {
+      cacheMs: 0,
+    });
+    // A thread that sees only part of the thread would answer from half a conversation.
+    if (!chain.complete) {
+      return yield* new ForkHttpError({
+        status: 422,
+        code: "scope_too_long",
+        detail: `This reply thread is longer than the ${MESSAGE_PAGES} pages T3 Code reads, so it cannot be delegated.`,
+      });
+    }
+    return { ...chain, untilAt: null };
+  }
+  const back = yield* readBackTo(input.channelId, input.conversationId, input.anchorMessageId, {
+    cacheMs: 0,
+  });
+  if (!back.found) {
+    return yield* new ForkHttpError({
+      status: 422,
+      code: "scope_too_long",
+      detail: `That message is older than the ${RANGE_PAGES} pages T3 Code reads back, so it cannot be delegated.`,
+    });
+  }
+  const all = messagesInRange(back.messages, input.anchorMessageId, null);
+  const until =
+    input.untilMessageId === undefined || input.untilMessageId === null
+      ? all.length - 1
+      : all.findIndex((message) => message.id === input.untilMessageId);
+  if (until === -1) {
+    return yield* badRequest("The last message must come after the first.", "untilMessageId");
+  }
+  const messages = all.slice(0, until + 1);
+  return {
+    messages,
+    complete: true,
+    rootMissing: false,
+    skipped: back.skipped,
+    stale: back.stale,
+    untilAt: messages.at(-1)?.createdAt ?? null,
+  };
+});
+
 export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown) {
   const input = yield* decodeDelegateInput(body).pipe(
     Effect.mapError(() => badRequest("The delegation is missing fields.")),
   );
   const runtime = yield* InboxRuntime;
-  const { item, conversation, listing, channel } = yield* findTopic(input);
+  const channel = yield* channelOrMissing(input.channelId);
+  const listing = yield* readChannel(input.channelId);
+  const conversation = listing.raw.find((candidate) => candidate.id === input.conversationId);
+  if (conversation === undefined) {
+    return yield* new ForkHttpError({
+      status: 404,
+      code: "missing",
+      detail:
+        listing.truncatedAtPages === null
+          ? "This conversation is no longer listed by the channel."
+          : `This conversation is not in the first ${listing.truncatedAtPages} pages the channel lists.`,
+    });
+  }
+  const delegationId = delegationIdFor(input);
 
   const current = Effect.gen(function* () {
-    const active = activeLinkOf(runtime.store.linksForItem(item.id));
+    const active = activeLinkOf(runtime.store.linksForDelegation(delegationId));
     if (!active) return null;
     const view = yield* inspectLink(active, { current: true });
     return isCurrent(view) ? { threadId: view.threadId, projectId: view.projectId } : null;
@@ -1087,16 +1269,12 @@ export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown
   const start = Effect.fn("ForkInbox.startDelegation")(function* (
     replacing: DelegatedThread | null,
   ) {
-    // The whole topic, every page, oldest first.
-    const messages = yield* readMessages(input.channelId, input.conversationId, input.topicId, {
-      cacheMs: 0,
-    });
-    // A thread that sees only part of the topic would answer from half a conversation.
-    if (!messages.complete) {
+    const scoped = yield* readNewScope(input);
+    if (scoped.messages.length === 0) {
       return yield* new ForkHttpError({
         status: 422,
-        code: "topic_too_long",
-        detail: `This topic is longer than the ${MESSAGE_PAGES} pages T3 Code reads, so it cannot be delegated.`,
+        code: "missing",
+        detail: "The channel has none of these messages any more.",
       });
     }
     const template = channel.config?.delegateTemplates.find(
@@ -1142,48 +1320,51 @@ export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown
 
     const commandId = CommandId.make(`fork-inbox:${NodeCrypto.randomUUID()}`);
     const threadId = ThreadId.make(commandId);
-    const contextDir = threadContextDir(runtime.itemsDir, item.id, threadId);
+    const contextDir = threadContextDir(runtime.itemsDir, delegationId, threadId);
     yield* Effect.promise(() => NodeFSP.mkdir(contextDir, { recursive: true }));
-    const images = yield* downloadImages(input.channelId, contextDir, messages.items);
+    const images = yield* downloadImages(input.channelId, contextDir, scoped.messages);
+    const anchor = scoped.messages.find((message) => message.id === input.anchorMessageId);
+    const preview = clipPreview(anchor ?? scoped.messages[0]);
     const sender =
-      messages.items.find((message) => !message.author.isSelf)?.author ?? item.lastAuthor;
+      scoped.messages.find((message) => !message.author.isSelf)?.author ??
+      scoped.messages[0]!.author;
     const since = Date.now() - SENDER_HISTORY_MS;
-    const senderHistory = listing.items
+    const senderHistory = listing.conversations
       .filter(
         (candidate) =>
-          candidate.id !== item.id &&
-          candidate.lastAuthor.id === sender.id &&
-          Date.parse(candidate.lastMessageAt) >= since,
+          candidate.id !== conversation.id &&
+          candidate.lastMessage !== null &&
+          candidate.lastMessage.author.id === sender.id &&
+          Date.parse(candidate.lastMessage.createdAt) >= since,
       )
       .slice(0, 20)
       .map((candidate) => ({
-        at: candidate.lastMessageAt,
-        conversationName: candidate.conversationName,
-        preview: candidate.preview.slice(0, 160),
-        state: candidate.unread ? "unread" : candidate.awaitingReply ? "waiting" : "read",
+        at: candidate.lastMessage!.createdAt,
+        conversationName: candidate.name,
+        preview: candidate.lastMessage!.preview.slice(0, 160),
+        state: candidate.unread ? "unread" : "read",
       }));
     const openUrl =
-      messages.items.find((message) => message.id === item.rootMessageId)?.openUrl ??
-      messages.items[0]?.openUrl ??
-      null;
+      anchor?.openUrl ?? scoped.messages.find((message) => message.openUrl)?.openUrl ?? null;
     const channelName = channel.config?.displayName ?? channel.name;
     const context = buildContextMarkdown({
       channelName,
       conversation,
-      messages: messages.items,
+      messages: scoped.messages,
       images,
       senderName: sender.name,
       senderHistory,
       contextDir,
       openUrl,
-      skippedMessages: messages.skipped,
+      skippedMessages: scoped.skipped,
+      rootMissing: scoped.rootMissing,
     });
     const text = firstMessage({
       template: template.prompt,
       contextDir,
       note: input.note ?? "",
       openUrl,
-      skippedMessages: messages.skipped,
+      skippedMessages: scoped.skipped,
     });
     yield* Effect.promise(() =>
       Promise.all([
@@ -1194,7 +1375,9 @@ export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown
             requestedAt: new Date().toISOString(),
             channelId: input.channelId,
             conversationId: input.conversationId,
-            topicId: input.topicId,
+            anchorMessageId: input.anchorMessageId,
+            scope: input.scope,
+            untilAt: scoped.untilAt,
             projectId: project.id,
             templateId: template.id,
             note: input.note ?? "",
@@ -1212,7 +1395,7 @@ export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown
       threadId,
       projectId: ProjectId.make(project.id),
       // Adapters may not know the sender's name; the conversation's is the next best label.
-      title: threadTitle(sender.name.trim() || nameOrUnknown(conversation.name), item.preview),
+      title: threadTitle(sender.name.trim() || nameOrUnknown(conversation.name), preview),
       modelSelection,
       runtimeMode,
       interactionMode: "default",
@@ -1227,35 +1410,47 @@ export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown
       ),
     );
     const at = new Date().toISOString();
-    runtime.store.addLink({
-      itemId: item.id,
+    runtime.store.saveDelegation({
+      id: delegationId,
       channelId: input.channelId,
       conversationId: input.conversationId,
-      topicId: input.topicId,
+      anchorMessageId: input.anchorMessageId,
+      scope: input.scope,
+      untilAt: scoped.untilAt,
+      preview,
+      createdAt: at,
+    });
+    runtime.store.addLink({
+      delegationId,
+      channelId: input.channelId,
+      conversationId: input.conversationId,
       threadId: result.threadId,
       projectId: project.id,
       createdAt: at,
     });
     if (replacing !== null) {
-      runtime.store.detachLink(item.id, replacing.threadId, "replaced", at);
+      runtime.store.detachLink(delegationId, replacing.threadId, "replaced", at);
     }
     return { threadId: result.threadId, projectId: project.id };
   });
 
   const result = yield* delegateExclusively({
-    itemId: item.id,
+    key: delegationId,
     replaceThreadId: input.replaceThreadId ?? null,
     current,
     start,
   });
   if (!result.existing) runtime.hub.publish({ type: "inbox", channelId: input.channelId });
-  return result;
+  return { ...result, delegationId };
 });
 
 const SendInput = Schema.Struct({
   channelId: Schema.String,
   conversationId: Schema.String,
-  topicId: Schema.optional(Schema.String),
+  /** The adapter sends it into this message's reply thread. */
+  replyToId: Schema.optional(Schema.String),
+  /** The delegation whose draft this is; a copy of what was sent goes into its folder. */
+  delegationId: Schema.optional(Schema.String),
   text: Schema.String,
 });
 const decodeSendInput = Schema.decodeUnknownEffect(SendInput);
@@ -1275,24 +1470,24 @@ export const send = Effect.fn("ForkInbox.send")(function* (body: unknown) {
     return yield* badRequest("Write a message of up to 20,000 characters.", "text");
   }
   const runtime = yield* InboxRuntime;
-  const key =
-    input.topicId === undefined
-      ? null
-      : {
-          channelId: input.channelId,
-          conversationId: input.conversationId,
-          topicId: input.topicId,
-        };
-  const itemId = key === null ? null : itemIdFor(key);
-  const active = itemId === null ? undefined : activeLinkOf(runtime.store.linksForItem(itemId));
+  const delegation =
+    input.delegationId === undefined ? null : runtime.store.getDelegation(input.delegationId);
+  const delegationId =
+    delegation !== null && delegation.channelId === input.channelId ? delegation.id : null;
+  const active =
+    delegationId === null
+      ? undefined
+      : activeLinkOf(runtime.store.linksForDelegation(delegationId));
   const draftDir =
-    itemId !== null && active ? threadContextDir(runtime.itemsDir, itemId, active.threadId) : null;
+    delegationId !== null && active
+      ? threadContextDir(runtime.itemsDir, delegationId, active.threadId)
+      : null;
   const draftAtSend =
     draftDir === null ? null : (yield* Effect.promise(() => readArtifacts(draftDir))).draft;
   const answer = yield* attempt(() =>
     runtime.hub.postJson(input.channelId, "/messages", {
       conversationId: input.conversationId,
-      ...(input.topicId === undefined ? {} : { topicId: input.topicId }),
+      ...(input.replyToId === undefined ? {} : { replyToId: input.replyToId }),
       text,
     }),
   ).pipe(
@@ -1318,11 +1513,11 @@ export const send = Effect.fn("ForkInbox.send")(function* (body: unknown) {
     });
   }
   const messageId = result.value.messageId;
-  if (key === null || itemId === null) return { messageId, archived: null };
+  if (delegationId === null) return { messageId, archived: null };
   // The message went out either way; a failed copy is reported, never retried by resending.
   const archived = yield* Effect.promise(() =>
     recordSent({
-      itemDir: NodePath.join(runtime.itemsDir, itemId),
+      itemDir: NodePath.join(runtime.itemsDir, delegationId),
       draftDir,
       draftAtSend,
       text,
@@ -1338,13 +1533,12 @@ export const send = Effect.fn("ForkInbox.send")(function* (body: unknown) {
 
 const AskInput = Schema.Struct({
   channelId: Schema.String,
-  conversationId: Schema.String,
-  topicId: Schema.String,
+  delegationId: Schema.String,
   text: Schema.String,
 });
 const decodeAskInput = Schema.decodeUnknownEffect(AskInput);
 
-/** A question for the topic's thread. It never reaches the chat app. */
+/** A question for the delegation's thread. It never reaches the chat app. */
 export const ask = Effect.fn("ForkInbox.ask")(function* (body: unknown) {
   const input = yield* decodeAskInput(body).pipe(
     Effect.mapError(() => badRequest("The question is missing fields.")),
@@ -1354,14 +1548,14 @@ export const ask = Effect.fn("ForkInbox.ask")(function* (body: unknown) {
     return yield* badRequest("Write a question of up to 20,000 characters.", "text");
   }
   const runtime = yield* InboxRuntime;
-  const itemId = itemIdFor(input);
-  const active = activeLinkOf(runtime.store.linksForItem(itemId));
+  const delegationId = input.delegationId;
+  const active = activeLinkOf(runtime.store.linksForDelegation(delegationId));
   const view = active ? yield* inspectLink(active, { current: true }) : null;
   if (active === undefined || !isCurrent(view) || view.status === "archived") {
     return yield* badRequest(
       view?.status === "archived"
-        ? "This topic's thread is archived; open it or delegate again."
-        : "Delegate this topic first.",
+        ? "This delegation's thread is archived; open it or delegate again."
+        : "This delegation has no thread; delegate again.",
     );
   }
   const commandId = CommandId.make(`fork-inbox-ask:${NodeCrypto.randomUUID()}`);
@@ -1370,7 +1564,7 @@ export const ask = Effect.fn("ForkInbox.ask")(function* (body: unknown) {
     commandId,
     threadId: ThreadId.make(active.threadId),
     messageId: MessageId.make(commandId),
-    text: followUpMessage(text, threadContextDir(runtime.itemsDir, itemId, active.threadId)),
+    text: followUpMessage(text, threadContextDir(runtime.itemsDir, delegationId, active.threadId)),
     attachments: [],
     // A running thread takes the question after its current run.
     mode: "queue",

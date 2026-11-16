@@ -1,47 +1,22 @@
-// @effect-diagnostics-next-line nodeBuiltinImport:off -- Effect's Digest is effectful; item ids stay a plain function.
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Effect's Digest is effectful; delegation ids stay a plain function.
 import * as NodeCrypto from "node:crypto";
 
-import type { Conversation, Message, Topic } from "../channels/protocol.ts";
-import type { Read, TopicKey } from "./store.ts";
+import type { Conversation, Message } from "../channels/protocol.ts";
+import type { ConversationRead, Delegation } from "./store.ts";
 
-export type ItemCategory = "direct" | "participated" | "followed" | "other";
-
-const WAITING_HIGHLIGHT_MS = 24 * 3_600_000;
-
-/** Stable across restarts and adapters, short enough for a directory name. */
-export function itemIdFor(key: TopicKey): string {
+/**
+ * Stable across restarts and adapters, short enough for a directory name. A v1 topic id was its
+ * first message's id, so a topic's old item id is the id of the delegation anchored there.
+ */
+export function delegationIdFor(key: {
+  readonly channelId: string;
+  readonly conversationId: string;
+  readonly anchorMessageId: string;
+}): string {
   return NodeCrypto.createHash("sha256")
-    .update(`${key.channelId}\0${key.conversationId}\0${key.topicId}`)
+    .update(`${key.channelId}\0${key.conversationId}\0${key.anchorMessageId}`)
     .digest("hex")
     .slice(0, 24);
-}
-
-export interface TopicFacts {
-  readonly conversation: Pick<Conversation, "kind" | "relevant" | "muted">;
-  readonly topic: Pick<Topic, "lastMessageAt" | "lastAuthor" | "participatedBySelf"> & {
-    readonly selfReadThroughAt?: string | null | undefined;
-  };
-  /** A message after my last one mentions me. */
-  readonly mentionsSelf: boolean;
-  /** When someone else last wrote in the topic; null when nobody else has. */
-  readonly lastOtherMessageAt: string | null;
-  readonly read: Pick<Read, "readAt" | "agentSeenAt" | "pinnedUnread"> | null;
-  /** The channel-wide mark: anything before it, message or agent result, counts as seen. */
-  readonly readAllBefore: string;
-  /** When the current thread's last run worth a look finished; null while none has. */
-  readonly runCompletedAt: string | null;
-  readonly now: number;
-}
-
-export interface DerivedItem {
-  readonly category: ItemCategory;
-  readonly unread: boolean;
-  /** The thread finished a run after the user last looked. */
-  readonly agentUnseen: boolean;
-  /** I wrote last: the topic waits on the others. */
-  readonly awaitingReply: boolean;
-  readonly waitMs: number;
-  readonly highlight: boolean;
 }
 
 const instant = (at: string | null | undefined) => (at ? Date.parse(at) : Number.NaN);
@@ -56,50 +31,64 @@ function after(at: string | null, ...marks: ReadonlyArray<string | null | undefi
   });
 }
 
-export function deriveItem(facts: TopicFacts): DerivedItem {
-  const { topic, conversation, read } = facts;
-  const lastIsSelf = topic.lastAuthor.isSelf;
-  const lastAt = Date.parse(topic.lastMessageAt);
-  const waitMs = Number.isFinite(lastAt) ? Math.max(0, facts.now - lastAt) : 0;
-  const direct = conversation.kind === "dm" || facts.mentionsSelf;
-  const category: ItemCategory = direct
-    ? "direct"
-    : topic.participatedBySelf
-      ? "participated"
-      : conversation.relevant && !conversation.muted
-        ? "followed"
-        : "other";
-  const messageUnread =
-    !lastIsSelf &&
-    after(facts.lastOtherMessageAt, read?.readAt, topic.selfReadThroughAt, facts.readAllBefore);
-  const agentUnseen = after(facts.runCompletedAt, read?.agentSeenAt, facts.readAllBefore);
+export interface ConversationState {
+  /** Someone else wrote after every read mark, or the user pinned it unread. */
+  readonly unread: boolean;
+  /** A mention I have not read or answered since. */
+  readonly mentioned: boolean;
+}
+
+/**
+ * Reads only go one way: reading in the chat app clears the conversation here, reading here
+ * leaves the chat app as it was.
+ */
+export function deriveConversation(input: {
+  readonly conversation: Pick<
+    Conversation,
+    "lastMessage" | "lastOtherMessageAt" | "lastSelfMessageAt" | "lastMentionAt"
+  > & { readonly selfReadThroughAt?: string | null | undefined };
+  readonly read: Pick<ConversationRead, "readAt" | "pinnedUnread"> | null;
+  /** The channel-wide mark: anything before it counts as seen. */
+  readonly readAllBefore: string;
+}): ConversationState {
+  const { conversation, read } = input;
+  const marks = [read?.readAt, conversation.selfReadThroughAt, input.readAllBefore];
+  const lastIsSelf = conversation.lastMessage?.author.isSelf ?? false;
   return {
-    category,
-    unread: (read?.pinnedUnread ?? false) || messageUnread || agentUnseen,
-    agentUnseen,
-    awaitingReply: lastIsSelf,
-    waitMs,
-    highlight: lastIsSelf && waitMs > WAITING_HIGHLIGHT_MS,
+    unread:
+      (read?.pinnedUnread ?? false) ||
+      (!lastIsSelf && after(conversation.lastOtherMessageAt, ...marks)),
+    mentioned: after(conversation.lastMentionAt, ...marks, conversation.lastSelfMessageAt),
   };
 }
 
-/** What the sidebar badge counts: agent results, and unread topics I am part of. */
-export function countsTowardBadge(
-  item: Pick<DerivedItem, "unread" | "agentUnseen" | "category">,
-): boolean {
-  return (
-    item.agentUnseen ||
-    (item.unread && (item.category === "direct" || item.category === "participated"))
-  );
+/** The thread finished a run after the user last looked at the delegation. */
+export function agentUnseen(input: {
+  readonly delegation: Pick<Delegation, "agentSeenAt">;
+  readonly runCompletedAt: string | null;
+  readonly readAllBefore: string;
+}): boolean {
+  return after(input.runCompletedAt, input.delegation.agentSeenAt, input.readAllBefore);
 }
 
-/** Newest first; each view already picks its items. */
-export function compareItems(
-  left: { readonly lastMessageAt: string; readonly id: string },
-  right: { readonly lastMessageAt: string; readonly id: string },
+/**
+ * What the sidebar badge counts: unread DMs and groups that mention me. A followed group with
+ * only new messages shows in Unread but is not counted. Agent results are counted apart.
+ */
+export function conversationCountsTowardBadge(
+  kind: Conversation["kind"],
+  state: ConversationState,
+): boolean {
+  return kind === "dm" ? state.unread : state.mentioned;
+}
+
+/** Newest first. */
+export function compareConversations(
+  left: { readonly lastActivityAt: string; readonly id: string },
+  right: { readonly lastActivityAt: string; readonly id: string },
 ): number {
   return (
-    Date.parse(right.lastMessageAt) - Date.parse(left.lastMessageAt) ||
+    Date.parse(right.lastActivityAt) - Date.parse(left.lastActivityAt) ||
     left.id.localeCompare(right.id)
   );
 }
@@ -109,4 +98,45 @@ export function sortMessages(messages: ReadonlyArray<Message>): ReadonlyArray<Me
   return messages.toSorted(
     (left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt),
   );
+}
+
+/** A v1 topic in a DM was a six-hour window from its first message. */
+const LEGACY_DM_WINDOW_MS = 6 * 3_600_000;
+
+/**
+ * Whether the delegation reads a message and its replies. One made from a v1 topic stores no
+ * scope: in a DM it was a window of time, elsewhere a message and its replies.
+ */
+export function scopeIsChain(
+  delegation: Pick<Delegation, "scope">,
+  kind: Conversation["kind"],
+): boolean {
+  return delegation.scope === "chain" || (delegation.scope === null && kind !== "dm");
+}
+
+/** The last time a range covers; null runs to the newest message. */
+export function rangeUntil(
+  delegation: Pick<Delegation, "scope" | "untilAt">,
+  anchorAt: string | null,
+): string | null {
+  if (delegation.scope === "range") return delegation.untilAt;
+  const anchor = instant(anchorAt);
+  if (!Number.isFinite(anchor)) return null;
+  // @effect-diagnostics-next-line globalDate:off -- a pure function over the adapter's ISO times.
+  return new Date(anchor + LEGACY_DM_WINDOW_MS).toISOString();
+}
+
+/** The messages a range covers: from the anchor through `untilAt`, or to the end when null. */
+export function messagesInRange(
+  messages: ReadonlyArray<Message>,
+  anchorMessageId: string,
+  untilAt: string | null,
+): ReadonlyArray<Message> {
+  const sorted = sortMessages(messages);
+  const start = sorted.findIndex((message) => message.id === anchorMessageId);
+  if (start === -1) return [];
+  const until = instant(untilAt);
+  return sorted
+    .slice(start)
+    .filter((message) => !Number.isFinite(until) || Date.parse(message.createdAt) <= until);
 }

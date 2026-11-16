@@ -1,65 +1,81 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import type { InboxItem, InboxMessage } from "../types";
+import type { InboxConversation, InboxDelegation, InboxMessage } from "../types";
 import {
+  agentSignalsByConversation,
+  anchorOf,
   conversationRows,
   emptyViewTitle,
-  mergeConversationPages,
-  quoteOf,
-  replyTargetOf,
   inView,
-  itemMeta,
+  lastMessageLine,
+  mergeConversationPages,
   minuteToMs,
-  nextReplyText,
-  type DraftSource,
+  quoteOf,
 } from "./inboxView";
-
-const draft = (threadId: string, text: string): DraftSource => ({ threadId, text });
-
-describe("nextReplyText", () => {
-  it.each([
-    ["a new thread replaces the one whose draft is shown", "old", draft("t1", "old"), null, ""],
-    ["the thread withdraws its draft", "old", draft("t1", "old"), null, ""],
-    ["the same thread rewrites its draft", "old", draft("t1", "old"), draft("t1", "new"), "new"],
-    ["a draft lands in an empty box", "", null, draft("t1", "new"), "new"],
-    ["the user edited the draft", "old, edited", draft("t1", "old"), null, "old, edited"],
-    ["the user typed before any draft", "mine", null, draft("t1", "new"), "mine"],
-  ] as const)("when %s", (_case, text, shown, next, expected) => {
-    expect(nextReplyText(text, shown, next)).toBe(expected);
-  });
-});
 
 describe("emptyViewTitle", () => {
   it.each([
     ["unread", "all", "Nothing unread"],
     ["unread", "dm", "No unread DMs"],
-    ["waiting", "groups", "No waiting group topics"],
+    ["agent", "groups", "No delegations from groups"],
     ["all", "dm", "No DMs"],
   ] as const)("names an empty %s list filtered to %s", (view, filter, title) => {
     expect(emptyViewTitle(view, filter)).toBe(title);
   });
 });
 
-describe("itemMeta", () => {
-  const author = (name: string) => ({ id: "u", name, isSelf: false });
-  it.each([
-    ["names the last author", 40, "Sam Okafor", false, "40 replies · Sam Okafor"],
-    ["leaves out a nameless author", 40, "  ", false, "40 replies"],
-    ["has nothing to say", 0, "", false, null],
-    ["leaves the author to a waiting topic's label", 1, "Sam", true, "1 reply"],
-  ] as const)("%s", (_case, replyCount, name, awaitingReply, meta) => {
-    expect(itemMeta({ replyCount, lastAuthor: author(name), awaitingReply })).toBe(meta);
+describe("inView", () => {
+  const conversation = (unread: boolean, mentioned = false) =>
+    ({ id: "c", kind: "group", unread, mentioned }) as InboxConversation;
+  const agent = (unseen: number) => ({ unseen, drafts: 0, live: 1 });
+
+  it("lists in Unread what has new messages, a mention, or an agent result", () => {
+    expect(inView("unread", "all", conversation(true), undefined)).toBe(true);
+    expect(inView("unread", "all", conversation(false, true), undefined)).toBe(true);
+    expect(inView("unread", "all", conversation(false), agent(1))).toBe(true);
+    expect(inView("unread", "all", conversation(false), agent(0))).toBe(false);
+    expect(inView("all", "all", conversation(false), undefined)).toBe(true);
+  });
+
+  it("keeps the open conversation in Unread after it is read, and only that one", () => {
+    expect(inView("unread", "all", conversation(false), undefined, "c")).toBe(true);
+    expect(inView("unread", "dm", conversation(false), undefined, "c")).toBe(false);
   });
 });
 
-describe("inView", () => {
-  const topic = (unread: boolean) =>
-    ({ id: "i", conversationKind: "group", unread, awaitingReply: false }) as InboxItem;
-  it("keeps the open topic in Unread after it is read, and only that one", () => {
-    expect(inView("unread", "all", topic(true))).toBe(true);
-    expect(inView("unread", "all", topic(false))).toBe(false);
-    expect(inView("unread", "all", topic(false), "i")).toBe(true);
-    expect(inView("unread", "dm", topic(false), "i")).toBe(false);
+describe("agentSignalsByConversation", () => {
+  it("counts each conversation's unseen results, drafts, and live threads", () => {
+    const delegation = (conversationId: string, extra: Partial<InboxDelegation>) =>
+      ({
+        conversationId,
+        agentUnseen: false,
+        hasDraft: false,
+        thread: { detachedAt: null },
+        ...extra,
+      }) as InboxDelegation;
+    const signals = agentSignalsByConversation([
+      delegation("a", { agentUnseen: true }),
+      delegation("a", { hasDraft: true }),
+      delegation("b", { thread: null }),
+    ]);
+    expect(signals.get("a")).toEqual({ unseen: 1, drafts: 1, live: 2 });
+    expect(signals.get("b")).toEqual({ unseen: 0, drafts: 0, live: 0 });
+  });
+});
+
+describe("lastMessageLine", () => {
+  const line = (kind: "dm" | "group", name: string, isSelf: boolean) =>
+    lastMessageLine({
+      kind,
+      lastMessage: { id: "m", createdAt: "", author: { id: "u", name, isSelf }, preview: "hi" },
+    });
+  it.each([
+    ["names the author in a group", line("group", "Sam", false), "Sam: hi"],
+    ["leaves the other person out of a DM", line("dm", "Sam", false), "hi"],
+    ["says when I wrote last", line("dm", "Me", true), "You: hi"],
+    ["leaves out a nameless author", line("group", " ", false), "hi"],
+  ])("%s", (_case, actual, expected) => {
+    expect(actual).toBe(expected);
   });
 });
 
@@ -70,57 +86,29 @@ describe("minuteToMs", () => {
 });
 
 describe("conversationRows", () => {
-  const message = (id: string, topicId: string, author = "Sam") =>
+  const message = (id: string, replyTo: InboxMessage["replyTo"] = null, author = "Sam") =>
     ({
       id,
-      topicId,
+      replyTo,
       text: `text ${id}`,
       author: { id: author, name: author, isSelf: false },
     }) as InboxMessage;
-  const item = (topicId: string, rootMessageId: string) =>
-    ({ id: `item-${topicId}`, topicId, rootMessageId, preview: `preview ${topicId}` }) as InboxItem;
-  // Oldest first; t1's root r1 has a reply, t-old's root is older than what was read.
-  const messages = [
-    message("r1", "t1"),
-    message("x1", "t-unlisted"),
-    message("a1", "t1", "Kim"),
-    message("o2", "t-old"),
-    message("o3", "t-old"),
-  ];
-  const items = [item("t1", "r1"), item("t-old", "o1")];
-  const shape = (kind: "dm" | "group" | "topic_group") =>
-    conversationRows(messages, items, kind).map((row) => [
-      row.message.id,
-      row.item?.id ?? null,
-      row.anchor,
-      row.quote,
-    ]);
 
-  it("shows a topic group's topics once each, by root or the earliest message read", () => {
-    expect(shape("topic_group")).toEqual([
-      ["r1", "item-t1", true, null],
-      ["x1", null, true, null],
-      ["o2", "item-t-old", true, null],
-    ]);
-  });
-
-  it("shows every message of a group, a reply quoting its topic's root", () => {
-    expect(shape("group")).toEqual([
-      ["r1", "item-t1", true, null],
-      ["x1", null, true, null],
-      ["a1", "item-t1", false, "Sam: text r1"],
-      ["o2", "item-t-old", true, "preview t-old"],
-      ["o3", "item-t-old", false, "preview t-old"],
-    ]);
-  });
-
-  it("shows every message of a DM without quotes", () => {
-    expect(shape("dm").map(([id, , anchor, quote]) => [id, anchor, quote])).toEqual([
-      ["r1", true, null],
-      ["x1", true, null],
-      ["a1", false, null],
-      ["o2", true, null],
-      ["o3", false, null],
+  it("quotes what a reply answers: the loaded message, else the adapter's preview", () => {
+    const rows = conversationRows(
+      [
+        message("r1"),
+        message("a1", { id: "r1", authorName: null, preview: null }, "Kim"),
+        message("o2", { id: "o1", authorName: "Lee", preview: "older text" }),
+        message("o3", { id: "gone", authorName: null, preview: null }),
+      ],
+      [{ id: "d1", anchorMessageId: "r1" } as InboxDelegation],
+    );
+    expect(rows.map((row) => [row.message.id, row.quote, row.delegations.length])).toEqual([
+      ["r1", null, 1],
+      ["a1", "Sam: text r1", 0],
+      ["o2", "Lee: older text", 0],
+      ["o3", "An earlier message", 0],
     ]);
   });
 
@@ -129,22 +117,12 @@ describe("conversationRows", () => {
   });
 });
 
-describe("replyTargetOf", () => {
-  const root = {
-    id: "r",
-    text: "Who owns the retry budget?",
-    author: { id: "u", name: "Sam", isSelf: false },
-  } as InboxMessage;
-  const detail = (kind: "dm" | "group", messages: ReadonlyArray<InboxMessage>) => ({
-    item: { rootMessageId: "r" } as InboxItem,
-    conversation: { id: "c", name: "c", kind },
-    messages,
-  });
-
-  it("names the topic's root in a group, and nothing in a DM or without the root", () => {
-    expect(replyTargetOf(detail("group", [root]))).toBe("Sam: Who owns the retry budget?");
-    expect(replyTargetOf(detail("dm", [root]))).toBeNull();
-    expect(replyTargetOf(detail("group", []))).toBeNull();
+describe("anchorOf", () => {
+  it("delegates a reply thread from its root and a range from the message itself", () => {
+    const reply = { id: "m2", rootId: "m1" } as InboxMessage;
+    expect(anchorOf(reply, "chain")).toBe("m1");
+    expect(anchorOf(reply, "range")).toBe("m2");
+    expect(anchorOf({ id: "m1", rootId: null } as InboxMessage, "chain")).toBe("m1");
   });
 });
 
