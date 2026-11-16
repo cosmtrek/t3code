@@ -6,7 +6,7 @@ import * as NodeSqlite from "node:sqlite";
 
 import { describe, expect, it } from "@effect/vitest";
 
-import { applyFallback, readArtifacts, readSent, recordSent } from "./artifacts.ts";
+import { applyFallback, discardDraft, readArtifacts, readSent, recordSent } from "./artifacts.ts";
 import {
   buildContextMarkdown,
   firstMessage,
@@ -614,5 +614,17 @@ describe("sent records", () => {
       "first",
       "second",
     ]);
+  });
+});
+
+describe("discarding a draft", () => {
+  it("drops the draft the user saw and keeps one the thread rewrote since", async () => {
+    const dir = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-discard-"));
+    const at = "2026-11-16T12:00:00.000Z";
+    await NodeFSP.writeFile(NodePath.join(dir, "draft.md"), "newer reply\n");
+    expect(await discardDraft(dir, "older reply", at)).toBe(false);
+    expect((await readArtifacts(dir)).draft).toBe("newer reply");
+    expect(await discardDraft(dir, "newer reply", at)).toBe(true);
+    expect((await readArtifacts(dir)).draft).toBeNull();
   });
 });

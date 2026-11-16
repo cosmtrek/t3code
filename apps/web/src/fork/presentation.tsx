@@ -1,5 +1,6 @@
 import { cn } from "../lib/utils";
-import { formatRelativeElapsed } from "../timestampFormat";
+import { useClientSettings } from "../hooks/useSettings";
+import { formatDayAwareTimestamp, formatRelativeElapsed } from "../timestampFormat";
 import type { ChannelStatus } from "./types";
 
 export const CHANNEL_STATUS_LABELS: Readonly<Record<ChannelStatus, string>> = {
@@ -60,16 +61,8 @@ export function formatSince(iso: string | null, now = Date.now()): string {
   return span === "now" ? "just now" : `${span} ago`;
 }
 
-export function formatTimestamp(iso: string): string {
-  const at = new Date(iso);
-  if (Number.isNaN(at.getTime())) return iso;
-  const sameDay = at.toDateString() === new Date().toDateString();
-  return sameDay
-    ? at.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
-    : at.toLocaleString(undefined, {
-        month: "short",
-        day: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-      });
+/** A message time as the chat shows it, in the format chosen in Settings (12- or 24-hour). */
+export function useFormatTimestamp(): (iso: string) => string {
+  const timestampFormat = useClientSettings((settings) => settings.timestampFormat);
+  return (iso) => formatDayAwareTimestamp(iso, timestampFormat);
 }

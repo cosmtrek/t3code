@@ -139,6 +139,8 @@ export interface InboxConversation {
   readonly unread: boolean;
   /** A mention I have not read or answered since. */
   readonly mentioned: boolean;
+  /** Notifications are off for it in the chat app. */
+  readonly muted: boolean;
 }
 
 export type DelegationScope = "chain" | "range";
