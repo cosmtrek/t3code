@@ -64,6 +64,7 @@ interface FakeConversation {
 function fakeAdapter(
   conversations: () => ReadonlyArray<FakeConversation>,
   sendAnswer: () => AdapterResponse,
+  capabilities: ReadonlyArray<string>,
 ) {
   const paged = (items: ReadonlyArray<unknown>, url: URL) => {
     const index = Number(url.searchParams.get("cursor") ?? "0");
@@ -137,6 +138,7 @@ function fakeAdapter(
         defaultProjectPaths: ["~/code/somewhere"],
         delegateTemplates: [{ id: "t", name: "T", prompt: "{contextDir}" }],
         relevanceSummary: "All",
+        capabilities,
       });
     }
     const all = conversations();
@@ -166,8 +168,10 @@ interface Harness {
   readonly channelId: string;
   /** Every path asked of the adapter. */
   readonly requests: string[];
-  /** Every body posted to the adapter. */
+  /** Every JSON body posted to the adapter. */
   readonly posted: unknown[];
+  /** The size of every file posted to the adapter. */
+  readonly uploaded: number[];
   readonly runtime: InboxRuntime["Service"];
   readonly shells: Map<string, OrchestrationV2ThreadShell | null>;
   /** Each thread's messages, as `getThreadRecords` reads them. */
@@ -186,19 +190,22 @@ interface Harness {
 async function harness(
   conversations: () => ReadonlyArray<FakeConversation>,
   sendAnswer: () => AdapterResponse = () => json(200, { messageId: "sent-1" }),
+  capabilities: ReadonlyArray<string> = [],
 ): Promise<Harness> {
   const dir = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-inbox-"));
   const tokenFile = NodePath.join(dir, "token");
   await NodeFSP.writeFile(tokenFile, `${TOKEN}\n`, { mode: 0o600 });
-  const handle = fakeAdapter(conversations, sendAnswer);
+  const handle = fakeAdapter(conversations, sendAnswer, capabilities);
   const requests: string[] = [];
   const posted: unknown[] = [];
+  const uploaded: number[] = [];
   const hub = new ChannelHub({
     configPath: NodePath.join(dir, "channels.json"),
     transportFor: () => ({
       request: async (request) => {
         requests.push(request.path);
-        if (request.method === "POST") posted.push(request.body);
+        if (request.bytes !== undefined) uploaded.push(request.bytes.byteLength);
+        else if (request.method === "POST") posted.push(request.body);
         return handle(request);
       },
       events: () => new Promise(() => undefined),
@@ -249,6 +256,7 @@ async function harness(
     channelId,
     requests,
     posted,
+    uploaded,
     runtime,
     shells,
     threadMessages,
@@ -908,6 +916,14 @@ describe("sending", () => {
       const threadFiles = yield* Effect.promise(() => NodeFSP.readdir(dir));
       expect(threadFiles).not.toContain("draft.md");
       expect(threadFiles.some((file) => /^draft\..+\.md$/.test(file))).toBe(true);
+      const detail = yield* Inbox.readDelegation(delegationQuery(h, delegationId)).pipe(
+        Effect.provide(h.layer),
+      );
+      expect(detail.sent.map(({ source, text }) => [source, text])).toEqual([
+        ["edited draft", "edited text"],
+      ]);
+      const listed = yield* Inbox.listInbox(h.channelId).pipe(Effect.provide(h.layer));
+      expect(listed.delegations[0]!.lastSentAt).toBe(detail.sent[0]!.sentAt);
 
       const typed = yield* Effect.promise(() => harness(oneConversation));
       const typedId = saveDelegation(typed, "c", "m1");
@@ -926,7 +942,12 @@ describe("sending", () => {
       const plain = yield* Inbox.send({ ...typed.keyOf("c"), text: "hi" }).pipe(
         Effect.provide(typed.layer),
       );
-      expect(plain).toEqual({ messageId: "sent-1", archived: null });
+      expect(plain).toEqual({
+        messageId: "sent-1",
+        archived: null,
+        unresolvedMentions: [],
+        failedAttachments: [],
+      });
     }),
   );
 
@@ -942,7 +963,93 @@ describe("sending", () => {
       const sent = yield* Inbox.send({ ...h.keyOf("c"), delegationId, text: "reply" }).pipe(
         Effect.provide(h.layer),
       );
-      expect(sent).toEqual({ messageId: "sent-1", archived: false });
+      expect(sent.archived).toBe(false);
+    }),
+  );
+
+  it.effect("sends the mentions the text holds, and only to an adapter that takes them", () =>
+    Effect.gen(function* () {
+      const text = "@Jordan and @Sam: fixed";
+      const mentions = [
+        { userId: "u2", name: "Jordan" },
+        { userId: "u3", name: "Sam" },
+        // A second Jordan cannot be told apart in the text, and Robin is not in it.
+        { userId: "u4", name: "Jordan" },
+        { userId: "u5", name: "Robin" },
+      ];
+      const h = yield* Effect.promise(() =>
+        harness(
+          oneConversation,
+          () => json(200, { messageId: "sent-1", unresolvedMentions: ["u3"] }),
+          ["mentions"],
+        ),
+      );
+      const sent = yield* Inbox.send({ ...h.keyOf("c"), text, mentions }).pipe(
+        Effect.provide(h.layer),
+      );
+      expect(h.posted).toEqual([{ conversationId: "c", text, mentions: mentions.slice(0, 2) }]);
+      expect(sent.unresolvedMentions).toEqual(["Sam"]);
+
+      const plain = yield* Effect.promise(() => harness(oneConversation));
+      yield* Inbox.send({ ...plain.keyOf("c"), text, mentions }).pipe(Effect.provide(plain.layer));
+      expect(plain.posted).toEqual([{ conversationId: "c", text }]);
+    }),
+  );
+
+  it.effect("sends Markdown and uploaded files, and only to an adapter that takes them", () =>
+    Effect.gen(function* () {
+      const attachments = [
+        { uploadId: "up-1", name: "chart.png" },
+        { uploadId: "up-2", name: "log.txt" },
+      ];
+      const upload = { uploadId: "up-1", kind: "image", name: "chart.png", size: 3 };
+      const h = yield* Effect.promise(() =>
+        harness(
+          oneConversation,
+          () => json(200, { ...upload, messageId: "sent-1", failedAttachments: ["up-2"] }),
+          ["markdown", "attachments"],
+        ),
+      );
+      const file = new URLSearchParams({ channelId: h.channelId, name: "my chart.png" });
+      expect(
+        yield* Inbox.upload(file, new Uint8Array([1, 2, 3])).pipe(Effect.provide(h.layer)),
+      ).toEqual(upload);
+      expect(h.requests).toContain("/uploads?name=my%20chart.png");
+      expect(h.uploaded).toEqual([3]);
+
+      // Files alone are a message; the adapter gets ids, the user gets the failed names.
+      const sent = yield* Inbox.send({
+        ...h.keyOf("c"),
+        text: "",
+        format: "markdown",
+        attachments,
+      }).pipe(Effect.provide(h.layer));
+      expect(h.posted).toEqual([
+        {
+          conversationId: "c",
+          text: "",
+          format: "markdown",
+          attachments: [{ uploadId: "up-1" }, { uploadId: "up-2" }],
+        },
+      ]);
+      expect(sent.failedAttachments).toEqual(["log.txt"]);
+
+      const plain = yield* Effect.promise(() => harness(oneConversation));
+      yield* Inbox.send({ ...plain.keyOf("c"), text: "**hi**", format: "markdown" }).pipe(
+        Effect.provide(plain.layer),
+      );
+      expect(plain.posted).toEqual([{ conversationId: "c", text: "**hi**" }]);
+      const noFiles = yield* Inbox.send({
+        ...plain.keyOf("c"),
+        text: "see file",
+        attachments,
+      }).pipe(Effect.provide(plain.layer), Effect.flip);
+      const noUpload = yield* Inbox.upload(
+        new URLSearchParams({ channelId: plain.channelId, name: "a.png" }),
+        new Uint8Array([1]),
+      ).pipe(Effect.provide(plain.layer), Effect.flip);
+      expect([noFiles.status, noUpload.status]).toEqual([400, 400]);
+      expect(plain.posted).toHaveLength(1);
     }),
   );
 });
@@ -973,8 +1080,16 @@ describe("asking a delegation's thread", () => {
       yield* ask;
       expect(h.sent).toHaveLength(1);
       expect(h.sent[0]).toMatchObject({ threadId: "thread-1", projectId: "p", mode: "queue" });
-      expect(h.sent[0]!.text).toMatch(/^Why\?\n\n\(If the reply/);
-      expect(h.sent[0]!.text).toContain(`${dir}/draft.md`);
+      expect(h.sent[0]!.text).toMatch(/^Why\?\n\n\(If your findings/);
+      expect(h.sent[0]!.text).toContain(`${dir}/conclusion.md`);
+      expect(h.sent[0]!.text).not.toContain("draft.md");
+
+      // Only a draft request may be empty; it alone asks for the reply.
+      yield* Inbox.ask({ channelId: h.channelId, delegationId, text: " ", kind: "draft" }).pipe(
+        Effect.provide(askLayer(h)),
+      );
+      expect(h.sent[1]!.text).toMatch(/^\(Write the reply/);
+      expect(h.sent[1]!.text).toContain(`${dir}/draft.md`);
     }),
   );
 
@@ -985,6 +1100,12 @@ describe("asking a delegation's thread", () => {
       yield* Inbox.ask({ channelId: h.channelId, delegationId, text: "Why?" }).pipe(
         Effect.provide(askLayer(h)),
       );
+      yield* Inbox.ask({
+        channelId: h.channelId,
+        delegationId,
+        text: "Keep it short",
+        kind: "draft",
+      }).pipe(Effect.provide(askLayer(h)));
       const message = (role: string, text: string, runId: string | null, minute: number) => ({
         role,
         text,
@@ -999,14 +1120,16 @@ describe("asking a delegation's thread", () => {
         message("assistant", "Thinking", "run-2", 4),
         message("assistant", "Because of the cache", "run-2", 5),
         message("user", "And then?", null, 6),
+        message("user", h.sent[1]!.text, null, 7),
       ]);
       const detail = yield* Inbox.readDelegation(delegationQuery(h, delegationId)).pipe(
         Effect.provide(h.layer),
       );
-      expect(detail.followUps.map(({ role, text }) => [role, text])).toEqual([
-        ["user", "Why?"],
-        ["assistant", "Because of the cache"],
-        ["user", "And then?"],
+      expect(detail.followUps.map(({ role, kind, text }) => [role, kind, text])).toEqual([
+        ["user", "question", "Why?"],
+        ["assistant", "question", "Because of the cache"],
+        ["user", "question", "And then?"],
+        ["user", "draft", "Keep it short"],
       ]);
     }),
   );

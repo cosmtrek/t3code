@@ -6,6 +6,7 @@
       "rootId": "om_1",
       "replyTo": { "id": "om_2", "authorName": null, "preview": null },
       "author": { "id": "ou_sam", "name": "Sam Okafor", "isSelf": false },
+      "inThread": true,
       "mentionsSelf": false,
       "text": "Same on staging.",
       "attachments": [],
@@ -21,6 +22,7 @@
         "preview": "@Alex Rivera the cache hit rate dropped after yesterday's deploy."
       },
       "author": { "id": "ou_me", "name": "Alex Rivera", "isSelf": true },
+      "inThread": false,
       "mentionsSelf": false,
       "text": "Looking.",
       "attachments": [],

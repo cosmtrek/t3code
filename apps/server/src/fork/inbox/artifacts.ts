@@ -191,6 +191,8 @@ export async function recordSent(input: {
   /** The draft as it was when the user pressed send. */
   readonly draftAtSend: string | null;
   readonly text: string;
+  /** Names of the files sent with it. */
+  readonly files?: ReadonlyArray<string>;
   readonly messageId: string;
   readonly sentAt: string;
 }): Promise<SentSource> {
@@ -213,7 +215,8 @@ export async function recordSent(input: {
       `source: ${source}`,
       "---",
       "",
-      input.text,
+      ...(input.text.length > 0 ? [input.text] : []),
+      ...(input.files ?? []).map((name) => `[file: ${name}]`),
       "",
     ].join("\n"),
     { flag: "wx" },
@@ -230,4 +233,45 @@ export async function recordSent(input: {
     }
   }
   return source;
+}
+
+export interface SentRecord {
+  readonly sentAt: string;
+  readonly source: SentSource;
+  readonly text: string;
+}
+
+const SOURCES: ReadonlyArray<SentSource> = ["draft", "edited draft", "typed"];
+
+/** What `recordSent` kept for the item, newest first; a file it did not write is skipped. */
+export async function readSent(itemDir: string): Promise<ReadonlyArray<SentRecord>> {
+  let names: ReadonlyArray<string>;
+  try {
+    names = await NodeFSP.readdir(itemDir);
+  } catch {
+    return [];
+  }
+  const records = await Promise.all(
+    names
+      .filter((name) => name.startsWith("sent.") && name.endsWith(".md"))
+      .map(async (name) => {
+        const match = /^---\n([\s\S]*?)\n---\n\n([\s\S]*)$/.exec(
+          (await readText(NodePath.join(itemDir, name))) ?? "",
+        );
+        if (match === null) return null;
+        const fields = new Map(
+          match[1]!.split("\n").map((line) => {
+            const colon = line.indexOf(":");
+            return [line.slice(0, colon), line.slice(colon + 1).trim()] as const;
+          }),
+        );
+        const sentAt = fields.get("sentAt");
+        const source = SOURCES.find((candidate) => candidate === fields.get("source"));
+        if (sentAt === undefined || source === undefined) return null;
+        return { sentAt, source, text: match[2]!.trimEnd() } satisfies SentRecord;
+      }),
+  );
+  return records
+    .filter((record) => record !== null)
+    .toSorted((left, right) => right.sentAt.localeCompare(left.sentAt));
 }

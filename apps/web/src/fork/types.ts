@@ -95,6 +95,8 @@ export interface InboxChannelSummary {
   readonly lastSyncAt: string | null;
   readonly selfName: string | null;
   readonly access: ChannelAccess;
+  /** The optional parts of the protocol the adapter implements, such as `mentions`. */
+  readonly capabilities: ReadonlyArray<string>;
   /** Unread DMs, groups that mention me, and unseen agent results. */
   readonly unreadCount: number | null;
   readonly error: string | null;
@@ -157,6 +159,8 @@ export interface InboxDelegation {
   readonly agentUnseen: boolean;
   readonly hasConclusion: boolean;
   readonly hasDraft: boolean;
+  /** When the user last replied from this delegation; null before the first reply. */
+  readonly lastSentAt: string | null;
 }
 
 export interface InboxMessage {
@@ -171,6 +175,8 @@ export interface InboxMessage {
     readonly preview: string | null;
   } | null;
   readonly author: Author;
+  /** Kept inside its reply thread or topic: the chat app does not show it on the timeline. */
+  readonly inThread?: boolean;
   readonly mentionsSelf: boolean;
   readonly text: string;
   readonly richSummary?: string | null;
@@ -206,8 +212,25 @@ export interface ConversationResponse {
   readonly skipped: number;
 }
 
+export interface Mention {
+  readonly userId: string;
+  readonly name: string;
+}
+
+/** A file the adapter holds until a message names it. */
+export interface Upload {
+  readonly uploadId: string;
+  readonly kind: "image" | "file";
+  readonly name: string;
+  readonly size: number;
+}
+
 export interface SendResult {
   readonly messageId: string;
+  /** Names whose mention went out as plain text: nobody was notified for these. */
+  readonly unresolvedMentions: ReadonlyArray<string>;
+  /** Names of the files that did not go out; the text and the other files did. */
+  readonly failedAttachments: ReadonlyArray<string>;
   /** false when the copy in the delegation's folder could not be written; null outside one. */
   readonly archived: boolean | null;
 }
@@ -234,10 +257,20 @@ export interface DelegationDetail {
   readonly previousThreads: ReadonlyArray<LinkedThread>;
   /** Questions asked from the inbox and the agent's answers, latest five rounds. */
   readonly followUps: ReadonlyArray<FollowUp>;
+  /** Replies sent from this delegation, newest first. */
+  readonly sent: ReadonlyArray<SentReply>;
+}
+
+export interface SentReply {
+  readonly sentAt: string;
+  readonly source: "draft" | "edited draft" | "typed";
+  readonly text: string;
 }
 
 export interface FollowUp {
   readonly role: "user" | "assistant";
+  /** What a user entry asked for: an answer, or the reply to send. */
+  readonly kind: "question" | "draft";
   readonly text: string;
   readonly at: string;
 }

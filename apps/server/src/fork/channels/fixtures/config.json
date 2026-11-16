@@ -5,8 +5,9 @@
     {
       "id": "investigate",
       "name": "Investigate",
-      "prompt": "Read {contextDir}/context.md. Write findings to {contextDir}/conclusion.md and a reply to {contextDir}/draft.md.\n\nNote: {note}\nOriginal: {openUrl}"
+      "prompt": "Read {contextDir}/context.md. Write your findings to {contextDir}/conclusion.md.\n\nNote: {note}\nOriginal: {openUrl}"
     }
   ],
-  "relevanceSummary": "Direct messages, mentions of you, and threads you took part in."
+  "relevanceSummary": "Direct messages, mentions of you, and threads you took part in.",
+  "capabilities": ["mentions", "markdown", "attachments"]
 }

@@ -126,7 +126,10 @@ export function rangeUntil(
   return new Date(anchor + LEGACY_DM_WINDOW_MS).toISOString();
 }
 
-/** The messages a range covers: from the anchor through `untilAt`, or to the end when null. */
+/**
+ * The messages a range covers: from the anchor through `untilAt`, or to the end when null. Of
+ * the replies kept inside a thread, only those of a thread the range holds, or the anchor's own.
+ */
 export function messagesInRange(
   messages: ReadonlyArray<Message>,
   anchorMessageId: string,
@@ -136,7 +139,18 @@ export function messagesInRange(
   const start = sorted.findIndex((message) => message.id === anchorMessageId);
   if (start === -1) return [];
   const until = instant(untilAt);
-  return sorted
+  const anchor = sorted[start]!;
+  const inWindow = sorted
     .slice(start)
     .filter((message) => !Number.isFinite(until) || Date.parse(message.createdAt) <= until);
+  const onTimeline = new Set(
+    inWindow.filter((message) => message.inThread !== true).map((message) => message.id),
+  );
+  return inWindow.filter(
+    (message) =>
+      message.inThread !== true ||
+      message.id === anchor.id ||
+      (message.rootId != null &&
+        (onTimeline.has(message.rootId) || message.rootId === anchor.rootId)),
+  );
 }

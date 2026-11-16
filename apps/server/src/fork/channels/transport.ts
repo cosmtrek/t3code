@@ -7,6 +7,8 @@ export interface AdapterRequest {
   /** Path and query, such as `/conversations?relevant=1`. */
   readonly path: string;
   readonly body?: unknown;
+  /** A file to upload, sent as the request's raw body instead of JSON. */
+  readonly bytes?: Uint8Array;
   readonly token: string | null;
   /** A file the adapter may first fetch from its service; it gets more time and room. */
   readonly media?: boolean;
@@ -46,7 +48,7 @@ const authHeaders = (token: string | null): Record<string, string> =>
 export function httpTransport(rawBaseUrl: string): ChannelTransport {
   const baseUrl = resolveLoopbackBase(rawBaseUrl);
   return {
-    request: async ({ method, path, body, token, media }) => {
+    request: async ({ method, path, body, bytes: upload, token, media }) => {
       const limits = media ? MEDIA_LIMITS : LIMITS;
       let response: Response;
       try {
@@ -55,9 +57,17 @@ export function httpTransport(rawBaseUrl: string): ChannelTransport {
           headers: {
             accept: "application/json",
             ...authHeaders(token),
-            ...(body === undefined ? {} : { "content-type": "application/json" }),
+            ...(upload !== undefined
+              ? { "content-type": "application/octet-stream" }
+              : body === undefined
+                ? {}
+                : { "content-type": "application/json" }),
           },
-          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+          ...(upload !== undefined
+            ? { body: upload }
+            : body === undefined
+              ? {}
+              : { body: JSON.stringify(body) }),
           redirect: "error",
           signal: AbortSignal.timeout(limits.timeoutMs),
         });

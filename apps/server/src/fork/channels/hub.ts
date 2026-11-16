@@ -28,6 +28,7 @@ import {
   httpTransport,
   type AdapterResponse,
   type ChannelTransport,
+  type AdapterRequest,
 } from "./transport.ts";
 
 export type ChannelStatus =
@@ -493,7 +494,19 @@ export class ChannelHub {
     return response;
   }
 
-  async postJson(channelId: string, path: string, body: unknown): Promise<unknown> {
+  postJson(channelId: string, path: string, body: unknown): Promise<unknown> {
+    return this.post(channelId, { path, body });
+  }
+
+  /** Hands the adapter a file; like media, it may take the adapter a while to pass it on. */
+  upload(channelId: string, path: string, bytes: Uint8Array): Promise<unknown> {
+    return this.post(channelId, { path, bytes, media: true });
+  }
+
+  private async post(
+    channelId: string,
+    request: Pick<AdapterRequest, "path" | "body" | "bytes" | "media">,
+  ): Promise<unknown> {
     const runtime = this.requireRuntime(channelId);
     if (!channelAccess(runtime.status).send) {
       throw new ChannelUnavailableError(
@@ -505,9 +518,8 @@ export class ChannelHub {
     let response: AdapterResponse;
     try {
       response = await runtime.transport.request({
+        ...request,
         method: "POST",
-        path,
-        body,
         token: runtime.token,
       });
     } catch (error) {
