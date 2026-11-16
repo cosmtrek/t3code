@@ -125,8 +125,8 @@ jobs:
     name: Build desktop ${{ inputs.version }} (macos-arm64)
     needs: cli
     if: inputs.desktop
-    # Standard GitHub-hosted runners are free for public repositories; larger ones are not.
-    runs-on: macos-15
+    # A Namespace profile, which must be a macOS arm64 one: GitHub's own macOS runners queue long.
+    runs-on: namespace-profile-t3code
     timeout-minutes: 60
     env:
       VERSION: ${{ inputs.version }}
