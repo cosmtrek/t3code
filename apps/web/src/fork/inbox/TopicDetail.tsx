@@ -1,7 +1,7 @@
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { ThreadId, type EnvironmentId } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
-import { SendIcon } from "lucide-react";
+import { BotIcon, SendIcon } from "lucide-react";
 import { useState } from "react";
 
 import { resolveThreadStatusPill } from "../../components/Sidebar.logic";
@@ -13,7 +13,13 @@ import { cn } from "../../lib/utils";
 import { useThreadShell } from "../../state/entities";
 import { ForkApiError, forkRequest } from "../forkApiAccess";
 import type { LinkedThread, SendResult, TopicDetail as TopicDetailData } from "../types";
-import { nextReplyText, sameDraftSource, skippedNotice, type DraftSource } from "./inboxView";
+import {
+  nextReplyText,
+  replyTargetOf,
+  sameDraftSource,
+  skippedNotice,
+  type DraftSource,
+} from "./inboxView";
 import { MessageView } from "./MessageView";
 
 /** The sidebar's words, for when the thread is not in this client's sidebar state. */
@@ -111,13 +117,140 @@ function ThreadCard({
         ) : null}
       </header>
       {detail.conclusion !== null ? (
-        <p className="max-h-60 overflow-y-auto text-xs break-words whitespace-pre-wrap">
-          {detail.conclusion}
-        </p>
+        <Conclusion text={detail.conclusion} />
       ) : live?.status === "idle" ? (
         <p className="text-xs text-muted-foreground">Finished without a conclusion</p>
       ) : null}
+      {live && live.status !== "archived" && !detail.conclusionIsHistorical ? (
+        <AskThread key={live.threadId} environmentId={environmentId} detail={detail} />
+      ) : null}
     </section>
+  );
+}
+
+const CONCLUSION_LINES = 8;
+
+function Conclusion({ text }: { readonly text: string }) {
+  const [expanded, setExpanded] = useState(false);
+  // Lines as written; a long wrapped line also counts as more than fits.
+  const long = text.split("\n").length > CONCLUSION_LINES || text.length > 640;
+  return (
+    <div className="flex flex-col items-start gap-1">
+      <p
+        className={cn(
+          "text-xs break-words whitespace-pre-wrap",
+          long && !expanded && "line-clamp-8",
+        )}
+      >
+        {text}
+      </p>
+      {long ? (
+        <Button size="xs" variant="ghost-muted" onClick={() => setExpanded(!expanded)}>
+          {expanded ? "Show less" : "Show more"}
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * Questions for the topic's thread. A box of its own, apart from the reply: what goes in here
+ * never reaches the chat app.
+ */
+function AskThread({
+  environmentId,
+  detail,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly detail: TopicDetailData;
+}) {
+  const [text, setText] = useState("");
+  const [asked, setAsked] = useState<string | null>(null);
+  const [asking, setAsking] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const followUps = detail.followUps;
+  const lastQuestion = followUps.findLast((entry) => entry.role === "user")?.text ?? null;
+  // Shown until the thread's own record of it comes back.
+  const pending = asked !== null && asked !== lastQuestion ? asked : null;
+  const working = pending !== null || followUps.at(-1)?.role === "user";
+
+  const ask = async () => {
+    const question = text.trim();
+    if (question.length === 0) return;
+    setAsking(true);
+    setError(null);
+    setAsked(question);
+    setText("");
+    try {
+      await forkRequest(environmentId, "/inbox/ask", {
+        method: "POST",
+        body: {
+          channelId: detail.item.channelId,
+          conversationId: detail.item.conversationId,
+          topicId: detail.item.topicId,
+          text: question,
+        },
+      });
+    } catch (cause) {
+      setAsked(null);
+      setText(question);
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setAsking(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-2 border-t border-border/60 pt-2">
+      {followUps.length > 0 || pending !== null ? (
+        <ol className="flex flex-col gap-1.5 text-xs">
+          {followUps.map((entry) => (
+            <li key={`${entry.role}:${entry.at}`} className="break-words whitespace-pre-wrap">
+              <span className="font-medium">{entry.role === "user" ? "You" : "Agent"}: </span>
+              {entry.text}
+            </li>
+          ))}
+          {pending !== null ? (
+            <li className="break-words whitespace-pre-wrap">
+              <span className="font-medium">You: </span>
+              {pending}
+            </li>
+          ) : null}
+          {working ? <li className="text-muted-foreground">Working…</li> : null}
+        </ol>
+      ) : null}
+      <form
+        className="flex items-end gap-2"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void ask();
+        }}
+      >
+        <BotIcon className="mb-2 size-4 shrink-0 text-muted-foreground" />
+        <Textarea
+          aria-label="Ask the agent"
+          value={text}
+          rows={2}
+          placeholder="Ask the agent…"
+          onChange={(event) => setText(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+              event.preventDefault();
+              event.currentTarget.form?.requestSubmit();
+            }
+          }}
+        />
+        <Button
+          type="submit"
+          size="sm"
+          variant="outline"
+          disabled={asking || text.trim().length === 0}
+        >
+          Ask
+        </Button>
+      </form>
+      {error ? <p className="text-xs text-destructive-foreground">{error}</p> : null}
+    </div>
   );
 }
 
@@ -159,6 +292,7 @@ function Composer({
     detail.draft === null
       ? null
       : { threadId: detail.item.thread?.threadId ?? null, text: detail.draft.trim() };
+  const replyTarget = replyTargetOf(detail);
   const [shown, setShown] = useState(source);
   const [text, setText] = useState(source?.text ?? "");
   const [sending, setSending] = useState(false);
@@ -209,17 +343,24 @@ function Composer({
         void send();
       }}
     >
-      {shown !== null && text === shown.text ? (
-        <Badge variant="info" className="self-start">
-          Draft
-        </Badge>
+      {replyTarget !== null || (shown !== null && text === shown.text) ? (
+        <div className="flex min-w-0 items-center gap-2">
+          {replyTarget !== null ? (
+            <p className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+              Replying to {replyTarget}
+            </p>
+          ) : (
+            <span className="flex-1" />
+          )}
+          {shown !== null && text === shown.text ? <Badge variant="info">Draft</Badge> : null}
+        </div>
       ) : null}
       <Textarea
         aria-label="Reply"
         value={text}
         rows={3}
         disabled={disabled}
-        placeholder={disabled ? "Sending is off" : "Reply in this topic"}
+        placeholder={disabled ? "Sending is off" : "Reply in the chat"}
         onChange={(event) => setText(event.target.value)}
         onKeyDown={(event) => {
           if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {

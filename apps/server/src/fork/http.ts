@@ -248,6 +248,12 @@ const routes = (runtime: InboxRuntimeShape) => {
       AuthOrchestrationOperateScope,
       body.pipe(Effect.flatMap(Inbox.send)),
     ),
+    route(
+      "POST",
+      `${INBOX}/ask`,
+      AuthOrchestrationOperateScope,
+      body.pipe(Effect.flatMap(Inbox.ask)),
+    ),
     mediaRoute(route),
     eventsRoute(runtime),
   );

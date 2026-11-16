@@ -6,6 +6,7 @@ import {
   emptyViewTitle,
   mergeConversationPages,
   quoteOf,
+  replyTargetOf,
   itemMeta,
   minuteToMs,
   nextReplyText,
@@ -113,6 +114,25 @@ describe("conversationRows", () => {
 
   it("cuts a quote at 40 characters", () => {
     expect(quoteOf("Sam", "a".repeat(41))).toBe(`Sam: ${"a".repeat(40)}…`);
+  });
+});
+
+describe("replyTargetOf", () => {
+  const root = {
+    id: "r",
+    text: "Who owns the retry budget?",
+    author: { id: "u", name: "Sam", isSelf: false },
+  } as InboxMessage;
+  const detail = (kind: "dm" | "group", messages: ReadonlyArray<InboxMessage>) => ({
+    item: { rootMessageId: "r" } as InboxItem,
+    conversation: { id: "c", name: "c", kind },
+    messages,
+  });
+
+  it("names the topic's root in a group, and nothing in a DM or without the root", () => {
+    expect(replyTargetOf(detail("group", [root]))).toBe("Sam: Who owns the retry budget?");
+    expect(replyTargetOf(detail("dm", [root]))).toBeNull();
+    expect(replyTargetOf(detail("group", []))).toBeNull();
   });
 });
 

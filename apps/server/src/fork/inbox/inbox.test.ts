@@ -10,6 +10,7 @@ import {
   buildContextMarkdown,
   firstMessage,
   fillTemplate,
+  followUpsOf,
   mediaFileName,
   parseFallbackReply,
   threadTitle,
@@ -141,6 +142,25 @@ describe("deriveItem", () => {
     expect(itemIdFor(key)).toBe(itemIdFor({ ...key }));
     expect(itemIdFor(key)).not.toBe(itemIdFor({ ...key, topicId: "d" }));
     expect(itemIdFor(key)).toMatch(/^[0-9a-f]{24}$/);
+  });
+});
+
+describe("follow-ups", () => {
+  it("keeps the latest five rounds after the delegation", () => {
+    const messages = Array.from({ length: 7 }, (_, index) => ({
+      role: "user" as const,
+      text: `q${index}`,
+      runId: null,
+      streaming: false,
+      at: hoursAgo(10 - index),
+    }));
+    expect(followUpsOf(messages, "/x").map((entry) => entry.text)).toEqual([
+      "q2",
+      "q3",
+      "q4",
+      "q5",
+      "q6",
+    ]);
   });
 });
 
