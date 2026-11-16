@@ -138,7 +138,7 @@ function Conclusion({ text }: { readonly text: string }) {
     <div className="flex flex-col items-start gap-1">
       <p
         className={cn(
-          "text-xs break-words whitespace-pre-wrap",
+          "text-xs whitespace-pre-wrap wrap-anywhere",
           long && !expanded && "line-clamp-8",
         )}
       >
@@ -205,13 +205,13 @@ function AskThread({
       {followUps.length > 0 || pending !== null ? (
         <ol className="flex flex-col gap-1.5 text-xs">
           {followUps.map((entry) => (
-            <li key={`${entry.role}:${entry.at}`} className="break-words whitespace-pre-wrap">
+            <li key={`${entry.role}:${entry.at}`} className="whitespace-pre-wrap wrap-anywhere">
               <span className="font-medium">{entry.role === "user" ? "You" : "Agent"}: </span>
               {entry.text}
             </li>
           ))}
           {pending !== null ? (
-            <li className="break-words whitespace-pre-wrap">
+            <li className="whitespace-pre-wrap wrap-anywhere">
               <span className="font-medium">You: </span>
               {pending}
             </li>
