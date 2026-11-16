@@ -600,11 +600,10 @@ export const overview = Effect.fn("ForkInbox.overview")(function* () {
 });
 
 /**
- * An item as clients get it. Wait time, highlight, and score move with the clock, so the client
+ * An item as clients get it. Wait time and highlight move with the clock, so the client
  * works them out from `lastMessageAt`, and an unchanged list stays byte-identical for its ETag.
  */
-const toWire = ({ waitMs: _waitMs, highlight: _highlight, score: _score, ...item }: InboxItem) =>
-  item;
+const toWire = ({ waitMs: _waitMs, highlight: _highlight, ...item }: InboxItem) => item;
 
 export const listItems = Effect.fn("ForkInbox.listItems")(function* (channelId: string) {
   const { hub } = yield* InboxRuntime;
