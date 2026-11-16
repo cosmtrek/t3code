@@ -210,6 +210,16 @@ export interface TopicDetail {
   readonly previousThreads: ReadonlyArray<LinkedThread>;
 }
 
+export type WorkspaceStrategy =
+  | { readonly type: "root" }
+  | { readonly type: "existing_worktree"; readonly worktreePath: string }
+  | {
+      readonly type: "worktree";
+      readonly baseRef: string;
+      readonly branch?: string;
+      readonly startFromOrigin?: boolean;
+    };
+
 export interface ModelChoice {
   readonly instanceId: string;
   readonly model: string;
@@ -224,6 +234,8 @@ export interface DelegateOptions {
     readonly defaultModel: ModelChoice | null;
   }>;
   readonly defaultProjectId: string | null;
+  /** Where the topic's last thread worked: its worktree, else the project checkout. */
+  readonly defaultWorkspaceStrategy: WorkspaceStrategy;
   readonly templates: ReadonlyArray<DelegateTemplate>;
   readonly providers: ReadonlyArray<{
     readonly instanceId: string;
