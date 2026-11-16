@@ -22,23 +22,6 @@ export const PENDING_STATES: ReadonlySet<ItemState> = new Set([
 
 const WAITING_HIGHLIGHT_MS = 24 * 3_600_000;
 
-const CATEGORY_WEIGHT: Readonly<Record<ItemCategory, number>> = {
-  direct: 3,
-  participated: 2,
-  followed: 1,
-  other: 0.5,
-};
-
-const STATE_RANK: Readonly<Record<ItemState, number>> = {
-  needs_reply: 0,
-  drafted: 0,
-  investigating: 0,
-  open: 1,
-  waiting: 2,
-  done: 3,
-  ignored: 3,
-};
-
 /** Stable across restarts and adapters, short enough for a directory name. */
 export function itemIdFor(key: TopicKey): string {
   return NodeCrypto.createHash("sha256")
@@ -67,7 +50,6 @@ export interface DerivedItem {
   readonly reopened: boolean;
   readonly waitMs: number;
   readonly highlight: boolean;
-  readonly score: number;
 }
 
 export function deriveItem(facts: TopicFacts): DerivedItem {
@@ -99,24 +81,24 @@ export function deriveItem(facts: TopicFacts): DerivedItem {
             : category === "direct" || category === "participated"
               ? "needs_reply"
               : "open";
-  const hours = waitMs / 3_600_000;
-  const score =
-    state === "waiting" ? hours : CATEGORY_WEIGHT[category] * (1 + Math.log2(1 + hours));
   return {
     state,
     category,
     reopened,
     waitMs,
     highlight: state === "waiting" && waitMs > WAITING_HIGHLIGHT_MS,
-    score,
   };
 }
 
+/** Newest first; each view already splits items by state. */
 export function compareItems(
-  left: Pick<DerivedItem, "state" | "score">,
-  right: Pick<DerivedItem, "state" | "score">,
+  left: { readonly lastMessageAt: string; readonly id: string },
+  right: { readonly lastMessageAt: string; readonly id: string },
 ): number {
-  return STATE_RANK[left.state] - STATE_RANK[right.state] || right.score - left.score;
+  return (
+    Date.parse(right.lastMessageAt) - Date.parse(left.lastMessageAt) ||
+    left.id.localeCompare(right.id)
+  );
 }
 
 /** Oldest first by time; adapters may page in any order. */
