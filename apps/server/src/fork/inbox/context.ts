@@ -59,6 +59,70 @@ export function firstMessage(input: {
   return parts.join("\n\n");
 }
 
+/** Sent after each question asked from the inbox, so the thread keeps its files current. */
+function followUpNote(contextDir: string): string {
+  return [
+    `(If the reply I should send changes, update \`${contextDir}/${DRAFT_FILE}\`. If your findings change, update \`${contextDir}/${CONCLUSION_FILE}\`.`,
+    "If you cannot write files there, end your message with `<draft>…</draft>` and `<conclusion>…</conclusion>` instead.)",
+  ].join(" ");
+}
+
+export function followUpMessage(text: string, contextDir: string): string {
+  return `${text}\n\n${followUpNote(contextDir)}`;
+}
+
+export interface FollowUp {
+  readonly role: "user" | "assistant";
+  readonly text: string;
+  readonly at: string;
+}
+
+export interface ThreadMessageFacts {
+  readonly role: "user" | "assistant" | "system";
+  readonly text: string;
+  readonly runId: string | null;
+  readonly streaming: boolean;
+  readonly at: string;
+}
+
+const FOLLOW_UP_ROUNDS = 5;
+const FOLLOW_UP_CHARS = 2_000;
+
+const clip = (text: string) =>
+  text.length > FOLLOW_UP_CHARS ? `${text.slice(0, FOLLOW_UP_CHARS)}…` : text;
+
+/**
+ * The questions asked after the delegation and the agent's last answer to each, the latest
+ * five rounds. A question still running has no answer yet.
+ */
+export function followUpsOf(
+  messages: ReadonlyArray<ThreadMessageFacts>,
+  contextDir: string,
+): ReadonlyArray<FollowUp> {
+  const sorted = messages.toSorted((left, right) => Date.parse(left.at) - Date.parse(right.at));
+  // The first user message is the delegation itself.
+  const questions = sorted.filter((message) => message.role === "user").slice(1);
+  const note = `\n\n${followUpNote(contextDir)}`;
+  return questions.slice(-FOLLOW_UP_ROUNDS).flatMap((question) => {
+    const answer =
+      question.runId === null
+        ? undefined
+        : sorted.findLast(
+            (message) =>
+              message.role === "assistant" &&
+              !message.streaming &&
+              message.runId === question.runId,
+          );
+    const text = question.text.endsWith(note)
+      ? question.text.slice(0, -note.length)
+      : question.text;
+    return [
+      { role: "user" as const, text: clip(text), at: question.at },
+      ...(answer ? [{ role: "assistant" as const, text: clip(answer.text), at: answer.at }] : []),
+    ];
+  });
+}
+
 const TITLE_SUMMARY_CHARS = 48;
 
 /** `Sender: summary`, the summary cut at a word or sentence end near 48 characters. */
