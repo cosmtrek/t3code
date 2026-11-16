@@ -84,11 +84,15 @@ sequenceDiagram
   Note over H: Decode items one by one and skip bad ones.<br/>When the adapter is unreachable, serve the last good answer (stale).
   H-->>O: conversations, topics
   O->>O: merge marks, links, and thread folders; deriveItem, compareItems
-  O-->>UI: sorted items
+  O-->>UI: items, newest first
 ```
 
-Delegating and sending go through the same layers. `delegate` ends in `launchThread`, and `send`
-ends in the adapter's `POST /messages`.
+The list is ordered by `lastMessageAt` alone, newest first; the views already split items by
+state. The other routes go through the same layers. `conversation` reads one page of a
+conversation's messages for the chat view, unlike `topic`, which reads every page of one topic.
+`delegate` ends in `launchThread`, in the checkout the dialog chose; `ask` ends in
+`sendToThread` on the topic's current thread, queued behind a running turn, and never reaches the
+adapter; `send` ends in the adapter's `POST /messages`.
 
 ## Change signals
 
@@ -103,7 +107,7 @@ again.
 | Only `lastSyncAt` moved (sent as `{ type: "sync" }`)                | `ChannelHub.check`           |
 | A thread wrote to its context folder (300 ms debounce)              | `fs.watch` in `InboxRuntime` |
 | A linked thread's run status changed, or it was archived or deleted | `linkedThreads.ts`           |
-| Save, remove, delegate, send, or mark                               | the operation itself         |
+| Save, remove, delegate, ask, send, or mark                          | the operation itself         |
 
 Item state is derived on fetch. Requests for one channel share a derivation until the hub's
 `revision` for it moves (any signal above except `sync`) or it is 10 s old, so a missed signal is

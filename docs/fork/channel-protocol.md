@@ -24,6 +24,7 @@ step with the code. Adapters should check their real answers against the same fi
 | `GET /conversations?relevant=1&limit=100`                    | page of `Conversation` (`conversations.json`) |
 | `GET /conversations/{id}/topics?limit=200`                   | page of `Topic` (`topics.json`)               |
 | `GET /conversations/{id}/messages?topic={topicId}&limit=200` | page of `Message` (`messages.json`)           |
+| `GET /conversations/{id}/messages?order=desc&limit=100`      | page of `Message`, newest page first          |
 | `GET /media/{messageId}/{key}`                               | the file's bytes, with its `content-type`     |
 | `POST /messages`                                             | `{ "messageId" }` (`send-ok.json`)            |
 | `GET /events`                                                | `text/event-stream` (`events.sse`)            |
@@ -47,6 +48,10 @@ is "Sign-in needed" (reading works, sending does not); `online: false` is "Colle
   "N items from the adapter could not be read."
 - An attachment `kind` other than `image` (`audio`, `video`, `sticker`, …) is read as `file`,
   so a new kind in the chat app does not drop the message.
+- `topic` is optional on `/conversations/{id}/messages`: without it, the page holds every topic's
+  messages, each with its `topicId`. `order` is `asc` (default) or `desc`; with `desc` the first
+  page is the newest and `nextCursor` pages back in time. The inbox's chat view reads it this way,
+  one page at a time, and asks for older pages as the reader scrolls up.
 - Direct messages have no topics of their own: the adapter splits them into topics, by time
   window or however it likes. T3 does not.
 
@@ -67,6 +72,10 @@ once the chat app accepted the message. An answer without a `messageId` is shown
 unknown", and T3 does not resend. A refusal is
 `{ "error": { "code", "message" } }` (`send-error.json`) with a 4xx or 5xx status, and `code` one
 of `not_logged_in`, `rate_limited`, `rejected`, `unknown`.
+
+With a `topicId`, send the message as a reply in that topic, attached to the topic's root message,
+so it lands in the same topic. In a plain group the chat app shows it as a reply to the root; T3's
+chat view shows a reply the same way, quoting the root, and a topic group by its root alone.
 
 ## Events
 
