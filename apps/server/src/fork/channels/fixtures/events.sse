@@ -1,7 +1,7 @@
 event: message.created
-data: {"conversationId":"oc_platform","topicId":"omt_cache","messageId":"om_3"}
+data: {"conversationId":"oc_platform","messageId":"om_3"}
 
-event: topic.updated
+event: conversation.updated
 data: {"conversationId":"oc_platform"}
 
 event: health.changed

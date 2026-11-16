@@ -23,7 +23,7 @@ export function MessageView({
   readonly showAuthor: boolean;
   /** The message this one answers, shown above it as the chat app does. */
   readonly quote?: string | null;
-  /** Shown under the message, such as the topic's replies and state. */
+  /** Shown under the message, such as the delegations that start there. */
   readonly children?: ReactNode;
 }) {
   const access = useForkAccess(environmentId);
@@ -208,7 +208,7 @@ function MediaLink({
   );
 }
 
-/** Loads nothing until played, so a long topic of videos costs no bandwidth. */
+/** Loads nothing until played, so a chat full of videos costs no bandwidth. */
 function MediaVideo({
   environmentId,
   access,

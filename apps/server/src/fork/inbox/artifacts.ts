@@ -186,7 +186,7 @@ export type SentSource = "draft" | "edited draft" | "typed";
  */
 export async function recordSent(input: {
   readonly itemDir: string;
-  /** The current thread's folder, or null when the topic was never delegated. */
+  /** The current thread's folder, or null when the delegation has no thread. */
   readonly draftDir: string | null;
   /** The draft as it was when the user pressed send. */
   readonly draftAtSend: string | null;

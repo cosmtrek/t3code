@@ -95,7 +95,7 @@ export interface InboxChannelSummary {
   readonly lastSyncAt: string | null;
   readonly selfName: string | null;
   readonly access: ChannelAccess;
-  /** Agent results, and unread topics I am part of. */
+  /** Unread DMs, groups that mention me, and unseen agent results. */
   readonly unreadCount: number | null;
   readonly error: string | null;
 }
@@ -121,34 +121,55 @@ export interface LinkedThread {
   readonly detachedAt: string | null;
 }
 
-export interface InboxItem {
+export interface InboxConversation {
+  readonly id: string;
+  readonly channelId: string;
+  readonly kind: ConversationKind;
+  readonly name: string;
+  readonly lastActivityAt: string;
+  readonly lastMessage: {
+    readonly id: string;
+    readonly createdAt: string;
+    readonly author: Author;
+    readonly preview: string;
+  } | null;
+  /** Someone else wrote after every read mark, or the user pinned it unread. */
+  readonly unread: boolean;
+  /** A mention I have not read or answered since. */
+  readonly mentioned: boolean;
+}
+
+export type DelegationScope = "chain" | "range";
+
+export interface InboxDelegation {
   readonly id: string;
   readonly channelId: string;
   readonly conversationId: string;
+  /** Empty when the channel no longer lists the conversation. */
   readonly conversationName: string;
-  readonly conversationKind: ConversationKind;
-  readonly topicId: string;
-  readonly rootMessageId: string;
-  readonly preview: string;
-  readonly replyCount: number;
-  readonly lastMessageAt: string;
-  readonly lastAuthor: Author;
-  readonly participatedBySelf: boolean;
-  readonly category: "direct" | "participated" | "followed" | "other";
-  readonly unread: boolean;
+  readonly anchorMessageId: string;
+  /** Null for one made before delegations had scopes. */
+  readonly scope: DelegationScope | null;
+  readonly preview: string | null;
+  readonly createdAt: string;
+  readonly thread: LinkedThread | null;
   /** The thread finished a run after the user last looked. */
   readonly agentUnseen: boolean;
-  /** I wrote last: the topic waits on the others. */
-  readonly awaitingReply: boolean;
-  readonly thread: LinkedThread | null;
   readonly hasConclusion: boolean;
   readonly hasDraft: boolean;
 }
 
 export interface InboxMessage {
   readonly id: string;
-  readonly topicId: string;
   readonly createdAt: string;
+  /** The reply thread or topic this message belongs to; null for a root or a lone message. */
+  readonly rootId?: string | null;
+  /** The message this one answers; author and preview are null when the adapter lacks it. */
+  readonly replyTo?: {
+    readonly id: string;
+    readonly authorName: string | null;
+    readonly preview: string | null;
+  } | null;
   readonly author: Author;
   readonly mentionsSelf: boolean;
   readonly text: string;
@@ -162,12 +183,15 @@ export interface InboxMessage {
   readonly openUrl?: string | null;
 }
 
-export interface ItemsResponse {
-  readonly items: ReadonlyArray<InboxItem>;
+export interface InboxResponse {
+  /** Newest first. */
+  readonly conversations: ReadonlyArray<InboxConversation>;
+  /** Newest first. */
+  readonly delegations: ReadonlyArray<InboxDelegation>;
   readonly stale: boolean;
-  /** The page cap a list hit before the channel's list ended. */
+  /** The page cap the conversation list hit before the channel's list ended. */
   readonly truncatedAtPages: number | null;
-  /** Conversations and topics the adapter sent that do not match the protocol. */
+  /** Conversations the adapter sent that do not match the protocol. */
   readonly skipped: number;
   readonly access: ChannelAccess;
   readonly status: ChannelStatus;
@@ -184,20 +208,24 @@ export interface ConversationResponse {
 
 export interface SendResult {
   readonly messageId: string;
-  /** false when the copy in the item folder could not be written; null for a topic-less send. */
+  /** false when the copy in the delegation's folder could not be written; null outside one. */
   readonly archived: boolean | null;
 }
 
-export interface TopicDetail {
-  readonly item: InboxItem;
+export interface DelegationDetail {
+  readonly delegation: InboxDelegation;
   readonly conversation: {
     readonly id: string;
     readonly name: string;
     readonly kind: ConversationKind;
   };
+  /** What the delegation covers, oldest first. */
   readonly messages: ReadonlyArray<InboxMessage>;
+  /** False when the messages run past what T3 Code reads. */
+  readonly complete: boolean;
+  /** The reply thread's first message is gone from the adapter. */
+  readonly rootMissing: boolean;
   readonly stale: boolean;
-  readonly truncatedAtPages: number | null;
   readonly skipped: number;
   readonly canSend: boolean;
   readonly conclusion: string | null;
@@ -230,7 +258,9 @@ export interface ModelChoice {
 }
 
 export interface DelegateOptions {
-  readonly itemId: string;
+  readonly delegationId: string;
+  /** The scope it was delegated with before; null when it never was. */
+  readonly scope: DelegationScope | null;
   readonly projects: ReadonlyArray<{
     readonly id: string;
     readonly title: string;
@@ -238,7 +268,7 @@ export interface DelegateOptions {
     readonly defaultModel: ModelChoice | null;
   }>;
   readonly defaultProjectId: string | null;
-  /** Where the topic's last thread worked: its worktree, else the project checkout. */
+  /** Where the delegation's last thread worked: its worktree, else the project checkout. */
   readonly defaultWorkspaceStrategy: WorkspaceStrategy;
   readonly templates: ReadonlyArray<DelegateTemplate>;
   readonly providers: ReadonlyArray<{

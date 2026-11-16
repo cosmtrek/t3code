@@ -1,12 +1,12 @@
 /**
- * Channel protocol v1, the one definition of an adapter's loopback HTTP API; see
+ * Channel protocol v2, the one definition of an adapter's loopback HTTP API; see
  * docs/fork/channel-protocol.md. Lists page with `cursor=<nextCursor>`, newest first; a list
- * item that does not decode is skipped, not the page. DMs are split into topics by the adapter.
+ * item that does not decode is skipped, not the page.
  */
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 
-export const CHANNEL_PROTOCOL_VERSION = 1;
+export const CHANNEL_PROTOCOL_VERSION = 2;
 
 const Author = Schema.Struct({
   id: Schema.String,
@@ -51,6 +51,8 @@ export const AdapterConfig = Schema.Struct({
 });
 export type AdapterConfig = typeof AdapterConfig.Type;
 
+const OptionalTimestamp = Schema.NullOr(Timestamp);
+
 export const Conversation = Schema.Struct({
   id: Schema.String,
   kind: Schema.Literals(["dm", "group", "topic_group"]),
@@ -58,25 +60,23 @@ export const Conversation = Schema.Struct({
   lastActivityAt: Timestamp,
   relevant: Schema.Boolean,
   muted: Schema.Boolean,
+  lastMessage: Schema.NullOr(
+    Schema.Struct({
+      id: Schema.String,
+      createdAt: Timestamp,
+      author: Author,
+      preview: Schema.String,
+    }),
+  ),
+  /** The newest message on the timeline not from me; replies kept inside a thread do not count. */
+  lastOtherMessageAt: OptionalTimestamp,
+  lastSelfMessageAt: OptionalTimestamp,
+  /** The newest message that mentions me, thread replies included. */
+  lastMentionAt: OptionalTimestamp,
+  /** The newest message not from me that the chat app shows as read; null when unknown. */
+  selfReadThroughAt: Schema.optional(OptionalTimestamp),
 });
 export type Conversation = typeof Conversation.Type;
-
-export const Topic = Schema.Struct({
-  id: Schema.String,
-  rootMessageId: Schema.String,
-  rootPreview: Schema.String,
-  replyCount: Schema.Number,
-  lastMessageAt: Timestamp,
-  lastAuthor: Author,
-  participatedBySelf: Schema.Boolean,
-  /** The newest message not from me; null when I wrote every one. */
-  lastOtherMessageAt: Schema.NullOr(Timestamp),
-  /** Whether a message after my last one (or any, if I never wrote) mentions me. */
-  mentionsSelfSinceOwn: Schema.Boolean,
-  /** The newest message not from me that the chat app shows as read; null when unknown. */
-  selfReadThroughAt: Schema.optional(Schema.NullOr(Timestamp)),
-});
-export type Topic = typeof Topic.Type;
 
 const AttachmentKind = Schema.Literals(["image", "file"]);
 
@@ -99,8 +99,19 @@ export const Attachment = Schema.Struct({
 
 export const Message = Schema.Struct({
   id: Schema.String,
-  topicId: Schema.String,
   createdAt: Timestamp,
+  /** The reply thread or topic this message belongs to; null for a root or a lone message. */
+  rootId: Schema.optional(Schema.NullOr(Schema.String)),
+  /** The message this one answers; author and preview are null when the adapter lacks it. */
+  replyTo: Schema.optional(
+    Schema.NullOr(
+      Schema.Struct({
+        id: Schema.String,
+        authorName: Schema.NullOr(Schema.String),
+        preview: Schema.NullOr(Schema.String),
+      }),
+    ),
+  ),
   author: Author,
   mentionsSelf: Schema.Boolean,
   text: Schema.String,
@@ -137,34 +148,23 @@ export const AdapterError = Schema.Struct({
  */
 export type ChannelEvent =
   | {
-      readonly type: "message.created" | "topic.updated";
+      readonly type: "message.created" | "conversation.updated";
       readonly conversationId?: string;
-      readonly topicId?: string;
     }
   | { readonly type: "health.changed" }
   | { readonly type: "connected" };
 
-const decodeTopicEvent = Schema.decodeUnknownOption(
-  Schema.fromJsonString(
-    Schema.Struct({
-      conversationId: Schema.optional(Schema.String),
-      topicId: Schema.optional(Schema.String),
-    }),
-  ),
+const decodeConversationEvent = Schema.decodeUnknownOption(
+  Schema.fromJsonString(Schema.Struct({ conversationId: Schema.optional(Schema.String) })),
 );
 
 /** One SSE frame from `/events`. A known event counts even when its data does not parse. */
 export function parseChannelEvent(event: string, data: string): ChannelEvent | null {
   if (event === "health.changed") return { type: "health.changed" };
-  if (event !== "message.created" && event !== "topic.updated") return null;
-  const named = decodeTopicEvent(data);
-  if (named._tag === "None") return { type: event };
-  const { conversationId, topicId } = named.value;
-  return {
-    type: event,
-    ...(conversationId === undefined ? {} : { conversationId }),
-    ...(topicId === undefined ? {} : { topicId }),
-  };
+  if (event !== "message.created" && event !== "conversation.updated") return null;
+  const named = decodeConversationEvent(data);
+  const conversationId = named._tag === "Some" ? named.value.conversationId : undefined;
+  return conversationId === undefined ? { type: event } : { type: event, conversationId };
 }
 
 /** Splits an SSE byte stream into (event, data) frames. Keeps a partial frame between chunks. */
