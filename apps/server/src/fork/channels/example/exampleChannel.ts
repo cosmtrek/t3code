@@ -30,6 +30,8 @@ interface ExampleMessage {
   readonly id: string;
   /** The message this one answers; its reply thread is that message's thread. */
   readonly replyToId: string | null;
+  /** Kept inside its thread, off the conversation's timeline. */
+  readonly inThread?: boolean;
   readonly createdAt: string;
   readonly author: Person;
   readonly mentionsSelf: boolean;
@@ -125,7 +127,9 @@ function seed(now: number): ExampleConversation[] {
             attachments: [{ key: "chart", kind: "image", name: "cache-hit-rate.svg" }],
           },
         ),
-        message("m-11", "m-10", 4.5, SAM, "I saw the same on the staging cluster."),
+        message("m-11", "m-10", 4.5, SAM, "I saw the same on the staging cluster.", {
+          inThread: true,
+        }),
         message("m-20", null, 52, PRIYA, "Who owns the retry budget config now?"),
         message(
           "m-21",
@@ -148,9 +152,10 @@ function seed(now: number): ExampleConversation[] {
           richSummary: "[Card] Release 2.14.0 · 37 changes · Approve / Reject",
         }),
         message("m-50", null, 26, JORDAN, "Can we move the freeze to Thursday?"),
-        message("m-51", "m-50", 25, SELF, "Fine by me if QA agrees."),
+        message("m-51", "m-50", 25, SELF, "Fine by me if QA agrees.", { inThread: true }),
         message("m-52", "m-51", 1, PRIYA, "QA agrees. @Alex Rivera can you update the calendar?", {
           mentionsSelf: true,
+          inThread: true,
         }),
       ],
     },
@@ -212,6 +217,8 @@ export function createExampleChannel(
   const conversations = seed(now());
   const listeners = new Set<(event: ChannelEvent) => void>();
   const timers = new Set<ReturnType<typeof setTimeout>>();
+  /** Uploaded files, kept so a sent attachment can be shown again. */
+  const uploads = new Map<string, { name: string; contentType: string; bytes: Uint8Array }>();
   let nextId = 1000;
   let simulation: ExampleSimulation = "online";
 
@@ -250,6 +257,7 @@ export function createExampleChannel(
               preview: parent ? preview(parent) : null,
             },
       author: { ...item.author, isSelf: isSelf(item.author) },
+      inThread: item.inThread ?? false,
       mentionsSelf: item.mentionsSelf,
       text: item.text,
       richSummary: item.richSummary ?? null,
@@ -290,27 +298,63 @@ export function createExampleChannel(
   };
 
   const send = (body: unknown): AdapterResponse => {
-    const input = body as { conversationId?: unknown; replyToId?: unknown; text?: unknown } | null;
+    const input = body as {
+      conversationId?: unknown;
+      replyToId?: unknown;
+      text?: unknown;
+      mentions?: ReadonlyArray<{ userId?: unknown }>;
+      attachments?: ReadonlyArray<{ uploadId?: unknown }>;
+    } | null;
     const conversation = conversations.find((item) => item.id === input?.conversationId);
-    if (!conversation || typeof input?.text !== "string" || input.text.trim().length === 0) {
+    const files = (Array.isArray(input?.attachments) ? input.attachments : []).map((attachment) =>
+      String(attachment.uploadId),
+    );
+    const text = typeof input?.text === "string" ? input.text : "";
+    if (!conversation || (text.trim().length === 0 && files.length === 0)) {
       return json(400, {
-        error: { code: "rejected", message: "Unknown conversation or empty text." },
+        error: { code: "rejected", message: "Unknown conversation or empty message." },
+      });
+    }
+    if (files.some((uploadId) => !uploads.has(uploadId))) {
+      return json(400, {
+        error: { code: "rejected", message: "An attachment expired; attach it again." },
       });
     }
     // Like Feishu, a reply lands under its thread's root, whichever message it answered.
-    const target = conversation.messages.find((item) => item.id === input.replyToId);
+    const target = conversation.messages.find((item) => item.id === input?.replyToId);
     const replyToId = target ? rootOf(conversation, target).id : null;
-    const messageId = `m-${nextId++}`;
-    append(conversation, {
-      id: messageId,
-      replyToId,
-      createdAt: new Date(now()).toISOString(),
-      author: SELF,
-      mentionsSelf: false,
-      text: input.text,
-      attachments: [],
-      links: [],
-    });
+    // A reply stays in the thread where the chat app keeps threads off the timeline.
+    const inThread =
+      replyToId !== null &&
+      (conversation.kind === "topic_group" ||
+        conversation.messages.some(
+          (item) => item.inThread === true && rootOf(conversation, item).id === replyToId,
+        ));
+    const own = (attachments: ExampleMessage["attachments"], body: string) => {
+      const id = `m-${nextId++}`;
+      append(conversation, {
+        id,
+        replyToId,
+        inThread,
+        createdAt: new Date(now()).toISOString(),
+        author: SELF,
+        mentionsSelf: false,
+        text: body,
+        attachments,
+        links: [],
+      });
+      return id;
+    };
+    // One message holds one kind of content: the text first, then a message per file.
+    const messageIds = [
+      ...(text.trim().length > 0 ? [own([], text)] : []),
+      ...files.map((uploadId) => {
+        const file = uploads.get(uploadId)!;
+        const kind = file.contentType.startsWith("image/") ? "image" : "file";
+        return own([{ key: uploadId, kind, name: file.name }], "");
+      }),
+    ];
+    const messageId = messageIds[0]!;
     const other =
       conversation.messages.findLast((item) => item.author.id !== SELF.id)?.author ?? JORDAN;
     const timer = setTimeout(() => {
@@ -318,6 +362,7 @@ export function createExampleChannel(
       append(conversation, {
         id: `m-${nextId++}`,
         replyToId,
+        inThread,
         createdAt: new Date(now()).toISOString(),
         author: other,
         mentionsSelf: false,
@@ -328,16 +373,45 @@ export function createExampleChannel(
     }, EXAMPLE_REPLY_DELAY_MS);
     timer.unref?.();
     timers.add(timer);
-    return json(200, { messageId });
+    // Only someone who wrote here can be mentioned; anyone else went out as plain text.
+    const unresolvedMentions = (Array.isArray(input?.mentions) ? input.mentions : [])
+      .map((mention) => mention.userId)
+      .filter((userId) => !conversation.messages.some((item) => item.author.id === userId));
+    return json(200, { messageId, messageIds, unresolvedMentions });
+  };
+
+  const IMAGE_TYPES: Readonly<Record<string, string>> = {
+    png: "image/png",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    gif: "image/gif",
+    webp: "image/webp",
+  };
+
+  const upload = (url: URL, bytes: Uint8Array | undefined): AdapterResponse => {
+    const name = url.searchParams.get("name") ?? "";
+    if (name.length === 0 || bytes === undefined || bytes.byteLength === 0) {
+      return json(400, { error: { code: "rejected", message: "Name a file that is not empty." } });
+    }
+    const contentType =
+      IMAGE_TYPES[name.split(".").at(-1)?.toLowerCase() ?? ""] ?? "application/octet-stream";
+    const uploadId = `up-${nextId++}`;
+    uploads.set(uploadId, { name, contentType, bytes });
+    return json(200, {
+      uploadId,
+      kind: contentType.startsWith("image/") ? "image" : "file",
+      name,
+      size: bytes.byteLength,
+    });
   };
 
   const handle = (request: AdapterRequest): AdapterResponse => {
     const url = new URL(request.path, "http://example.invalid");
     const segments = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
     if (request.method === "POST") {
-      return segments.length === 1 && segments[0] === "messages"
-        ? send(request.body)
-        : json(404, { error: { code: "unknown", message: "Not found" } });
+      if (segments.length === 1 && segments[0] === "messages") return send(request.body);
+      if (segments.length === 1 && segments[0] === "uploads") return upload(url, request.bytes);
+      return json(404, { error: { code: "unknown", message: "Not found" } });
     }
     const [head, id, tail] = segments;
     if (head === "health" && segments.length === 1) {
@@ -367,17 +441,18 @@ export function createExampleChannel(
             id: "investigate",
             name: "Investigate",
             prompt:
-              "A message thread needs a look. Read {contextDir}/context.md for the full conversation and any images.\n\nInvestigate without changing code. Write your findings to {contextDir}/conclusion.md and a short reply I can send to {contextDir}/draft.md.\n\nNote from me: {note}\nOriginal thread: {openUrl}",
+              "A message thread needs a look. Read {contextDir}/context.md for the full conversation and any images.\n\nInvestigate without changing code. Write your findings to {contextDir}/conclusion.md.\n\nNote from me: {note}\nOriginal thread: {openUrl}",
           },
           {
             id: "fix",
             name: "Fix it",
             prompt:
-              "A message thread reports a problem. Read {contextDir}/context.md first.\n\nFind the cause and fix it in this project. Then write what you changed to {contextDir}/conclusion.md and a short reply I can send to {contextDir}/draft.md.\n\nNote from me: {note}\nOriginal thread: {openUrl}",
+              "A message thread reports a problem. Read {contextDir}/context.md first.\n\nFind the cause and fix it in this project. Then write what you changed to {contextDir}/conclusion.md.\n\nNote from me: {note}\nOriginal thread: {openUrl}",
           },
         ],
         relevanceSummary:
           "Direct messages, mentions of you, and threads you took part in. Conversations you follow show their new threads too. Muted conversations are left out.",
+        capabilities: ["mentions", "markdown", "attachments"],
       });
     }
     if (head === "conversations" && segments.length === 1) {
@@ -410,6 +485,10 @@ export function createExampleChannel(
       if (owner) {
         return { status: 200, contentType: "image/svg+xml", body: encoder.encode(CHART_SVG) };
       }
+    }
+    const uploaded = head === "media" && tail !== undefined ? uploads.get(tail) : undefined;
+    if (uploaded && segments.length === 3) {
+      return { status: 200, contentType: uploaded.contentType, body: uploaded.bytes };
     }
     return json(404, { error: { code: "unknown", message: "Not found" } });
   };

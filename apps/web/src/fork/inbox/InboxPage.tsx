@@ -11,9 +11,10 @@ import {
   MessagesSquareIcon,
   PlugZapIcon,
 } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useState, type CSSProperties, type ReactNode } from "react";
 
 import { WorkspacePageHeader } from "../../components/WorkspacePageHeader";
+import { RightPanelResizeHandle } from "../../components/preview/RightPanelResizeHandle";
 import { Button } from "../../components/ui/button";
 import {
   Empty,
@@ -40,6 +41,7 @@ import {
 import { SidebarInset } from "../../components/ui/sidebar";
 import { Toggle, ToggleGroup } from "../../components/ui/toggle-group";
 import { isElectron } from "../../env";
+import { RESIZABLE_WIDTH_PROPERTY, useResizableWidth } from "../../hooks/useResizableWidth";
 import { cn } from "../../lib/utils";
 import { ChannelStatusDot, formatSince } from "../presentation";
 import type { DelegationDetail, InboxConversation, InboxDelegation, InboxResponse } from "../types";
@@ -172,6 +174,21 @@ function InboxEmpty({
 function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
   const environmentId = inbox.environmentId;
   const navigate = useNavigate();
+  const listWidth = useResizableWidth({
+    storageKey: "t3code:inbox-list-width",
+    defaultWidth: 320,
+    // The view toggle and its two buttons fit down to here.
+    minWidth: 280,
+    maxWidth: 480,
+    edge: "right",
+  });
+  const delegationWidth = useResizableWidth({
+    storageKey: "t3code:inbox-delegation-width",
+    defaultWidth: 448,
+    minWidth: 320,
+    maxWidth: 720,
+    edge: "left",
+  });
   const [channelId, setChannelId] = useState<string | null>(null);
   const channel =
     inbox.channels.find((candidate) => candidate.id === channelId) ??
@@ -371,10 +388,16 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
         <section
           aria-label={view === "agent" ? "Delegations" : "Conversations"}
           className={cn(
-            "flex min-h-0 w-full flex-col @2xl/inbox:w-80 @2xl/inbox:shrink-0 @2xl/inbox:border-r",
+            "relative flex min-h-0 w-full flex-col @2xl/inbox:w-(--resizable-width) @2xl/inbox:shrink-0 @2xl/inbox:border-r",
             (conversationShown || delegationOpen) && "@max-2xl/inbox:hidden",
           )}
+          style={{ [RESIZABLE_WIDTH_PROPERTY]: `${listWidth.width}px` } as CSSProperties}
         >
+          <RightPanelResizeHandle
+            handlers={listWidth.handlers}
+            label="Resize the list"
+            className="-right-1 left-auto hidden @2xl/inbox:block any-pointer-coarse:-right-2 any-pointer-coarse:left-auto"
+          />
           <div className="flex shrink-0 items-center gap-2 p-2">
             <ToggleGroup
               value={[view]}
@@ -453,6 +476,7 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
             )}
             focusMessageId={delegation?.anchorMessageId ?? null}
             readOnly={readOnly}
+            capabilities={channel.capabilities}
             replyRequest={replyRequest}
             refreshOn={refreshChannel}
             // With a delegation open, the chat shares the width only on a wide screen.
@@ -488,10 +512,19 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
           <section
             aria-label="Delegation"
             className={cn(
-              "flex min-h-0 min-w-0 flex-1 flex-col",
-              conversation && "@5xl/inbox:w-[28rem] @5xl/inbox:flex-none @5xl/inbox:border-l",
+              "relative flex min-h-0 min-w-0 flex-1 flex-col",
+              conversation &&
+                "@5xl/inbox:w-(--resizable-width) @5xl/inbox:flex-none @5xl/inbox:border-l",
             )}
+            style={{ [RESIZABLE_WIDTH_PROPERTY]: `${delegationWidth.width}px` } as CSSProperties}
           >
+            {conversation ? (
+              <RightPanelResizeHandle
+                handlers={delegationWidth.handlers}
+                label="Resize the delegation"
+                className="hidden @5xl/inbox:block"
+              />
+            ) : null}
             <div className="flex shrink-0 items-center gap-1 border-b px-2 py-1.5">
               <Button
                 size="icon-xs"
@@ -546,6 +579,7 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
                     data.conversation.kind !== "dm" && delegation.scope !== "range" && anchor;
                   setReplyRequest({
                     nonce: nextReplyNonce(),
+                    conversationId: delegation.conversationId,
                     replyTo: inThread
                       ? { messageId: anchor.id, quote: quoteOfMessage(anchor) }
                       : null,

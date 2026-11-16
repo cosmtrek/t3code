@@ -6,7 +6,7 @@ import * as NodeSqlite from "node:sqlite";
 
 import { describe, expect, it } from "@effect/vitest";
 
-import { applyFallback, readArtifacts, recordSent } from "./artifacts.ts";
+import { applyFallback, readArtifacts, readSent, recordSent } from "./artifacts.ts";
 import {
   buildContextMarkdown,
   firstMessage,
@@ -190,6 +190,18 @@ describe("delegations", () => {
     expect(ids(hoursAgo(2))).toEqual(["b", "c"]);
     expect(ids(null)).toEqual(["b", "c", "d"]);
     expect(ids(null, "missing")).toEqual([]);
+
+    // Replies kept inside a thread come along only with their thread.
+    const reply = (id: string, hours: number, rootId: string) => ({
+      ...at(id, hours),
+      rootId,
+      inThread: true,
+    });
+    const threaded = [...messages, reply("of-a", 2.5, "a"), reply("of-c", 1.5, "c")];
+    const within = (anchor: string) =>
+      messagesInRange(threaded, anchor, null).map((message) => message.id);
+    expect(within("b")).toEqual(["b", "c", "of-c", "d"]);
+    expect(within("of-a")).toEqual(["of-a", "c", "of-c", "d"]);
   });
 });
 
@@ -233,15 +245,17 @@ describe("delegation text", () => {
     });
     expect(text).toContain("Open in app: https://chat.example.com/t/1");
     expect(text).toContain("/ctx/conclusion.md");
-    expect(text).toContain("<draft>");
+    expect(text).toContain("<conclusion>");
+    // The reply is asked for later, only when the user wants one.
+    expect(text).not.toContain("draft");
     const complete = firstMessage({
-      template: "{openUrl} {contextDir}/conclusion.md {contextDir}/draft.md",
+      template: "{openUrl} {contextDir}/conclusion.md",
       contextDir: "/ctx",
       note: "",
       openUrl: "https://chat.example.com/t/1",
       skippedMessages: 0,
     });
-    expect(complete).toBe("https://chat.example.com/t/1 /ctx/conclusion.md /ctx/draft.md");
+    expect(complete).toBe("https://chat.example.com/t/1 /ctx/conclusion.md");
   });
 
   it("tells the thread about messages it is not given, and names nameless authors", () => {
@@ -596,11 +610,7 @@ describe("sent records", () => {
     ] as const) {
       await recordSent({ itemDir, draftDir: null, draftAtSend: null, text, messageId, sentAt });
     }
-    const files = (await NodeFSP.readdir(itemDir)).filter((file) => file.startsWith("sent."));
-    const texts = await Promise.all(
-      files.map((file) => NodeFSP.readFile(NodePath.join(itemDir, file), "utf8")),
-    );
-    expect(texts.map((text) => text.trim().split("\n").at(-1)).toSorted()).toEqual([
+    expect((await readSent(itemDir)).map((record) => record.text).toSorted()).toEqual([
       "first",
       "second",
     ]);

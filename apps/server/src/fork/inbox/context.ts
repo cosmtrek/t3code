@@ -13,9 +13,9 @@ function writeBackInstructions(contextDir: string): string {
   return [
     "## Reporting back",
     "",
-    `- Write your findings to \`${contextDir}/${CONCLUSION_FILE}\`.`,
-    `- Write a reply I can send in the chat to \`${contextDir}/${DRAFT_FILE}\` (plain text, in the language of the conversation).`,
-    "- If you cannot write files in that folder, end your last message with `<conclusion>…</conclusion>` and `<draft>…</draft>` holding the same content instead.",
+    `- Write your findings to \`${contextDir}/${CONCLUSION_FILE}\` in Markdown, and keep it current as they change.`,
+    "- Do not write a reply for the chat until I ask for one.",
+    "- If you cannot write files in that folder, end your last message with `<conclusion>…</conclusion>` holding the same content instead.",
   ].join("\n");
 }
 
@@ -53,26 +53,55 @@ export function firstMessage(input: {
   if (input.openUrl !== null && !body.includes(input.openUrl)) {
     parts.push(`Open in app: ${input.openUrl}`);
   }
-  if (!body.includes(CONCLUSION_FILE) || !body.includes(DRAFT_FILE)) {
+  if (!body.includes(CONCLUSION_FILE)) {
     parts.push(writeBackInstructions(input.contextDir));
   }
   return parts.join("\n\n");
 }
 
-/** Sent after each question asked from the inbox, so the thread keeps its files current. */
+/** Sent after each question asked from the inbox, so the thread keeps its conclusion current. */
 function followUpNote(contextDir: string): string {
+  return [
+    `(If your findings change, update \`${contextDir}/${CONCLUSION_FILE}\`.`,
+    "If you cannot write files there, end your message with `<conclusion>…</conclusion>` instead.)",
+  ].join(" ");
+}
+
+/** What questions carried while every run kept a draft; older threads still hold it. */
+function legacyFollowUpNote(contextDir: string): string {
   return [
     `(If the reply I should send changes, update \`${contextDir}/${DRAFT_FILE}\`. If your findings change, update \`${contextDir}/${CONCLUSION_FILE}\`.`,
     "If you cannot write files there, end your message with `<draft>…</draft>` and `<conclusion>…</conclusion>` instead.)",
   ].join(" ");
 }
 
-export function followUpMessage(text: string, contextDir: string): string {
-  return `${text}\n\n${followUpNote(contextDir)}`;
+/** Asks for the reply only when the user wants one, so a run never drafts ahead of its findings. */
+function draftNote(contextDir: string, markdown: boolean): string {
+  return [
+    `(Write the reply I should send in the chat to \`${contextDir}/${DRAFT_FILE}\`, from everything so far:`,
+    markdown
+      ? "in the language of the conversation, ready to send as is. The chat shows simple Markdown (bold, lists, quotes, links, code blocks) and no headings or tables."
+      : "plain text, in the language of the conversation, ready to send as is.",
+    "If you cannot write files there, end your message with `<draft>…</draft>` instead.)",
+  ].join(" ");
+}
+
+export function followUpMessage(
+  text: string,
+  contextDir: string,
+  kind: FollowUp["kind"] = "question",
+  /** Whether the channel sends Markdown, which decides how a draft may be written. */
+  options: { readonly markdown: boolean } = { markdown: false },
+): string {
+  const note =
+    kind === "draft" ? draftNote(contextDir, options.markdown) : followUpNote(contextDir);
+  return text.length > 0 ? `${text}\n\n${note}` : note;
 }
 
 export interface FollowUp {
   readonly role: "user" | "assistant";
+  /** What a user entry asked for: an answer, or the reply to send. */
+  readonly kind: "question" | "draft";
   readonly text: string;
   readonly at: string;
 }
@@ -102,7 +131,12 @@ export function followUpsOf(
   const sorted = messages.toSorted((left, right) => Date.parse(left.at) - Date.parse(right.at));
   // The first user message is the delegation itself.
   const questions = sorted.filter((message) => message.role === "user").slice(1);
-  const note = `\n\n${followUpNote(contextDir)}`;
+  const notes = [
+    ["draft", draftNote(contextDir, false)],
+    ["draft", draftNote(contextDir, true)],
+    ["question", followUpNote(contextDir)],
+    ["question", legacyFollowUpNote(contextDir)],
+  ] as const;
   return questions.slice(-FOLLOW_UP_ROUNDS).flatMap((question) => {
     const answer =
       question.runId === null
@@ -113,12 +147,15 @@ export function followUpsOf(
               !message.streaming &&
               message.runId === question.runId,
           );
-    const text = question.text.endsWith(note)
-      ? question.text.slice(0, -note.length)
-      : question.text;
+    const [kind, note] =
+      notes.find(([, candidate]) => question.text.endsWith(candidate)) ??
+      (["question", ""] as const);
+    const text = question.text.slice(0, question.text.length - note.length).trimEnd();
     return [
-      { role: "user" as const, text: clip(text), at: question.at },
-      ...(answer ? [{ role: "assistant" as const, text: clip(answer.text), at: answer.at }] : []),
+      { role: "user" as const, kind, text: clip(text), at: question.at },
+      ...(answer
+        ? [{ role: "assistant" as const, kind, text: clip(answer.text), at: answer.at }]
+        : []),
     ];
   });
 }

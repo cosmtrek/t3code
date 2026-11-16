@@ -120,6 +120,8 @@ export async function forkRequest<T>(
   init: {
     readonly method?: "GET" | "POST";
     readonly body?: unknown;
+    /** A file, sent as the request's raw body instead of JSON. */
+    readonly file?: Blob;
     readonly signal?: AbortSignal;
   } = {},
 ): Promise<T> {
@@ -127,8 +129,11 @@ export async function forkRequest<T>(
     fetch(forkUrl(access, path), {
       method: init.method ?? "GET",
       credentials: access.credentials ? "include" : "same-origin",
-      headers: init.body === undefined ? {} : { "content-type": "application/json" },
-      ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
+      ...(init.file !== undefined
+        ? { headers: { "content-type": "application/octet-stream" }, body: init.file }
+        : init.body === undefined
+          ? {}
+          : { headers: { "content-type": "application/json" }, body: JSON.stringify(init.body) }),
       ...(init.signal ? { signal: init.signal } : {}),
     });
   const access = await readForkAccess(environmentId);

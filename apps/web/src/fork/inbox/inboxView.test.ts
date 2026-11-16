@@ -8,6 +8,9 @@ import {
   emptyViewTitle,
   inView,
   lastMessageLine,
+  mentionablePeople,
+  mentionSuggestions,
+  mentionsIn,
   mergeConversationPages,
   minuteToMs,
   quoteOf,
@@ -112,6 +115,29 @@ describe("conversationRows", () => {
     ]);
   });
 
+  it("keeps a thread's replies under its root, off the timeline", () => {
+    const inThread = (id: string, rootId: string) =>
+      ({ ...message(id), rootId, inThread: true }) as InboxMessage;
+    const rows = conversationRows(
+      [
+        message("r1"),
+        inThread("t1", "r1"),
+        // A quoted reply has a root too, and stays on the timeline.
+        { ...message("q1"), rootId: "r1" } as InboxMessage,
+        inThread("t2", "r1"),
+        inThread("orphan", "not-loaded"),
+      ],
+      [],
+    );
+    expect(
+      rows.map((row) => [row.message.id, row.thread.map((reply) => reply.message.id)]),
+    ).toEqual([
+      ["r1", ["t1", "t2"]],
+      ["q1", []],
+      ["orphan", []],
+    ]);
+  });
+
   it("cuts a quote at 40 characters", () => {
     expect(quoteOf("Sam", "a".repeat(41))).toBe(`Sam: ${"a".repeat(40)}…`);
   });
@@ -145,5 +171,37 @@ describe("mergeConversationPages", () => {
   it("drops older pages once the newest page no longer reaches them", () => {
     const older = { messages: [message("m1")], nextCursor: null, joinId: "m2" };
     expect(mergeConversationPages(newest, older)).toEqual({ ...newest, older: null });
+  });
+});
+
+describe("mentions", () => {
+  const from = (id: string, name: string, isSelf = false) =>
+    ({ author: { id, name, isSelf } }) as InboxMessage;
+  const people = mentionablePeople([
+    from("u1", "Zhang San"),
+    from("u2", "Zhang Sanfeng"),
+    from("u3", "Li"),
+    from("u4", "Li"),
+    from("me", "Me", true),
+    from("u1", "Zhang San"),
+  ]);
+
+  it("offers everyone else who wrote, except a name two people share", () => {
+    expect(people.map((person) => person.userId)).toEqual(["u1", "u2"]);
+  });
+
+  it("reads each @ as the longest name after it, once per person", () => {
+    const found = mentionsIn("@Zhang Sanfeng, cc@Zhang San @Zhang San @Li @Me @nobody", people);
+    expect(found.map((person) => person.userId)).toEqual(["u2", "u1"]);
+  });
+
+  it("suggests names for the @ at the caret until one is complete", () => {
+    const names = (text: string) =>
+      mentionSuggestions(text, text.length, people)?.people.map((person) => person.name);
+    expect(names("ping @zh")).toEqual(["Zhang San", "Zhang Sanfeng"]);
+    expect(names("ping @Zhang San")).toEqual(["Zhang Sanfeng"]);
+    expect(names("ping @Zhang Sanfeng")).toBeUndefined();
+    expect(names("a@b\nzh")).toBeUndefined();
+    expect(mentionSuggestions("ping @zh", 8, people)?.start).toBe(5);
   });
 });

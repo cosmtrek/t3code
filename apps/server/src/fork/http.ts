@@ -33,6 +33,11 @@ const INBOX = `${FORK_ROUTE_PREFIX}/inbox`;
 
 const NO_STORE = { "cache-control": "no-store" };
 const JSON_MAX_BODY_BYTES = 256 * 1024;
+const TOO_LARGE = new Inbox.ForkHttpError({
+  status: 413,
+  code: "too_large",
+  detail: "The file is larger than 100 MB.",
+});
 const HEARTBEAT_INTERVAL = Duration.seconds(20);
 
 const errorResponse = (error: Inbox.ForkHttpError) =>
@@ -78,6 +83,22 @@ const body = Effect.gen(function* () {
     Effect.provideService(HttpIncomingMessage.MaxBodySize, ByteSize.bytes(JSON_MAX_BODY_BYTES)),
     Effect.mapError(
       () => new Inbox.ForkHttpError({ status: 400, code: "bad_request", detail: "Send JSON." }),
+    ),
+  );
+});
+
+const fileBody = Effect.gen(function* () {
+  const request = yield* HttpServerRequest.HttpServerRequest;
+  if (Number(request.headers["content-length"] ?? "0") > Inbox.UPLOAD_MAX_BYTES) {
+    return yield* TOO_LARGE;
+  }
+  return new Uint8Array(
+    yield* request.arrayBuffer.pipe(
+      Effect.provideService(
+        HttpIncomingMessage.MaxBodySize,
+        ByteSize.bytes(Inbox.UPLOAD_MAX_BYTES),
+      ),
+      Effect.mapError(() => TOO_LARGE),
     ),
   );
 });
@@ -265,6 +286,14 @@ const routes = (runtime: InboxRuntimeShape) => {
       `${INBOX}/ask`,
       AuthOrchestrationOperateScope,
       body.pipe(Effect.flatMap(Inbox.ask)),
+    ),
+    route(
+      "POST",
+      `${INBOX}/upload`,
+      AuthOrchestrationOperateScope,
+      Effect.all([query, fileBody]).pipe(
+        Effect.flatMap(([params, bytes]) => Inbox.upload(params, bytes)),
+      ),
     ),
     mediaRoute(route),
     eventsRoute(runtime),

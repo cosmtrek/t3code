@@ -48,6 +48,8 @@ export const AdapterConfig = Schema.Struct({
   defaultProjectPaths: Schema.Array(Schema.String),
   delegateTemplates: Schema.Array(DelegateTemplate),
   relevanceSummary: Schema.String,
+  /** Optional parts of the protocol the adapter implements; names T3 does not know are ignored. */
+  capabilities: Schema.optional(Schema.Array(Schema.String)),
 });
 export type AdapterConfig = typeof AdapterConfig.Type;
 
@@ -113,6 +115,8 @@ export const Message = Schema.Struct({
     ),
   ),
   author: Author,
+  /** Kept inside its reply thread or topic: the chat app does not show it on the timeline. */
+  inThread: Schema.optional(Schema.Boolean),
   mentionsSelf: Schema.Boolean,
   text: Schema.String,
   richSummary: OptionalText,
@@ -129,6 +133,18 @@ export const RawPage = Schema.Struct({
 });
 
 export const SendResult = Schema.Struct({ messageId: Schema.String });
+
+/** Someone the sent text names as `@name`; `userId` is an `author.id` the adapter reported. */
+export const Mention = Schema.Struct({ userId: Schema.String, name: Schema.String });
+export type Mention = typeof Mention.Type;
+
+/** A file the adapter holds until a message names it. */
+export const Upload = Schema.Struct({
+  uploadId: Schema.String,
+  kind: LenientAttachmentKind,
+  name: Schema.String,
+  size: Schema.Number,
+});
 
 export const SendErrorCode = Schema.Literals([
   "not_logged_in",
