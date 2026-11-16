@@ -95,18 +95,10 @@ export interface InboxChannelSummary {
   readonly lastSyncAt: string | null;
   readonly selfName: string | null;
   readonly access: ChannelAccess;
-  readonly pendingCount: number | null;
+  /** Agent results, and unread topics I am part of. */
+  readonly unreadCount: number | null;
   readonly error: string | null;
 }
-
-export type ItemState =
-  | "needs_reply"
-  | "drafted"
-  | "investigating"
-  | "waiting"
-  | "open"
-  | "done"
-  | "ignored";
 
 export type ConversationKind = "dm" | "group" | "topic_group";
 
@@ -123,6 +115,8 @@ export interface LinkedThread {
   readonly projectId: string;
   readonly title: string | null;
   readonly status: LinkedThreadStatus;
+  /** When its last run worth a look finished; null while running or after a quiet run. */
+  readonly runCompletedAt: string | null;
   readonly createdAt: string;
   readonly detachedAt: string | null;
 }
@@ -140,10 +134,12 @@ export interface InboxItem {
   readonly lastMessageAt: string;
   readonly lastAuthor: Author;
   readonly participatedBySelf: boolean;
-  readonly state: ItemState;
   readonly category: "direct" | "participated" | "followed" | "other";
-  readonly reopened: boolean;
-  readonly mark: { readonly state: "done" | "ignored"; readonly markedAt: string } | null;
+  readonly unread: boolean;
+  /** The thread finished a run after the user last looked. */
+  readonly agentUnseen: boolean;
+  /** I wrote last: the topic waits on the others. */
+  readonly awaitingReply: boolean;
   readonly thread: LinkedThread | null;
   readonly hasConclusion: boolean;
   readonly hasDraft: boolean;

@@ -3,16 +3,15 @@ import type {
   InboxChannelSummary,
   InboxItem,
   InboxMessage,
-  ItemState,
   TopicDetail,
 } from "../types";
 import { formatSince, formatSpan } from "../presentation";
 
-export type InboxView = "pending" | "waiting" | "all";
+export type InboxView = "unread" | "waiting" | "all";
 export type InboxFilter = "all" | "dm" | "groups";
 
 export const INBOX_VIEWS: ReadonlyArray<{ readonly id: InboxView; readonly label: string }> = [
-  { id: "pending", label: "Pending" },
+  { id: "unread", label: "Unread" },
   { id: "waiting", label: "Waiting" },
   { id: "all", label: "All" },
 ];
@@ -24,7 +23,7 @@ export const INBOX_FILTERS: ReadonlyArray<{ readonly id: InboxFilter; readonly l
 ];
 
 const EMPTY_VIEW_TITLES: Readonly<Record<InboxView, string>> = {
-  pending: "Nothing pending",
+  unread: "Nothing unread",
   waiting: "Nothing waiting",
   all: "No topics",
 };
@@ -34,7 +33,7 @@ const FILTER_NOUNS: Readonly<Record<Exclude<InboxFilter, "all">, string>> = {
   groups: "group topics",
 };
 
-/** "Nothing pending", or "No pending DMs" when a filter is what empties the list. */
+/** "Nothing unread", or "No unread DMs" when a filter is what empties the list. */
 export function emptyViewTitle(view: InboxView, filter: InboxFilter): string {
   if (filter === "all") return EMPTY_VIEW_TITLES[view];
   const noun = FILTER_NOUNS[filter];
@@ -137,32 +136,29 @@ export function mergeConversationPages(
   };
 }
 
-const PENDING: ReadonlySet<ItemState> = new Set(["needs_reply", "drafted", "investigating"]);
-
-export function inView(view: InboxView, filter: InboxFilter, item: InboxItem): boolean {
+/**
+ * Whether the item belongs in the list. The selected item stays in Unread once opened, so
+ * reading it does not pull it out from under the pointer.
+ */
+export function inView(
+  view: InboxView,
+  filter: InboxFilter,
+  item: InboxItem,
+  selectedId: string | null = null,
+): boolean {
   const kindMatches =
     filter === "all" ||
     (filter === "dm" ? item.conversationKind === "dm" : item.conversationKind !== "dm");
   if (!kindMatches) return false;
   switch (view) {
-    case "pending":
-      return PENDING.has(item.state);
+    case "unread":
+      return item.unread || item.id === selectedId;
     case "waiting":
-      return item.state === "waiting";
+      return item.awaitingReply;
     case "all":
       return true;
   }
 }
-
-export const STATE_LABELS: Readonly<Record<ItemState, string>> = {
-  needs_reply: "Needs reply",
-  drafted: "Draft ready",
-  investigating: "Investigating",
-  waiting: "Waiting",
-  open: "New",
-  done: "Done",
-  ignored: "Ignored",
-};
 
 const WAITING_HIGHLIGHT_MS = 24 * 3_600_000;
 
@@ -174,12 +170,15 @@ const waitMsOf = (item: Pick<InboxItem, "lastMessageAt">, now: number) =>
   Math.max(0, now - Date.parse(item.lastMessageAt)) || 0;
 
 /** A topic I answered that has waited on them for over a day. */
-export const isOverdue = (item: Pick<InboxItem, "state" | "lastMessageAt">, now: number) =>
-  item.state === "waiting" && waitMsOf(item, now) > WAITING_HIGHLIGHT_MS;
+export const isOverdue = (item: Pick<InboxItem, "awaitingReply" | "lastMessageAt">, now: number) =>
+  item.awaitingReply && waitMsOf(item, now) > WAITING_HIGHLIGHT_MS;
 
-export function waitLabel(item: Pick<InboxItem, "state" | "lastMessageAt">, now: number): string {
+export function waitLabel(
+  item: Pick<InboxItem, "awaitingReply" | "lastMessageAt">,
+  now: number,
+): string {
   const span = formatSpan(waitMsOf(item, now));
-  if (item.state === "waiting") return span === "now" ? "just sent" : `sent ${span} ago`;
+  if (item.awaitingReply) return span === "now" ? "just sent" : `sent ${span} ago`;
   return span;
 }
 
@@ -188,14 +187,14 @@ export const nameOrUnknown = (name: string) => (name.trim().length > 0 ? name.tr
 
 /** "1 reply · Sam Okafor"; a waiting topic's last author is me, which its wait label says. */
 export function itemMeta(
-  item: Pick<InboxItem, "state" | "replyCount" | "lastAuthor">,
+  item: Pick<InboxItem, "awaitingReply" | "replyCount" | "lastAuthor">,
 ): string | null {
   const parts: string[] = [];
   if (item.replyCount > 0) {
     parts.push(`${item.replyCount} ${item.replyCount === 1 ? "reply" : "replies"}`);
   }
   const author = item.lastAuthor.isSelf ? "You" : item.lastAuthor.name.trim();
-  if (item.state !== "waiting" && author.length > 0) parts.push(author);
+  if (!item.awaitingReply && author.length > 0) parts.push(author);
   return parts.length > 0 ? parts.join(" · ") : null;
 }
 

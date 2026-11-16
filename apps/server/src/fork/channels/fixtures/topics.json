@@ -9,7 +9,8 @@
       "lastAuthor": { "id": "ou_sam", "name": "Sam Okafor", "isSelf": false },
       "participatedBySelf": true,
       "lastOtherMessageAt": "2026-11-14T09:30:00.000Z",
-      "mentionsSelfSinceOwn": false
+      "mentionsSelfSinceOwn": false,
+      "selfReadThroughAt": "2026-11-14T09:30:00.000Z"
     }
   ],
   "nextCursor": null

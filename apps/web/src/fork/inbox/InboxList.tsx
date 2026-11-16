@@ -2,12 +2,11 @@ import { LegendList } from "@legendapp/list/react";
 import type { EnvironmentId } from "@t3tools/contracts";
 import {
   BotIcon,
-  CheckIcon,
   CopyIcon,
   EllipsisIcon,
-  EyeOffIcon,
   ExternalLinkIcon,
-  RotateCcwIcon,
+  MailIcon,
+  MailOpenIcon,
 } from "lucide-react";
 import { useRef, useState, type PointerEvent } from "react";
 
@@ -15,50 +14,33 @@ import { Button } from "../../components/ui/button";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../../components/ui/menu";
 import { cn } from "../../lib/utils";
 import type { InboxItem } from "../types";
-import { copyItemContext, openItemInApp, type MarkTarget } from "./itemActions";
+import { copyItemContext, openItemInApp } from "./itemActions";
 import { useNowMinute } from "../../hooks/useNowMinute";
-import {
-  STATE_LABELS,
-  isOverdue,
-  itemMeta,
-  minuteToMs,
-  nameOrUnknown,
-  waitLabel,
-} from "./inboxView";
+import { ThreadStatus } from "./TopicDetail";
+import { isOverdue, itemMeta, minuteToMs, nameOrUnknown, waitLabel } from "./inboxView";
 
 export interface ItemHandlers {
   readonly onSelect: (item: InboxItem) => void;
   readonly onDelegate: (item: InboxItem) => void;
-  readonly onMark: (item: InboxItem, state: MarkTarget) => void;
+  readonly onSetRead: (item: InboxItem, read: boolean) => void;
 }
 
-const SWIPE_REVEAL = 136;
-const SWIPE_THRESHOLD = 56;
-
-const STATE_TONE: Readonly<Record<InboxItem["state"], string>> = {
-  needs_reply: "text-foreground",
-  drafted: "text-success",
-  investigating: "text-primary",
-  waiting: "text-muted-foreground",
-  open: "text-muted-foreground",
-  done: "text-muted-foreground",
-  ignored: "text-muted-foreground",
-};
+const SWIPE_REVEAL = 68;
+const SWIPE_THRESHOLD = 40;
 
 export function ItemMenu({
   environmentId,
   item,
   readOnly,
   onDelegate,
-  onMark,
+  onSetRead,
 }: {
   readonly environmentId: EnvironmentId;
   readonly item: InboxItem;
   readonly readOnly: boolean;
   readonly onDelegate: (item: InboxItem) => void;
-  readonly onMark: ItemHandlers["onMark"];
+  readonly onSetRead: ItemHandlers["onSetRead"];
 }) {
-  const marked = item.state === "done" || item.state === "ignored";
   return (
     <Menu>
       <MenuTrigger
@@ -78,22 +60,16 @@ export function ItemMenu({
           <BotIcon />
           Delegate…
         </MenuItem>
-        {marked ? (
-          <MenuItem onClick={() => onMark(item, null)}>
-            <RotateCcwIcon />
-            Reopen
+        {item.unread ? (
+          <MenuItem onClick={() => onSetRead(item, true)}>
+            <MailOpenIcon />
+            Mark read
           </MenuItem>
         ) : (
-          <>
-            <MenuItem onClick={() => onMark(item, "done")}>
-              <CheckIcon />
-              Mark done
-            </MenuItem>
-            <MenuItem onClick={() => onMark(item, "ignored")}>
-              <EyeOffIcon />
-              Ignore
-            </MenuItem>
-          </>
+          <MenuItem onClick={() => onSetRead(item, false)}>
+            <MailIcon />
+            Mark unread
+          </MenuItem>
         )}
         <MenuItem onClick={() => void copyItemContext(environmentId, item)}>
           <CopyIcon />
@@ -151,7 +127,7 @@ function ItemRow({
     if (!current?.horizontal) return;
     setOffset((value) => (value < -SWIPE_THRESHOLD ? -SWIPE_REVEAL : 0));
   };
-  const marked = item.state === "done" || item.state === "ignored";
+  const live = item.thread !== null && item.thread.detachedAt === null ? item.thread : null;
 
   return (
     <div className="relative overflow-hidden border-b border-border/50">
@@ -162,29 +138,18 @@ function ItemRow({
         <button
           type="button"
           tabIndex={swiped ? 0 : -1}
-          className="w-[68px] bg-success text-xs font-medium text-white"
+          className="w-[68px] bg-primary text-xs font-medium text-primary-foreground"
           onClick={() => {
             setOffset(0);
-            handlers.onMark(item, marked ? null : "done");
+            handlers.onSetRead(item, !item.unread);
           }}
         >
-          {marked ? "Reopen" : "Done"}
-        </button>
-        <button
-          type="button"
-          tabIndex={swiped ? 0 : -1}
-          className="w-[68px] bg-muted-foreground text-xs font-medium text-white"
-          onClick={() => {
-            setOffset(0);
-            handlers.onMark(item, "ignored");
-          }}
-        >
-          Ignore
+          {item.unread ? "Read" : "Unread"}
         </button>
       </div>
       <div
         className={cn(
-          "relative flex min-w-0 touch-pan-y items-start gap-2 bg-background px-3 py-2.5",
+          "relative flex min-w-0 touch-pan-y items-start gap-2 bg-background py-2.5 pr-3 pl-1.5",
           selected && "bg-accent",
           !dragging && "motion-safe:transition-transform motion-safe:duration-150",
         )}
@@ -194,6 +159,14 @@ function ItemRow({
         onPointerUp={onPointerEnd}
         onPointerCancel={onPointerEnd}
       >
+        <span
+          className={cn(
+            "mt-1.5 size-1.5 shrink-0 rounded-full",
+            item.unread ? "bg-primary" : "bg-transparent",
+          )}
+          role={item.unread ? "img" : undefined}
+          aria-label={item.unread ? "Unread" : undefined}
+        />
         <button
           type="button"
           className="flex min-w-0 flex-1 flex-col gap-0.5 text-left"
@@ -223,9 +196,8 @@ function ItemRow({
             {item.preview}
           </span>
           <span className="flex min-w-0 items-center gap-2 text-xs">
-            <span className={cn("shrink-0", STATE_TONE[item.state])}>
-              {STATE_LABELS[item.state]}
-            </span>
+            {live ? <ThreadStatus environmentId={environmentId} thread={live} /> : null}
+            {item.hasDraft ? <span className="shrink-0 text-success">Draft</span> : null}
             <span className="min-w-0 truncate text-muted-foreground">{itemMeta(item)}</span>
           </span>
         </button>
@@ -234,7 +206,7 @@ function ItemRow({
           item={item}
           readOnly={readOnly}
           onDelegate={handlers.onDelegate}
-          onMark={handlers.onMark}
+          onSetRead={handlers.onSetRead}
         />
       </div>
     </div>
