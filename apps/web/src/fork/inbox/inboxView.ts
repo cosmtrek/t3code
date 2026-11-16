@@ -1,4 +1,10 @@
-import type { InboxChannelSummary, InboxItem, InboxMessage, ItemState } from "../types";
+import type {
+  ConversationKind,
+  InboxChannelSummary,
+  InboxItem,
+  InboxMessage,
+  ItemState,
+} from "../types";
 import { formatSince, formatSpan } from "../presentation";
 
 export type InboxView = "pending" | "waiting" | "all";
@@ -40,19 +46,85 @@ export function skippedNotice(skipped: number): string | null {
   return `${skipped} ${skipped === 1 ? "item" : "items"} from the adapter could not be read.`;
 }
 
-/** The selected topic's conversation, oldest first like a chat, so the latest sits at the bottom. */
-export function conversationTopicsOf(
+export interface ConversationRow {
+  readonly message: InboxMessage;
+  /** The message's topic as the inbox lists it; null when the inbox does not list that topic. */
+  readonly item: InboxItem | null;
+  /** The row that carries the topic's state, actions, and selection. */
+  readonly anchor: boolean;
+  /** The message this one answers, in a group that shows replies inline. */
+  readonly quote: string | null;
+}
+
+const QUOTE_CHARS = 40;
+
+/** `Sam: Who owns the retry…`, cut at 40 characters. */
+export function quoteOf(author: string | null, text: string): string {
+  const chars = Array.from(text.replace(/\s+/g, " ").trim());
+  const head =
+    chars.length > QUOTE_CHARS ? `${chars.slice(0, QUOTE_CHARS).join("")}…` : chars.join("");
+  return author === null ? head : `${nameOrUnknown(author)}: ${head}`;
+}
+
+/**
+ * A conversation as its chat app shows it. DMs and plain groups show every message, a reply
+ * quoting what it answers; a topic group shows each topic once, by its root. A topic whose root
+ * is older than what was read stands on its earliest message read.
+ */
+export function conversationRows(
+  messages: ReadonlyArray<InboxMessage>,
   items: ReadonlyArray<InboxItem>,
-  selected: Pick<InboxItem, "conversationId"> | null,
-): ReadonlyArray<InboxItem> {
-  if (selected === null) return [];
-  return items
-    .filter((item) => item.conversationId === selected.conversationId)
-    .toSorted(
-      (left, right) =>
-        Date.parse(left.lastMessageAt) - Date.parse(right.lastMessageAt) ||
-        left.id.localeCompare(right.id),
-    );
+  kind: ConversationKind,
+): ReadonlyArray<ConversationRow> {
+  const itemsByTopic = new Map(items.map((item) => [item.topicId, item] as const));
+  const byId = new Map(messages.map((message) => [message.id, message] as const));
+  const anchored = new Set<string>();
+  const rows: ConversationRow[] = [];
+  for (const message of messages) {
+    const item = itemsByTopic.get(message.topicId) ?? null;
+    const anchor = !anchored.has(message.topicId);
+    anchored.add(message.topicId);
+    if (kind === "topic_group" && !anchor) continue;
+    const root = item === null ? undefined : byId.get(item.rootMessageId);
+    const quote =
+      kind === "group" && item !== null && message.id !== item.rootMessageId
+        ? root
+          ? quoteOf(root.author.name, root.text || (root.richSummary ?? ""))
+          : quoteOf(null, item.preview)
+        : null;
+    rows.push({ message, item, anchor, quote });
+  }
+  return rows;
+}
+
+export interface ConversationPage {
+  readonly messages: ReadonlyArray<InboxMessage>;
+  readonly nextCursor: string | null;
+}
+
+/** Pages loaded above the newest one; `joinId` is the newest page's oldest message then. */
+export interface OlderPages extends ConversationPage {
+  readonly joinId: string;
+}
+
+/**
+ * The newest page, read again on every change, below the older pages the reader loaded. Once
+ * the newest page no longer holds the message the older ones were loaded above, more arrived
+ * than a page holds: the older ones are dropped rather than shown across a gap.
+ */
+export function mergeConversationPages(
+  newest: ConversationPage,
+  older: OlderPages | null,
+): ConversationPage & { readonly older: OlderPages | null } {
+  if (older === null || !newest.messages.some((message) => message.id === older.joinId)) {
+    return { ...newest, older: null };
+  }
+  const seen = new Set(newest.messages.map((message) => message.id));
+  return {
+    messages: [...older.messages.filter((message) => !seen.has(message.id)), ...newest.messages],
+    nextCursor: older.nextCursor,
+    older,
+  };
 }
 
 const PENDING: ReadonlySet<ItemState> = new Set(["needs_reply", "drafted", "investigating"]);

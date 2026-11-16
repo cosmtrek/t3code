@@ -140,15 +140,17 @@ function fakeAdapter(topics: () => ReadonlyArray<FakeTopic>, sendAnswer: () => A
       );
     }
     if (parts[2] === "messages") {
-      const topic = all.find(
-        (candidate) =>
-          candidate.conversationId === parts[1] &&
-          candidate.topicId === url.searchParams.get("topic"),
-      );
+      const wanted = url.searchParams.get("topic");
       // Newest first, as some adapters page: the inbox must sort before reading.
-      const messages = (topic?.messages ?? [])
-        .toSorted((a, b) => b.minute - a.minute)
-        .map((message) => messageJson(message, topic!.topicId));
+      const messages = all
+        .filter(
+          (candidate) =>
+            candidate.conversationId === parts[1] &&
+            (wanted === null || candidate.topicId === wanted),
+        )
+        .flatMap((topic) => topic.messages.map((message) => ({ message, topic })))
+        .toSorted((a, b) => b.message.minute - a.message.minute)
+        .map(({ message, topic }) => messageJson(message, topic.topicId));
       return paged(messages, url);
     }
     return json(404, { error: { code: "unknown", message: "Not found" } });
@@ -305,6 +307,22 @@ describe("inbox listing", () => {
         new URLSearchParams(h.keyOf("c-second", "t-joined")),
       ).pipe(Effect.provide(h.layer));
       expect(topic.messages.map((message) => message.id)).toEqual(["j1", "j2", "j3", "j4"]);
+
+      // The chat view reads one page at a time, newest page first, and pages back by cursor.
+      const conversation = (cursor?: string) =>
+        Inbox.readConversation(
+          new URLSearchParams({
+            channelId: h.channelId,
+            conversationId: "c-second",
+            ...(cursor === undefined ? {} : { cursor }),
+          }),
+        ).pipe(Effect.provide(h.layer));
+      const newest = yield* conversation();
+      expect(newest.messages.map((message) => message.id)).toEqual(["s2"]);
+      expect(newest.nextCursor).toBe("1");
+      const older = yield* conversation(newest.nextCursor!);
+      expect(older.messages.map((message) => message.id)).toEqual(["s1"]);
+      expect(h.requests.filter((path) => path.includes("order=desc"))).toHaveLength(2);
     }),
   );
 
