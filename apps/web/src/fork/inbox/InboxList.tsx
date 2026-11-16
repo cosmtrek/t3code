@@ -1,15 +1,27 @@
 import { LegendList } from "@legendapp/list/react";
 import type { EnvironmentId } from "@t3tools/contracts";
-import { AtSignIcon, BotIcon, EllipsisIcon, MailIcon, MailOpenIcon } from "lucide-react";
+import {
+  BellOffIcon,
+  BotIcon,
+  EllipsisIcon,
+  MailIcon,
+  MailOpenIcon,
+  MessagesSquareIcon,
+  UserIcon,
+  UsersIcon,
+  Trash2Icon,
+  type LucideIcon,
+} from "lucide-react";
 import { useRef, useState, type PointerEvent } from "react";
 
 import { Button } from "../../components/ui/button";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../../components/ui/menu";
 import { useNowMinute } from "../../hooks/useNowMinute";
 import { cn } from "../../lib/utils";
-import type { InboxConversation, InboxDelegation } from "../types";
+import type { ConversationKind, InboxConversation, InboxDelegation } from "../types";
 import {
   agoLabel,
+  delegationPreview,
   lastMessageLine,
   minuteToMs,
   nameOrUnknown,
@@ -17,9 +29,23 @@ import {
 } from "./inboxView";
 import { ThreadStatus } from "./DelegationPane";
 
+const KIND_ICONS: Readonly<
+  Record<ConversationKind, { readonly icon: LucideIcon; readonly label: string }>
+> = {
+  dm: { icon: UserIcon, label: "Direct message" },
+  group: { icon: UsersIcon, label: "Group" },
+  topic_group: { icon: MessagesSquareIcon, label: "Topic group" },
+};
+
+function ConversationKindIcon({ kind }: { readonly kind: ConversationKind }) {
+  const { icon: Icon, label } = KIND_ICONS[kind];
+  return <Icon className="size-3 shrink-0 text-muted-foreground" aria-label={label} />;
+}
+
 export interface ConversationHandlers {
   readonly onSelect: (conversation: InboxConversation) => void;
   readonly onSetRead: (conversation: InboxConversation, read: boolean) => void;
+  readonly onDiscardDrafts: (conversation: InboxConversation) => void;
 }
 
 const SWIPE_REVEAL = 68;
@@ -27,10 +53,15 @@ const SWIPE_THRESHOLD = 40;
 
 export function ConversationMenu({
   conversation,
+  drafts,
   onSetRead,
+  onDiscardDrafts,
 }: {
   readonly conversation: InboxConversation;
+  /** How many of its delegations hold a draft reply. */
+  readonly drafts: number;
   readonly onSetRead: ConversationHandlers["onSetRead"];
+  readonly onDiscardDrafts: ConversationHandlers["onDiscardDrafts"];
 }) {
   return (
     <Menu>
@@ -58,13 +89,19 @@ export function ConversationMenu({
             Mark unread
           </MenuItem>
         )}
+        {drafts > 0 ? (
+          <MenuItem onClick={() => onDiscardDrafts(conversation)}>
+            <Trash2Icon />
+            {drafts === 1 ? "Discard draft" : `Discard ${drafts} drafts`}
+          </MenuItem>
+        ) : null}
       </MenuPopup>
     </Menu>
   );
 }
 
 /** The agent's state on a conversation row: unseen results first, then drafts, then threads. */
-function AgentBadge({ signals }: { readonly signals: AgentSignals | undefined }) {
+export function AgentBadge({ signals }: { readonly signals: AgentSignals | undefined }) {
   if (signals === undefined || signals.live === 0) return null;
   const label =
     signals.unseen > 0
@@ -132,7 +169,7 @@ function ConversationRow({
   };
 
   return (
-    <div className="relative overflow-hidden border-b border-border/50">
+    <div className="relative mx-1.5 overflow-hidden rounded-md">
       <div
         className={cn("absolute inset-y-0 right-0 flex", !swiped && !dragging && "invisible")}
         aria-hidden={!swiped}
@@ -151,8 +188,8 @@ function ConversationRow({
       </div>
       <div
         className={cn(
-          "relative flex min-w-0 touch-pan-y items-start gap-2 bg-background py-2.5 pr-3 pl-1.5",
-          selected && "bg-accent",
+          "group/row relative flex min-w-0 touch-pan-y items-start gap-1.5 py-2 pr-2.5 pl-1",
+          selected ? "bg-accent" : "bg-background pointer-fine:hover:bg-accent/50",
           !dragging && "motion-safe:transition-transform motion-safe:duration-150",
         )}
         style={offset === 0 ? undefined : { transform: `translateX(${offset}px)` }}
@@ -163,8 +200,12 @@ function ConversationRow({
       >
         <span
           className={cn(
-            "mt-1.5 size-1.5 shrink-0 rounded-full",
-            conversation.unread ? "bg-primary" : "bg-transparent",
+            "mt-[7px] size-1.5 shrink-0 rounded-full",
+            !conversation.unread
+              ? "bg-transparent"
+              : conversation.muted
+                ? "bg-muted-foreground/50"
+                : "bg-primary",
           )}
           role={conversation.unread ? "img" : undefined}
           aria-label={conversation.unread ? "Unread" : undefined}
@@ -181,30 +222,38 @@ function ConversationRow({
             handlers.onSelect(conversation);
           }}
         >
-          <span className="flex min-w-0 items-baseline gap-2 text-xs">
-            <span className="min-w-0 truncate font-medium text-foreground">
-              {nameOrUnknown(conversation.name)}
+          <span className="flex min-w-0 items-center gap-2">
+            <span className="flex min-w-0 items-center gap-1.5 text-sm font-medium text-foreground">
+              <ConversationKindIcon kind={conversation.kind} />
+              <span className="truncate">{nameOrUnknown(conversation.name)}</span>
             </span>
-            <span className="ms-auto shrink-0 text-muted-foreground tabular-nums">
+            <span className="ms-auto shrink-0 text-xs text-muted-foreground tabular-nums pointer-fine:group-focus-within/row:invisible pointer-fine:group-hover/row:invisible pointer-fine:group-has-data-popup-open/row:invisible">
               {agoLabel(conversation.lastActivityAt, now)}
             </span>
           </span>
-          <span className="line-clamp-2 text-sm break-words text-foreground/90">
-            {lastMessageLine(conversation)}
-          </span>
-          {conversation.mentioned || (agent?.live ?? 0) > 0 ? (
-            <span className="flex min-w-0 items-center gap-2 text-xs">
-              {conversation.mentioned ? (
-                <span className="inline-flex shrink-0 items-center gap-0.5 text-warning">
-                  <AtSignIcon className="size-3" />
-                  Mentioned
-                </span>
-              ) : null}
-              <AgentBadge signals={agent} />
+          <span className="flex min-w-0 items-center gap-2 text-xs">
+            <span className="min-w-0 flex-1 truncate text-muted-foreground">
+              {conversation.mentioned ? <span className="text-warning">@you </span> : null}
+              {lastMessageLine(conversation)}
             </span>
-          ) : null}
+            <AgentBadge signals={agent} />
+            {conversation.muted ? (
+              <BellOffIcon
+                className="size-3 shrink-0 text-muted-foreground/70"
+                aria-label="Muted"
+              />
+            ) : null}
+          </span>
         </button>
-        <ConversationMenu conversation={conversation} onSetRead={handlers.onSetRead} />
+        {/* Takes the time's place on hover; touch has the swipe and the conversation's own menu. */}
+        <div className="invisible absolute end-1.5 top-1.5 group-focus-within/row:visible group-hover/row:visible has-data-popup-open:visible pointer-coarse:hidden">
+          <ConversationMenu
+            conversation={conversation}
+            drafts={agent?.drafts ?? 0}
+            onSetRead={handlers.onSetRead}
+            onDiscardDrafts={handlers.onDiscardDrafts}
+          />
+        </div>
       </div>
     </div>
   );
@@ -240,7 +289,7 @@ export function ConversationList({
       )}
       maintainVisibleContentPosition={{ data: scrolledDown }}
       onScroll={(event) => setScrolledDown(event.nativeEvent.contentOffset.y > 0)}
-      estimatedItemSize={72}
+      estimatedItemSize={56}
       drawDistance={600}
       className="min-h-0 flex-1 overscroll-contain"
     />
@@ -251,11 +300,14 @@ export function ConversationList({
 export function DelegationList({
   environmentId,
   delegations,
+  kindOf,
   selectedId,
   onSelect,
 }: {
   readonly environmentId: EnvironmentId;
   readonly delegations: ReadonlyArray<InboxDelegation>;
+  /** The kind of each listed conversation; one the channel no longer lists has none. */
+  readonly kindOf: ReadonlyMap<string, ConversationKind>;
   readonly selectedId: string | null;
   readonly onSelect: (delegation: InboxDelegation) => void;
 }) {
@@ -264,57 +316,78 @@ export function DelegationList({
     <LegendList<InboxDelegation>
       data={delegations}
       keyExtractor={(delegation) => delegation.id}
-      extraData={{ selectedId, now }}
+      extraData={{ selectedId, now, kindOf }}
       renderItem={({ item }) => {
         const live = item.thread !== null && item.thread.detachedAt === null ? item.thread : null;
         return (
           <button
             type="button"
             className={cn(
-              "flex w-full min-w-0 items-start gap-2 border-b border-border/50 py-2.5 pr-3 pl-1.5 text-left",
-              item.id === selectedId && "bg-accent",
+              "mx-1.5 flex w-[calc(100%-0.75rem)] min-w-0 items-start gap-1.5 rounded-md py-2 pr-2.5 pl-1 text-left",
+              item.id === selectedId ? "bg-accent" : "pointer-fine:hover:bg-accent/50",
             )}
             aria-current={item.id === selectedId ? "true" : undefined}
             onClick={() => onSelect(item)}
           >
             <span
               className={cn(
-                "mt-1.5 size-1.5 shrink-0 rounded-full",
+                "mt-[7px] size-1.5 shrink-0 rounded-full",
                 item.agentUnseen ? "bg-primary" : "bg-transparent",
               )}
               role={item.agentUnseen ? "img" : undefined}
               aria-label={item.agentUnseen ? "New result" : undefined}
             />
             <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-              <span className="flex min-w-0 items-baseline gap-2 text-xs">
-                <span className="min-w-0 truncate font-medium text-foreground">
-                  {nameOrUnknown(item.conversationName)}
+              <span className="flex min-w-0 items-center gap-2">
+                <span className="flex min-w-0 items-center gap-1.5 text-sm font-medium text-foreground">
+                  {kindOf.has(item.conversationId) ? (
+                    <ConversationKindIcon kind={kindOf.get(item.conversationId)!} />
+                  ) : null}
+                  <span className="truncate">{nameOrUnknown(item.conversationName)}</span>
                 </span>
-                <span className="ms-auto shrink-0 text-muted-foreground tabular-nums">
+                <span className="ms-auto shrink-0 text-xs text-muted-foreground tabular-nums">
                   {agoLabel(item.thread?.runCompletedAt ?? item.createdAt, now)}
                 </span>
               </span>
-              <span className="line-clamp-2 text-sm break-words text-foreground/90">
-                {item.preview ?? item.thread?.title ?? "Delegated messages"}
-              </span>
               <span className="flex min-w-0 items-center gap-2 text-xs">
-                {live ? <ThreadStatus environmentId={environmentId} thread={live} /> : null}
-                {item.hasDraft ? (
-                  <span className="shrink-0 text-success">Draft</span>
-                ) : item.lastSentAt !== null ? (
-                  <span className="shrink-0 text-muted-foreground">Replied</span>
-                ) : null}
-                {item.hasConclusion ? (
-                  <span className="shrink-0 text-muted-foreground">Conclusion</span>
-                ) : null}
+                <span className="min-w-0 flex-1 truncate text-muted-foreground">
+                  {delegationPreview(
+                    item.conversationName,
+                    item.preview,
+                    item.thread?.title ?? null,
+                  )}
+                </span>
+                {live ? (
+                  <ThreadStatus
+                    environmentId={environmentId}
+                    thread={live}
+                    fallback={<DelegationOutcome delegation={item} />}
+                  />
+                ) : (
+                  <DelegationOutcome delegation={item} />
+                )}
               </span>
             </span>
           </button>
         );
       }}
-      estimatedItemSize={72}
+      estimatedItemSize={56}
       drawDistance={600}
       className="min-h-0 flex-1 overscroll-contain"
     />
   );
+}
+
+/** What a finished delegation left for the user: a draft to send, or the reply already sent. */
+export function DelegationOutcome({
+  delegation,
+  idle = null,
+}: {
+  readonly delegation: Pick<InboxDelegation, "hasDraft" | "lastSentAt">;
+  /** Shown when it left neither. */
+  readonly idle?: string | null;
+}) {
+  if (delegation.hasDraft) return <span className="shrink-0 text-success">Draft</span>;
+  const label = delegation.lastSentAt !== null ? "Replied" : idle;
+  return label === null ? null : <span className="shrink-0 text-muted-foreground">{label}</span>;
 }

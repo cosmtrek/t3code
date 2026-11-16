@@ -114,7 +114,7 @@ function seed(now: number): ExampleConversation[] {
       kind: "group",
       name: "Platform team",
       relevant: true,
-      muted: false,
+      muted: true,
       messages: [
         message(
           "m-10",
@@ -150,11 +150,16 @@ function seed(now: number): ExampleConversation[] {
       messages: [
         message("m-40", null, 3, BOT, "Release 2.14.0 is ready for sign-off.", {
           richSummary: "[Card] Release 2.14.0 · 37 changes · Approve / Reject",
+          links: ["https://ci.example.com/releases/2.14.0/changes?view=summary&group=team"],
         }),
         message("m-50", null, 26, JORDAN, "Can we move the freeze to Thursday?"),
         message("m-51", "m-50", 25, SELF, "Fine by me if QA agrees.", { inThread: true }),
         message("m-52", "m-51", 1, PRIYA, "QA agrees. @Alex Rivera can you update the calendar?", {
           mentionsSelf: true,
+          inThread: true,
+        }),
+        message("m-53", "m-50", 0.8, SAM, "Infra is fine with Thursday too.", { inThread: true }),
+        message("m-54", "m-50", 0.5, JORDAN, "Great, I'll post the new date in #releases.", {
           inThread: true,
         }),
       ],

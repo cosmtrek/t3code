@@ -59,6 +59,8 @@ need no capability.
 - A page whose `items` or `nextCursor` is malformed fails as a whole. An item that does not decode
   (a missing field, a time without a zone) is skipped, counted, and reported in the inbox as
   "N items from the adapter could not be read."
+- A rich-text message's inline images are attachments too, in the order they appear. Its `text`
+  may keep a placeholder where each one stood, but an image only in the text never shows in T3.
 - An attachment `kind` other than `image` (`audio`, `video`, `sticker`, …) is read as `file`,
   so a new kind in the chat app does not drop the message.
 - `order=desc` holds every message of the conversation, replies kept inside a thread included; the
