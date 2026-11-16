@@ -165,6 +165,10 @@ interface Harness {
   readonly requests: string[];
   readonly runtime: InboxRuntime["Service"];
   readonly shells: Map<string, OrchestrationV2ThreadShell | null>;
+  /** Each thread's messages, as `getThreadRecords` reads them. */
+  readonly threadMessages: Map<string, ReadonlyArray<unknown>>;
+  /** What was sent to threads. */
+  readonly sent: Array<ThreadManagement.ThreadManagementSendInput>;
   readonly layer: Layer.Layer<
     InboxRuntime | ThreadManagement.ThreadManagementService | Project.ProjectService
   >;
@@ -220,11 +224,18 @@ async function harness(
     subscribe: (listener: Parameters<ChannelHub["subscribe"]>[0]) => hub.subscribe(listener),
   };
   const shells = new Map<string, OrchestrationV2ThreadShell | null>();
+  const threadMessages = new Map<string, ReadonlyArray<unknown>>();
+  const sent: Array<ThreadManagement.ThreadManagementSendInput> = [];
   const layer = Layer.mergeAll(
     Layer.succeed(InboxRuntime, runtime),
     Layer.mock(ThreadManagement.ThreadManagementService)({
       getThreadShell: (threadId) => Effect.succeed(shells.get(threadId) ?? null),
-      getThreadRecords: () => Effect.die("not used"),
+      getThreadRecords: (threadId) =>
+        Effect.succeed({ messages: threadMessages.get(threadId) ?? [] } as never),
+      sendToThread: (input) => {
+        sent.push(input);
+        return Effect.succeed({ message: { attachments: [] } } as never);
+      },
     }),
     Layer.mock(Project.ProjectService)({ listShells: () => Effect.succeed([]) }),
   );
@@ -233,6 +244,8 @@ async function harness(
     requests,
     runtime,
     shells,
+    threadMessages,
+    sent,
     layer,
     keyOf: (conversationId, topicId) => ({ channelId, conversationId, topicId }),
   };
@@ -739,6 +752,66 @@ describe("sending", () => {
       const sent = yield* Inbox.send({ ...key, text: "reply" }).pipe(Effect.provide(h.layer));
       expect(sent).toEqual({ messageId: "sent-1", archived: false });
       expect(h.runtime.store.listMarks(h.channelId)).toEqual([]);
+    }),
+  );
+});
+
+describe("asking a topic's thread", () => {
+  const oneTopic = (): ReadonlyArray<FakeTopic> => [
+    { conversationId: "c", topicId: "t", messages: [{ id: "m1", minute: 1, author: THEM }] },
+  ];
+  const askLayer = (h: Harness) =>
+    Layer.mergeAll(
+      h.layer,
+      Layer.succeed(ServerConfig.ServerConfig, {} as never),
+      Layer.mock(DocumentText.DocumentText)({}),
+      FileSystem.layerNoop({}),
+    );
+
+  it.effect("asks only a topic that has a thread, and queues behind a running one", () =>
+    Effect.gen(function* () {
+      const h = yield* Effect.promise(() => harness(oneTopic));
+      const key = h.keyOf("c", "t");
+      const ask = Inbox.ask({ ...key, text: " Why? " }).pipe(Effect.provide(askLayer(h)));
+      expect(yield* Effect.flip(ask)).toMatchObject({ status: 400 });
+      expect(h.sent).toEqual([]);
+
+      const dir = yield* linkThread(h, key, "thread-1", 1);
+      yield* ask;
+      expect(h.sent).toHaveLength(1);
+      expect(h.sent[0]).toMatchObject({ threadId: "thread-1", projectId: "p", mode: "queue" });
+      expect(h.sent[0]!.text).toMatch(/^Why\?\n\n\(If the reply/);
+      expect(h.sent[0]!.text).toContain(`${dir}/draft.md`);
+    }),
+  );
+
+  it.effect("shows the questions asked after the delegation without the note sent with them", () =>
+    Effect.gen(function* () {
+      const h = yield* Effect.promise(() => harness(oneTopic));
+      const key = h.keyOf("c", "t");
+      yield* linkThread(h, key, "thread-1", 1);
+      yield* Inbox.ask({ ...key, text: "Why?" }).pipe(Effect.provide(askLayer(h)));
+      const message = (role: string, text: string, runId: string | null, minute: number) => ({
+        role,
+        text,
+        runId,
+        streaming: false,
+        createdAt: DateTime.makeUnsafe(at(minute)),
+      });
+      h.threadMessages.set("thread-1", [
+        message("user", "Delegated", "run-1", 1),
+        message("assistant", "Looked into it", "run-1", 2),
+        message("user", h.sent[0]!.text, "run-2", 3),
+        message("assistant", "Thinking", "run-2", 4),
+        message("assistant", "Because of the cache", "run-2", 5),
+        message("user", "And then?", null, 6),
+      ]);
+      const topic = yield* Inbox.readTopic(new URLSearchParams(key)).pipe(Effect.provide(h.layer));
+      expect(topic.followUps.map(({ role, text }) => [role, text])).toEqual([
+        ["user", "Why?"],
+        ["assistant", "Because of the cache"],
+        ["user", "And then?"],
+      ]);
     }),
   );
 });

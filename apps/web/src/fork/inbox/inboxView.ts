@@ -4,6 +4,7 @@ import type {
   InboxItem,
   InboxMessage,
   ItemState,
+  TopicDetail,
 } from "../types";
 import { formatSince, formatSpan } from "../presentation";
 
@@ -95,6 +96,15 @@ export function conversationRows(
     rows.push({ message, item, anchor, quote });
   }
   return rows;
+}
+
+/** What a reply in this topic answers, as the chat app will show it; none in a DM. */
+export function replyTargetOf(
+  detail: Pick<TopicDetail, "item" | "messages" | "conversation">,
+): string | null {
+  if (detail.conversation.kind === "dm") return null;
+  const root = detail.messages.find((message) => message.id === detail.item.rootMessageId);
+  return root ? quoteOf(root.author.name, root.text || (root.richSummary ?? "")) : null;
 }
 
 export interface ConversationPage {
