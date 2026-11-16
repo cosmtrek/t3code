@@ -10,8 +10,9 @@ import {
   ListFilterIcon,
   MessagesSquareIcon,
   PlugZapIcon,
+  XIcon,
 } from "lucide-react";
-import { useState, type CSSProperties, type ReactNode } from "react";
+import { useRef, useState, type CSSProperties, type ReactNode } from "react";
 
 import { WorkspacePageHeader } from "../../components/WorkspacePageHeader";
 import { RightPanelResizeHandle } from "../../components/preview/RightPanelResizeHandle";
@@ -49,6 +50,7 @@ import { useForkResource } from "../useForkResource";
 import { ConversationPane, nextReplyNonce, type ReplyRequest } from "./ConversationPane";
 import { DelegateDialog, type DelegateTarget } from "./DelegateDialog";
 import { DelegationPane } from "./DelegationPane";
+import { IconAction } from "./IconAction";
 import { ConversationList, DelegationList } from "./InboxList";
 import {
   INBOX_FILTERS,
@@ -66,6 +68,8 @@ import {
 import {
   copyDelegationContext,
   delegationPath,
+  discardDraft,
+  discardDrafts,
   markAllRead,
   markDelegationSeen,
   setConversationRead,
@@ -200,6 +204,7 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
   const [delegationId, setDelegationId] = useState<string | null>(null);
   const [delegating, setDelegating] = useState<DelegateTarget | null>(null);
   const [replyRequest, setReplyRequest] = useState<ReplyRequest | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   // Reads sent but not yet read back, shown at once so the list answers the click.
   const [pendingReads, setPendingReads] = useState<
     ReadonlyMap<string, { readonly read: boolean; readonly token: symbol }>
@@ -279,6 +284,12 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
     setDelegationId(target.id);
     void seeDelegation(target);
   };
+  const onDiscardDrafts = async (target: InboxConversation) => {
+    const drafted = delegations.filter(
+      (candidate) => candidate.conversationId === target.id && candidate.hasDraft,
+    );
+    if (await discardDrafts(environmentId, drafted)) await listing.refresh();
+  };
   const onMarkAllRead = async () => {
     if (await markAllRead(environmentId, channel.id, conversations, delegations)) {
       await listing.refresh();
@@ -315,6 +326,7 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
       <DelegationList
         environmentId={environmentId}
         delegations={visibleDelegations}
+        kindOf={kindOf}
         selectedId={delegationId}
         onSelect={selectDelegation}
       />
@@ -328,6 +340,7 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
         handlers={{
           onSelect: selectConversation,
           onSetRead: (target, read) => void onSetRead(target, read),
+          onDiscardDrafts: (target) => void onDiscardDrafts(target),
         }}
       />
     );
@@ -384,7 +397,7 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
         )}
       </div>
 
-      <div className="@container/inbox flex min-h-0 flex-1">
+      <div ref={containerRef} className="@container/inbox flex min-h-0 flex-1">
         <section
           aria-label={view === "agent" ? "Delegations" : "Conversations"}
           className={cn(
@@ -417,17 +430,14 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
                 );
               })}
             </ToggleGroup>
-            <Button
-              size="icon-xs"
-              variant="ghost-muted"
+            <IconAction
+              label="Mark all as read"
               className="ms-auto"
-              aria-label="Mark all as read"
-              title="Mark all as read"
               disabled={!anyUnread}
               onClick={() => void onMarkAllRead()}
             >
               <CheckCheckIcon />
-            </Button>
+            </IconAction>
             <Menu>
               <MenuTrigger render={<Button size="xs" variant="ghost-muted" aria-label="Filters" />}>
                 <ListFilterIcon />
@@ -474,6 +484,8 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
             delegations={delegations.filter(
               (candidate) => candidate.conversationId === conversation.id,
             )}
+            selectedDelegationId={delegationId}
+            onCloseDelegation={() => setDelegationId(null)}
             focusMessageId={delegation?.anchorMessageId ?? null}
             readOnly={readOnly}
             capabilities={channel.capabilities}
@@ -487,6 +499,7 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
                 setDelegationId(null);
               },
               onSetRead: (target, read) => void onSetRead(target, read),
+              onDiscardDrafts: (target) => void onDiscardDrafts(target),
               onSelectDelegation: selectDelegation,
               onDelegate: (message, later) =>
                 setDelegating({
@@ -536,12 +549,16 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
                 <ArrowLeftIcon />
               </Button>
               <span className="min-w-0 flex-1 truncate px-1 text-xs font-medium">
+                {delegation.conversationName ? (
+                  <span className="text-muted-foreground @5xl/inbox:hidden">
+                    {delegation.conversationName} ·{" "}
+                  </span>
+                ) : null}
                 {delegation.thread?.title ?? delegation.preview ?? "Delegation"}
               </span>
               {delegation.thread && delegation.thread.status !== "deleted" ? (
-                <Button
-                  size="xs"
-                  variant="outline"
+                <IconAction
+                  label="Open thread"
                   onClick={() =>
                     void navigate({
                       to: "/$environmentId/$threadId",
@@ -553,8 +570,7 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
                   }
                 >
                   <ExternalLinkIcon />
-                  Thread
-                </Button>
+                </IconAction>
               ) : null}
               {detail.data && detail.data.delegation.id === delegation.id ? (
                 <DelegationActions
@@ -563,12 +579,22 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
                   onDelegateAgain={(target) => setDelegating(target)}
                 />
               ) : null}
+              <span className="hidden @5xl/inbox:inline-flex">
+                <IconAction label="Close delegation" onClick={() => setDelegationId(null)}>
+                  <XIcon />
+                </IconAction>
+              </span>
             </div>
             {detail.data && detail.data.delegation.id === delegation.id ? (
               <DelegationPane
                 environmentId={environmentId}
                 detail={detail.data}
                 sendingOff={readOnly}
+                onDiscardDraft={(draftText) =>
+                  void discardDraft(environmentId, delegation, draftText).then(async (ok) => {
+                    if (ok) await Promise.all([detail.refresh(), listing.refresh()]);
+                  })
+                }
                 onUseDraft={(text) => {
                   const data = detail.data!;
                   const anchor = data.messages.find(
@@ -586,7 +612,7 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
                     draft: { text, delegationId: delegation.id },
                   });
                   // On a narrow screen the reply box is in the conversation.
-                  setDelegationId(null);
+                  if ((containerRef.current?.clientWidth ?? 0) < 1024) setDelegationId(null);
                 }}
               />
             ) : detail.error ? (
@@ -628,20 +654,11 @@ function DelegationActions({
   );
   return (
     <>
-      <Button
-        size="icon-xs"
-        variant="ghost-muted"
-        aria-label="Copy the messages"
-        title="Copy the messages"
-        onClick={() => void copyDelegationContext(detail)}
-      >
+      <IconAction label="Copy the messages" onClick={() => void copyDelegationContext(detail)}>
         <CopyIcon />
-      </Button>
-      <Button
-        size="icon-xs"
-        variant="ghost-muted"
-        aria-label="Delegate again"
-        title="Delegate again"
+      </IconAction>
+      <IconAction
+        label="Delegate again"
         disabled={readOnly || anchor === undefined}
         onClick={() =>
           anchor &&
@@ -655,7 +672,7 @@ function DelegationActions({
         }
       >
         <BotIcon />
-      </Button>
+      </IconAction>
     </>
   );
 }

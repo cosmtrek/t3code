@@ -104,39 +104,41 @@ export function useForkResource<T>(
             { ...current, error: hasData ? current.error : null, loading: true }
           : { key, data: null, error: null, loading: true },
       );
-      try {
-        const data = await forkRequest<T>(environmentId, path, { signal: controller.signal });
-        if (controller.signal.aborted) return;
-        hasData = true;
-        failures = 0;
-        setState({ key, data, error: null, loading: false });
-      } catch (raw) {
-        if (controller.signal.aborted) return;
-        const error = asForkError(raw);
-        const delay = hasData || !isRetryable(error) ? undefined : FIRST_READ_RETRY_MS[failures];
-        if (delay !== undefined) {
-          failures += 1;
-          // A refresh asked for meanwhile runs right away instead.
-          if (!again) {
-            retry = setTimeout(() => {
-              retry = null;
-              void run();
-            }, delay);
+      const outcome = await forkRequest<T>(environmentId, path, { signal: controller.signal }).then(
+        (data) => ({ ok: true as const, data }),
+        (raw: unknown) => ({ ok: false as const, raw }),
+      );
+      if (!controller.signal.aborted) {
+        if (outcome.ok) {
+          hasData = true;
+          failures = 0;
+          setState({ key, data: outcome.data, error: null, loading: false });
+        } else {
+          const error = asForkError(outcome.raw);
+          const delay = hasData || !isRetryable(error) ? undefined : FIRST_READ_RETRY_MS[failures];
+          if (delay !== undefined) {
+            failures += 1;
+            // A refresh asked for meanwhile runs right away instead.
+            if (!again) {
+              retry = setTimeout(() => {
+                retry = null;
+                void run();
+              }, delay);
+            }
+          } else {
+            // A failed refresh keeps what was shown, so a blip does not blank the view.
+            setState((current) => ({
+              key,
+              data: current.key === key ? current.data : null,
+              error,
+              loading: false,
+            }));
           }
-          return;
         }
-        // A failed refresh keeps what was shown, so a blip does not blank the view.
-        setState((current) => ({
-          key,
-          data: current.key === key ? current.data : null,
-          error,
-          loading: false,
-        }));
-      } finally {
-        running = false;
-        for (const done of owned) done();
-        if (again && !controller.signal.aborted) void run();
       }
+      running = false;
+      for (const done of owned) done();
+      if (again && !controller.signal.aborted) void run();
     };
 
     const requestRead = (done?: () => void) => {

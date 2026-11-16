@@ -1,12 +1,12 @@
 import type { EnvironmentId } from "@t3tools/contracts";
 import {
   ArrowLeftIcon,
+  BellOffIcon,
   BotIcon,
   ChevronRightIcon,
   ExternalLinkIcon,
   PaperclipIcon,
   ReplyIcon,
-  SendIcon,
   XIcon,
 } from "lucide-react";
 import { Fragment, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
@@ -14,6 +14,7 @@ import { flushSync } from "react-dom";
 
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
+import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../../components/ui/menu";
 import { Textarea } from "../../components/ui/textarea";
 import { toastManager } from "../../components/ui/toast";
 import { observeResize } from "../../lib/observeResize";
@@ -30,17 +31,23 @@ import type {
 } from "../types";
 import { useForkResource, type ForkRefreshFilter } from "../useForkResource";
 import { ThreadStatus } from "./DelegationPane";
-import { ConversationMenu } from "./InboxList";
+import { IconAction } from "./IconAction";
+import { AgentBadge, ConversationMenu, DelegationOutcome } from "./InboxList";
 import {
+  agentSignalsFor,
   conversationRows,
+  delegationPreview,
   mentionablePeople,
   mentionsIn,
   mentionSuggestions,
   mergeConversationPages,
   nameOrUnknown,
   quoteOfMessage,
+  replyLine,
   skippedNotice,
+  topicsOf,
   type ConversationRow,
+  type Topic,
   type OlderPages,
 } from "./inboxView";
 import { MessageView } from "./MessageView";
@@ -49,6 +56,7 @@ import { loadReply, replyDraftKey, saveReply } from "./replyDrafts";
 export interface ConversationPaneHandlers {
   readonly onBack: () => void;
   readonly onSetRead: (conversation: InboxConversation, read: boolean) => void;
+  readonly onDiscardDrafts: (conversation: InboxConversation) => void;
   readonly onSelectDelegation: (delegation: InboxDelegation) => void;
   /** Delegate starting at `message`; `later` is what the chat shows after it. */
   readonly onDelegate: (message: InboxMessage, later: ReadonlyArray<InboxMessage>) => void;
@@ -84,6 +92,9 @@ let replyNonce = 0;
 /** Orders requests from the page and from the chat's own toolbar; the newest wins. */
 export const nextReplyNonce = () => ++replyNonce;
 
+/** Replies a folded topic shows under its post, as the chat app does. */
+const FOLDED_REPLIES = 2;
+
 /** Older messages load once the reader scrolls this close to the top. */
 const LOAD_OLDER_PX = 200;
 const AT_BOTTOM_PX = 24;
@@ -98,6 +109,8 @@ export function ConversationPane({
   environmentId,
   conversation,
   delegations,
+  selectedDelegationId,
+  onCloseDelegation,
   focusMessageId,
   readOnly,
   capabilities,
@@ -109,6 +122,8 @@ export function ConversationPane({
   readonly environmentId: EnvironmentId;
   readonly conversation: InboxConversation;
   readonly delegations: ReadonlyArray<InboxDelegation>;
+  readonly selectedDelegationId: string | null;
+  readonly onCloseDelegation: () => void;
   /** The selected delegation's first message, scrolled to and marked. */
   readonly focusMessageId: string | null;
   readonly readOnly: boolean;
@@ -149,10 +164,26 @@ export function ConversationPane({
         >
           <ArrowLeftIcon />
         </Button>
-        <h2 className="min-w-0 flex-1 truncate px-1 text-xs font-medium">
-          {nameOrUnknown(conversation.name)}
-        </h2>
-        <ConversationMenu conversation={conversation} onSetRead={handlers.onSetRead} />
+        <div className="flex min-w-0 flex-1 items-center gap-1.5 px-1">
+          <h2 className="truncate text-xs font-medium">{nameOrUnknown(conversation.name)}</h2>
+          {conversation.muted ? (
+            <BellOffIcon className="size-3 shrink-0 text-muted-foreground/70" aria-label="Muted" />
+          ) : null}
+        </div>
+        <ConversationDelegationsControl
+          environmentId={environmentId}
+          conversation={conversation}
+          delegations={delegations}
+          selectedDelegationId={selectedDelegationId}
+          onSelect={handlers.onSelectDelegation}
+          onClose={onCloseDelegation}
+        />
+        <ConversationMenu
+          conversation={conversation}
+          drafts={delegations.filter((delegation) => delegation.hasDraft).length}
+          onSetRead={handlers.onSetRead}
+          onDiscardDrafts={handlers.onDiscardDrafts}
+        />
       </div>
       {shown ? (
         <ConversationMessages
@@ -179,6 +210,81 @@ export function ConversationPane({
         onEngage={handlers.onEngage}
       />
     </section>
+  );
+}
+
+function ConversationDelegationsControl({
+  environmentId,
+  conversation,
+  delegations,
+  selectedDelegationId,
+  onSelect,
+  onClose,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly conversation: InboxConversation;
+  readonly delegations: ReadonlyArray<InboxDelegation>;
+  readonly selectedDelegationId: string | null;
+  readonly onSelect: (delegation: InboxDelegation) => void;
+  readonly onClose: () => void;
+}) {
+  if (delegations.length === 0) return null;
+  const raw = agentSignalsFor(delegations);
+  const signals = raw.live > 0 ? raw : { ...raw, live: delegations.length };
+  const active = delegations.some((delegation) => delegation.id === selectedDelegationId);
+  const triggerClassName = cn(
+    "inline-flex shrink-0 cursor-pointer items-center rounded-md px-2 py-1 text-xs hover:bg-accent",
+    active && "bg-accent",
+  );
+  if (delegations.length === 1) {
+    const only = delegations[0]!;
+    return (
+      <button
+        type="button"
+        className={triggerClassName}
+        aria-pressed={selectedDelegationId === only.id}
+        onClick={() => (selectedDelegationId === only.id ? onClose() : onSelect(only))}
+      >
+        <AgentBadge signals={signals} />
+      </button>
+    );
+  }
+  return (
+    <Menu>
+      <MenuTrigger render={<button type="button" className={triggerClassName} />}>
+        <AgentBadge signals={signals} />
+      </MenuTrigger>
+      <MenuPopup align="end">
+        {delegations.map((delegation) => {
+          const live =
+            delegation.thread !== null && delegation.thread.detachedAt === null
+              ? delegation.thread
+              : null;
+          return (
+            <MenuItem key={delegation.id} onClick={() => onSelect(delegation)}>
+              <span className="flex w-full max-w-72 min-w-0 items-center gap-2">
+                <span className="min-w-0 flex-1 truncate">
+                  {delegationPreview(
+                    conversation.name,
+                    delegation.preview,
+                    delegation.thread?.title ?? null,
+                  )}
+                </span>
+                {live ? (
+                  <ThreadStatus
+                    environmentId={environmentId}
+                    thread={live}
+                    fallback={<DelegationOutcome delegation={delegation} />}
+                  />
+                ) : (
+                  <DelegationOutcome delegation={delegation} />
+                )}
+              </span>
+            </MenuItem>
+          );
+        })}
+      </MenuPopup>
+    </Menu>
   );
 }
 
@@ -314,17 +420,58 @@ function ConversationMessages({
     atBottom.current = isAtBottom(container);
   }, [focusMessageId, loaded, focusShown]);
 
+  const toolbarFor = (row: ConversationRow, later: ReadonlyArray<ConversationRow>) => (
+    <MessageToolbar
+      message={row.message}
+      readOnly={readOnly}
+      onReply={() => onReply(row.message)}
+      onDelegate={() =>
+        handlers.onDelegate(
+          row.message,
+          later.map((next) => next.message),
+        )
+      }
+    />
+  );
+  const chipsFor = (row: ConversationRow) =>
+    row.delegations.length > 0 ? (
+      <span className="flex flex-wrap items-center gap-2 text-xs">
+        {row.delegations.map((delegation) => (
+          <DelegationChip
+            key={delegation.id}
+            environmentId={environmentId}
+            delegation={delegation}
+            onSelect={handlers.onSelectDelegation}
+          />
+        ))}
+      </span>
+    ) : null;
+  const focusRing = (row: ConversationRow) =>
+    row.message.id === focusMessageId && "bg-accent/40 ring-1 ring-primary/40";
+  const isOpen = (id: string, replies: ReadonlyArray<ConversationRow>) => {
+    const holdsFocus = replies.some((reply) => reply.message.id === focusMessageId);
+    // A thread opens by itself for the message a delegation points at.
+    return toggledThreads.has(id) ? !holdsFocus : holdsFocus;
+  };
+  const toggle = (id: string) =>
+    setToggledThreads((current) => {
+      const next = new Set(current);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
+
   const item = (
     row: ConversationRow,
     previous: ConversationRow | undefined,
     later: ReadonlyArray<ConversationRow>,
+    rootId: string | null = null,
   ) => (
     <li
       key={row.message.id}
       data-message-id={row.message.id}
       className={cn(
-        "group relative flex min-w-0 scroll-mt-4 flex-col rounded-lg px-1 py-1",
-        row.message.id === focusMessageId && "bg-accent/40 ring-1 ring-primary/40",
+        "group/message relative flex min-w-0 scroll-mt-4 flex-col rounded-lg px-1 py-1",
+        focusRing(row),
       )}
     >
       <MessageView
@@ -332,34 +479,107 @@ function ConversationMessages({
         channelId={conversation.channelId}
         message={row.message}
         showAuthor={previous?.message.author.id !== row.message.author.id}
-        quote={row.quote}
+        // Under its root, a reply to the root itself needs no quote.
+        quote={rootId !== null && row.message.replyTo?.id === rootId ? null : row.quote}
+        toolbar={toolbarFor(row, later)}
       >
-        {row.delegations.length > 0 ? (
-          <span className="flex flex-wrap items-center gap-2 text-xs">
-            {row.delegations.map((delegation) => (
-              <DelegationChip
-                key={delegation.id}
-                environmentId={environmentId}
-                delegation={delegation}
-                onSelect={handlers.onSelectDelegation}
-              />
-            ))}
-          </span>
-        ) : null}
+        {chipsFor(row)}
       </MessageView>
-      <MessageToolbar
-        message={row.message}
-        readOnly={readOnly}
-        onReply={() => onReply(row.message)}
-        onDelegate={() =>
-          handlers.onDelegate(
-            row.message,
-            later.map((next) => next.message),
-          )
-        }
-      />
     </li>
   );
+
+  /** A topic group's message: the post, or a reply inside it, with its actions at its corner. */
+  const postBlock = (
+    row: ConversationRow,
+    later: ReadonlyArray<ConversationRow>,
+    rootId: string | null,
+  ) => (
+    <div
+      key={row.message.id}
+      data-message-id={row.message.id}
+      className={cn(
+        "group/message relative flex min-w-0 scroll-mt-4 flex-col rounded-md",
+        focusRing(row),
+      )}
+    >
+      <MessageView
+        layout="post"
+        environmentId={environmentId}
+        channelId={conversation.channelId}
+        message={row.message}
+        showAuthor
+        // Inside a topic, a reply to the topic itself needs no quote.
+        quote={row.message.replyTo?.id === rootId ? null : row.quote}
+      >
+        {chipsFor(row)}
+      </MessageView>
+      <div className="absolute -top-1.5 end-0 z-10">{toolbarFor(row, later)}</div>
+    </div>
+  );
+
+  /** A topic as the chat app shows it: the post, then its newest replies until opened. */
+  const topic = ({ id, post, heading, replies }: Topic) => {
+    const open = isOpen(id, replies);
+    const folded = replies.slice(-FOLDED_REPLIES);
+    const earlier = replies.length - folded.length;
+    return (
+      <li key={id} className="flex min-w-0 flex-col gap-2 rounded-lg border border-border/60 p-3">
+        {post ? (
+          postBlock(post, replies, null)
+        ) : (
+          <p className="truncate text-xs text-muted-foreground">{heading ?? "An earlier topic"}</p>
+        )}
+        {replies.length > 0 ? (
+          <div className="flex min-w-0 flex-col gap-1 rounded-md bg-muted px-3 py-2">
+            {open ? (
+              <>
+                <button
+                  type="button"
+                  aria-expanded
+                  className="self-start text-xs text-muted-foreground hover:text-foreground"
+                  onClick={() => toggle(id)}
+                >
+                  Hide replies
+                </button>
+                <div className="flex min-w-0 flex-col gap-3 pt-1">
+                  {replies.map((reply, at) => postBlock(reply, replies.slice(at + 1), id))}
+                </div>
+              </>
+            ) : (
+              <>
+                {earlier > 0 ? (
+                  <button
+                    type="button"
+                    aria-expanded={false}
+                    className="self-start text-xs text-muted-foreground hover:text-foreground"
+                    onClick={() => toggle(id)}
+                  >
+                    {earlier} earlier {earlier === 1 ? "reply" : "replies"}
+                    {replies.slice(0, earlier).some((reply) => reply.message.mentionsSelf) ? (
+                      <span className="text-warning"> · mentions you</span>
+                    ) : null}
+                  </button>
+                ) : null}
+                {folded.map((reply) => (
+                  <button
+                    key={reply.message.id}
+                    type="button"
+                    className={cn(
+                      "min-w-0 truncate text-left text-sm text-foreground/90 hover:text-foreground",
+                      reply.message.mentionsSelf && "text-warning",
+                    )}
+                    onClick={() => toggle(id)}
+                  >
+                    {replyLine(reply.message)}
+                  </button>
+                ))}
+              </>
+            )}
+          </div>
+        ) : null}
+      </li>
+    );
+  };
 
   if (merged === null) {
     return (
@@ -403,50 +623,46 @@ function ConversationMessages({
       {newest.data && skippedNotice(newest.data.skipped) ? (
         <p className="px-4 pt-3 text-xs text-warning">{skippedNotice(newest.data.skipped)}</p>
       ) : null}
-      <ol className="flex flex-col gap-3 px-3 py-3">
-        {rows.map((row, index) => {
-          const holdsFocus = row.thread.some((reply) => reply.message.id === focusMessageId);
-          // A thread opens by itself for the message a delegation points at.
-          const open = toggledThreads.has(row.message.id) ? !holdsFocus : holdsFocus;
-          const replies = row.thread.length;
-          return (
-            <Fragment key={row.message.id}>
-              {item(row, rows[index - 1], rows.slice(index + 1))}
-              {replies > 0 ? (
-                <li className="flex min-w-0 flex-col gap-2 ps-3">
-                  <span>
-                    <Button
-                      size="xs"
-                      variant="ghost-muted"
-                      aria-expanded={open}
-                      onClick={() =>
-                        setToggledThreads((current) => {
-                          const next = new Set(current);
-                          if (!next.delete(row.message.id)) next.add(row.message.id);
-                          return next;
-                        })
-                      }
-                    >
-                      <ChevronRightIcon className={cn(open && "rotate-90")} />
-                      {replies} {replies === 1 ? "reply" : "replies"} in thread
-                      {row.thread.some((reply) => reply.message.mentionsSelf)
-                        ? " · mentions you"
-                        : ""}
-                    </Button>
-                  </span>
-                  {open ? (
-                    <ol className="flex flex-col gap-3 border-s border-border/70 ps-2">
-                      {row.thread.map((reply, at) =>
-                        item(reply, row.thread[at - 1] ?? row, row.thread.slice(at + 1)),
-                      )}
-                    </ol>
-                  ) : null}
-                </li>
-              ) : null}
-            </Fragment>
-          );
-        })}
-      </ol>
+      {conversation.kind === "topic_group" ? (
+        <ol className="flex flex-col gap-3 px-3 py-3">{topicsOf(rows).map(topic)}</ol>
+      ) : (
+        <ol className="flex flex-col gap-3 px-3 py-3">
+          {rows.map((row, index) => {
+            const open = isOpen(row.message.id, row.thread);
+            const replies = row.thread.length;
+            return (
+              <Fragment key={row.message.id}>
+                {item(row, rows[index - 1], rows.slice(index + 1))}
+                {replies > 0 ? (
+                  <li className="flex min-w-0 flex-col gap-2 ps-1">
+                    <span>
+                      <Button
+                        size="xs"
+                        variant="ghost-muted"
+                        aria-expanded={open}
+                        onClick={() => toggle(row.message.id)}
+                      >
+                        <ChevronRightIcon className={cn(open && "rotate-90")} />
+                        {replies} {replies === 1 ? "reply" : "replies"} in thread
+                        {row.thread.some((reply) => reply.message.mentionsSelf)
+                          ? " · mentions you"
+                          : ""}
+                      </Button>
+                    </span>
+                    {open ? (
+                      <ol className="ms-2 flex flex-col gap-3 border-s border-border/70 ps-2">
+                        {row.thread.map((reply, at) =>
+                          item(reply, row.thread[at - 1], row.thread.slice(at + 1), row.message.id),
+                        )}
+                      </ol>
+                    ) : null}
+                  </li>
+                ) : null}
+              </Fragment>
+            );
+          })}
+        </ol>
+      )}
     </div>
   );
 }
@@ -470,11 +686,14 @@ function DelegationChip({
     >
       <BotIcon className={cn("size-3", delegation.agentUnseen && "text-primary")} />
       {live ? (
-        <ThreadStatus environmentId={environmentId} thread={live} />
+        <ThreadStatus
+          environmentId={environmentId}
+          thread={live}
+          fallback={<DelegationOutcome delegation={delegation} idle="Delegated" />}
+        />
       ) : (
-        <span className="text-muted-foreground">Delegated</span>
+        <DelegationOutcome delegation={delegation} idle="Delegated" />
       )}
-      {delegation.hasDraft ? <span className="text-success">Draft</span> : null}
     </button>
   );
 }
@@ -491,34 +710,20 @@ function MessageToolbar({
   readonly onDelegate: () => void;
 }) {
   return (
-    <div className="absolute -top-3 right-2 z-10 hidden gap-0.5 rounded-md border bg-popover p-0.5 shadow-sm group-focus-within:flex group-hover:flex">
-      <Button
-        size="icon-xs"
-        variant="ghost"
-        aria-label="Reply"
-        disabled={readOnly}
-        onClick={onReply}
-      >
+    <div className="hidden gap-0.5 rounded-md border bg-popover p-0.5 shadow-sm group-focus-within/message:flex group-hover/message:flex">
+      <IconAction label="Reply" disabled={readOnly} onClick={onReply}>
         <ReplyIcon />
-      </Button>
-      <Button
-        size="icon-xs"
-        variant="ghost"
-        aria-label="Delegate"
-        disabled={readOnly}
-        onClick={onDelegate}
-      >
+      </IconAction>
+      <IconAction label="Delegate" disabled={readOnly} onClick={onDelegate}>
         <BotIcon />
-      </Button>
+      </IconAction>
       {message.openUrl ? (
-        <Button
-          size="icon-xs"
-          variant="ghost"
-          aria-label="Open in app"
+        <IconAction
+          label="Open in app"
           render={<a href={message.openUrl} target="_blank" rel="noreferrer noopener" />}
         >
           <ExternalLinkIcon />
-        </Button>
+        </IconAction>
       ) : null}
     </div>
   );
@@ -571,6 +776,10 @@ function Composer({
     }
   }
   const fromDraft = draft !== null && text === draft.text;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- moves DOM focus into the reply box when the user picks a message or draft to answer
+  useEffect(() => {
+    if (applied !== null) textareaRef.current?.focus();
+  }, [applied]);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- mirrors the reply into browser storage
   useEffect(() => {
     saveReply(storageKey, { text, replyTo, draft });
@@ -714,7 +923,7 @@ function Composer({
           {replyTo !== null ? (
             <>
               <p className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
-                In the reply thread of {replyTo.quote}
+                Replying to {replyTo.quote}
               </p>
               <Button
                 type="button"
@@ -811,16 +1020,16 @@ function Composer({
           <span className="flex-1" />
         )}
         {canMarkdown ? (
-          <Button
+          <IconAction
             type="button"
-            size="xs"
+            label="Send as Markdown"
             variant={markdown ? "outline" : "ghost-muted"}
             aria-pressed={markdown}
             disabled={disabled}
             onClick={() => setMarkdown(!markdown)}
           >
-            Markdown
-          </Button>
+            <MarkdownIcon />
+          </IconAction>
         ) : null}
         {canAttach ? (
           <>
@@ -835,16 +1044,14 @@ function Composer({
                 event.target.value = "";
               }}
             />
-            <Button
+            <IconAction
               type="button"
-              size="icon-xs"
-              variant="ghost"
-              aria-label="Attach files"
+              label="Attach files"
               disabled={disabled || files.length >= MAX_ATTACHMENTS}
               onClick={() => fileInputRef.current?.click()}
             >
               <PaperclipIcon />
-            </Button>
+            </IconAction>
           </>
         ) : null}
         <Button
@@ -854,10 +1061,29 @@ function Composer({
             disabled || sending || uploading || (text.trim().length === 0 && files.length === 0)
           }
         >
-          <SendIcon />
           {sending ? "Sending…" : "Send"}
         </Button>
       </div>
     </form>
+  );
+}
+
+/** The Markdown mark, drawn like the lucide icons around it; lucide has none. */
+function MarkdownIcon() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="2" y="5" width="20" height="14" rx="2" />
+      <path d="M6 15V9l3 3 3-3v6" />
+      <path d="M17 9v6m-2-2 2 2 2-2" />
+    </svg>
   );
 }

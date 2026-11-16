@@ -92,3 +92,42 @@ export async function copyDelegationContext(detail: DelegationDetail) {
     fail("Could not copy the messages", error);
   }
 }
+
+/** Discards the draft the user saw; one the thread rewrote meanwhile stays. */
+export async function discardDraft(
+  environmentId: EnvironmentId,
+  delegation: Pick<InboxDelegation, "id" | "channelId">,
+  draft: string,
+): Promise<boolean> {
+  try {
+    await forkRequest(environmentId, "/inbox/discard-draft", {
+      method: "POST",
+      body: { channelId: delegation.channelId, delegationId: delegation.id, draft },
+    });
+    return true;
+  } catch (error) {
+    fail("Could not discard the draft", error);
+    return false;
+  }
+}
+
+/** Discards each delegation's draft as it reads now, from a list that does not hold the text. */
+export async function discardDrafts(
+  environmentId: EnvironmentId,
+  delegations: ReadonlyArray<InboxDelegation>,
+): Promise<boolean> {
+  let changed = false;
+  for (const delegation of delegations) {
+    const detail = await forkRequest<DelegationDetail>(
+      environmentId,
+      delegationPath(delegation.channelId, delegation.id),
+    ).catch((error: unknown) => {
+      fail("Could not discard the draft", error);
+      return null;
+    });
+    if (detail?.draft != null && (await discardDraft(environmentId, delegation, detail.draft))) {
+      changed = true;
+    }
+  }
+  return changed;
+}

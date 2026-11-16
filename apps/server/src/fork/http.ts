@@ -289,6 +289,12 @@ const routes = (runtime: InboxRuntimeShape) => {
     ),
     route(
       "POST",
+      `${INBOX}/discard-draft`,
+      AuthOrchestrationOperateScope,
+      body.pipe(Effect.flatMap(Inbox.discardDraft)),
+    ),
+    route(
+      "POST",
       `${INBOX}/upload`,
       AuthOrchestrationOperateScope,
       Effect.all([query, fileBody]).pipe(

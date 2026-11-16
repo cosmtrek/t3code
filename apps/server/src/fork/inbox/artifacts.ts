@@ -235,6 +235,20 @@ export async function recordSent(input: {
   return source;
 }
 
+/**
+ * Sets the draft aside as `draft.<stamp>.discarded.md`, only while it is still the one the user
+ * saw; a draft the thread rewrote since stays.
+ */
+export async function discardDraft(dir: string, shown: string, at: string): Promise<boolean> {
+  const draftPath = NodePath.join(dir, DRAFT_FILE);
+  if (meaningful(await readText(draftPath)) !== shown.trim()) return false;
+  await NodeFSP.rename(
+    draftPath,
+    NodePath.join(dir, `draft.${at.replace(/[:.]/g, "-")}.discarded.md`),
+  );
+  return true;
+}
+
 export interface SentRecord {
   readonly sentAt: string;
   readonly source: SentSource;

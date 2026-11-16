@@ -1,6 +1,6 @@
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { ThreadId, type EnvironmentId } from "@t3tools/contracts";
-import { ChevronDownIcon, CornerDownLeftIcon } from "lucide-react";
+import { ChevronDownIcon } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
 import ChatMarkdown from "../../components/ChatMarkdown";
@@ -10,15 +10,15 @@ import { Textarea } from "../../components/ui/textarea";
 import { cn } from "../../lib/utils";
 import { useThreadShell } from "../../state/entities";
 import { forkRequest } from "../forkApiAccess";
-import { formatTimestamp } from "../presentation";
+import { useFormatTimestamp } from "../presentation";
 import type { DelegationDetail, FollowUp, LinkedThread } from "../types";
-import { quoteOfMessage, skippedNotice } from "./inboxView";
+import { authorsSummary, skippedNotice } from "./inboxView";
 import { MessageView } from "./MessageView";
 
 /** The sidebar's words, for when the thread is not in this client's sidebar state. */
 const THREAD_STATUS_LABELS: Readonly<Record<LinkedThread["status"], string | null>> = {
   running: "Working",
-  idle: "Done",
+  idle: null,
   archived: "Archived",
   deleted: "Thread deleted",
   unknown: null,
@@ -33,12 +33,14 @@ export function DelegationPane({
   detail,
   sendingOff,
   onUseDraft,
+  onDiscardDraft,
 }: {
   readonly environmentId: EnvironmentId;
   readonly detail: DelegationDetail;
   readonly sendingOff: boolean;
   /** Puts the draft into the conversation's reply box. */
   readonly onUseDraft: (text: string) => void;
+  readonly onDiscardDraft: (draft: string) => void;
 }) {
   const thread = detail.delegation.thread;
   const live = thread !== null && thread.status !== "deleted" ? thread : null;
@@ -48,9 +50,10 @@ export function DelegationPane({
   const cwd = shell?.worktreePath ?? undefined;
   const canAsk = live !== null && live.status !== "archived" && !detail.conclusionIsHistorical;
   const draft = detail.draft?.trim() ?? "";
+  const formatTimestamp = useFormatTimestamp();
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto overscroll-contain px-4 py-3">
+      <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto overscroll-contain px-4 py-3">
         <SourceMessages environmentId={environmentId} detail={detail} />
 
         <Section
@@ -77,31 +80,24 @@ export function DelegationPane({
           )}
         </Section>
 
-        {detail.followUps.length > 0 ? (
-          <Section title="With the agent">
-            <ol className="flex flex-col gap-3">
-              {detail.followUps.map((entry) => (
-                <li key={`${entry.role}:${entry.at}`} className="flex min-w-0 flex-col gap-0.5">
-                  <FollowUpEntry entry={entry} cwd={cwd} />
-                </li>
-              ))}
-            </ol>
-          </Section>
-        ) : null}
-
         {draft.length > 0 ? (
           <Section title="Draft reply">
-            <p className="text-sm whitespace-pre-wrap wrap-anywhere">{draft}</p>
-            <Button
-              size="xs"
-              variant="outline"
-              className="self-start"
-              disabled={sendingOff || !detail.canSend}
-              onClick={() => onUseDraft(draft)}
-            >
-              <CornerDownLeftIcon />
-              Use in reply
-            </Button>
+            <div className="flex flex-col gap-2.5 rounded-lg border border-border/70 bg-muted/40 p-3">
+              <p className="text-sm whitespace-pre-wrap wrap-anywhere">{draft}</p>
+              <div className="flex gap-2">
+                <Button
+                  size="xs"
+                  variant="outline"
+                  disabled={sendingOff || !detail.canSend}
+                  onClick={() => onUseDraft(draft)}
+                >
+                  Use in reply
+                </Button>
+                <Button size="xs" variant="ghost-muted" onClick={() => onDiscardDraft(draft)}>
+                  Discard
+                </Button>
+              </div>
+            </div>
           </Section>
         ) : null}
 
@@ -117,6 +113,18 @@ export function DelegationPane({
                   <p className="line-clamp-3 text-sm whitespace-pre-wrap wrap-anywhere text-foreground/80">
                     {reply.text}
                   </p>
+                </li>
+              ))}
+            </ol>
+          </Section>
+        ) : null}
+
+        {detail.followUps.length > 0 ? (
+          <Section title="With the agent">
+            <ol className="flex flex-col gap-3">
+              {detail.followUps.map((entry) => (
+                <li key={`${entry.role}:${entry.at}`} className="flex min-w-0 flex-col gap-0.5">
+                  <FollowUpEntry entry={entry} cwd={cwd} />
                 </li>
               ))}
             </ol>
@@ -140,7 +148,7 @@ function Section({
   readonly children: ReactNode;
 }) {
   return (
-    <section className="flex min-w-0 flex-col gap-2">
+    <section className="flex min-w-0 flex-col gap-2 border-t border-border/60 pt-3.5">
       <header className="flex min-w-0 items-center gap-2">
         <h3 className="min-w-0 flex-1 truncate text-xs font-medium text-muted-foreground">
           {title}
@@ -152,7 +160,7 @@ function Section({
   );
 }
 
-/** The delegated messages, folded to their first line: once delegated, the findings matter more. */
+/** The delegated messages, folded to their authors: once delegated, the findings matter more. */
 function SourceMessages({
   environmentId,
   detail,
@@ -161,7 +169,7 @@ function SourceMessages({
   readonly detail: DelegationDetail;
 }) {
   const [open, setOpen] = useState(false);
-  const first = detail.messages[0];
+  const authors = authorsSummary(detail.messages);
   const count = detail.messages.length;
   const notices = [
     detail.complete
@@ -185,9 +193,7 @@ function SourceMessages({
           <span className="shrink-0 font-medium">
             {count === 1 ? "1 message" : `${count} messages`}
           </span>
-          {first && !open ? (
-            <span className="min-w-0 truncate">{quoteOfMessage(first)}</span>
-          ) : null}
+          {authors !== null && !open ? <span className="min-w-0 truncate">· {authors}</span> : null}
         </button>
       )}
       {notices.map((notice) => (
@@ -196,18 +202,20 @@ function SourceMessages({
         </p>
       ))}
       {open ? (
-        <ol className="flex flex-col gap-3">
-          {detail.messages.map((message, index) => (
-            <li key={message.id} className="flex min-w-0 flex-col">
-              <MessageView
-                environmentId={environmentId}
-                channelId={detail.delegation.channelId}
-                message={message}
-                showAuthor={detail.messages[index - 1]?.author.id !== message.author.id}
-              />
-            </li>
-          ))}
-        </ol>
+        <div className="rounded-lg border border-border/60 bg-muted/30 p-3">
+          <ol className="flex flex-col gap-3">
+            {detail.messages.map((message, index) => (
+              <li key={message.id} className="flex min-w-0 flex-col">
+                <MessageView
+                  environmentId={environmentId}
+                  channelId={detail.delegation.channelId}
+                  message={message}
+                  showAuthor={detail.messages[index - 1]?.author.id !== message.author.id}
+                />
+              </li>
+            ))}
+          </ol>
+        </div>
       ) : null}
     </section>
   );
@@ -221,22 +229,23 @@ function FollowUpEntry({
   readonly cwd: string | undefined;
 }) {
   if (entry.role === "assistant") {
-    return (
-      <>
-        <span className="text-xs font-medium text-muted-foreground">Agent</span>
-        <ChatMarkdown text={entry.text} cwd={cwd} headingLevelOffset={3} className="text-sm" />
-      </>
-    );
+    return <ChatMarkdown text={entry.text} cwd={cwd} headingLevelOffset={3} className="text-sm" />;
   }
   return (
-    <>
-      <span className="text-xs font-medium text-muted-foreground">
-        {entry.kind === "draft" ? "You asked for a reply" : "You"}
-      </span>
-      {entry.text.length > 0 ? (
+    <div className="flex max-w-[90%] flex-col gap-0.5 self-end rounded-2xl rounded-tr-sm bg-muted px-3 py-2">
+      {entry.kind === "draft" ? (
+        entry.text.length > 0 ? (
+          <>
+            <span className="text-2xs font-medium text-muted-foreground">Draft reply</span>
+            <p className="text-sm whitespace-pre-wrap wrap-anywhere">{entry.text}</p>
+          </>
+        ) : (
+          <p className="text-sm text-muted-foreground">Draft a reply</p>
+        )
+      ) : (
         <p className="text-sm whitespace-pre-wrap wrap-anywhere">{entry.text}</p>
-      ) : null}
-    </>
+      )}
+    </div>
   );
 }
 
@@ -330,27 +339,30 @@ function AgentComposer({
   );
 }
 
-/** The thread's status as the sidebar shows it, live from this client's thread state. */
+/**
+ * The thread's status as the sidebar shows it, live from this client's thread state. A finished
+ * thread shows `fallback` instead: the inbox marks unseen results itself, so "Completed" is noise.
+ */
 export function ThreadStatus({
   environmentId,
   thread,
+  fallback = null,
 }: {
   readonly environmentId: EnvironmentId;
   readonly thread: LinkedThread;
+  readonly fallback?: ReactNode;
 }) {
   const shell = useThreadShell(scopeThreadRef(environmentId, ThreadId.make(thread.threadId)));
   const pill = shell ? resolveThreadStatusPill({ thread: shell }) : null;
-  const label = pill?.label ?? THREAD_STATUS_LABELS[thread.status];
-  if (label === null) return null;
-  return (
-    <span
-      className={cn(
-        "inline-flex shrink-0 items-center gap-1 text-xs",
-        pill?.colorClass ?? "text-muted-foreground",
-      )}
-    >
-      <span className={cn("size-1.5 rounded-full", pill?.dotClass ?? "bg-current opacity-60")} />
-      {label}
-    </span>
-  );
+  if (pill !== null && pill.label !== "Completed") {
+    return (
+      <span className={cn("inline-flex shrink-0 items-center gap-1 text-xs", pill.colorClass)}>
+        <span className={cn("size-1.5 rounded-full", pill.dotClass)} />
+        {pill.label}
+      </span>
+    );
+  }
+  const label = THREAD_STATUS_LABELS[thread.status];
+  if (label === null) return fallback;
+  return <span className="shrink-0 text-xs text-muted-foreground">{label}</span>;
 }

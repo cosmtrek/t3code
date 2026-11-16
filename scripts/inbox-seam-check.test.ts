@@ -17,6 +17,8 @@ const CHECKED_FILES = [
   "apps/web/src/components/Sidebar.logic.ts",
   "apps/web/src/state/entities.ts",
   "apps/web/src/timestampFormat.ts",
+  "apps/web/src/hooks/useNowMinute.ts",
+  "apps/web/package.json",
   "apps/server/src/auth/http.ts",
   "packages/contracts/src/orchestrationV2.ts",
   "packages/client-runtime/src/state/deviceHubAccess.ts",

@@ -4,7 +4,9 @@ import type { InboxConversation, InboxDelegation, InboxMessage } from "../types"
 import {
   agentSignalsByConversation,
   anchorOf,
+  authorsSummary,
   conversationRows,
+  delegationPreview,
   emptyViewTitle,
   inView,
   lastMessageLine,
@@ -13,7 +15,11 @@ import {
   mentionsIn,
   mergeConversationPages,
   minuteToMs,
+  matchesFilter,
   quoteOf,
+  replyLine,
+  shortLink,
+  topicsOf,
 } from "./inboxView";
 
 describe("emptyViewTitle", () => {
@@ -21,6 +27,7 @@ describe("emptyViewTitle", () => {
     ["unread", "all", "Nothing unread"],
     ["unread", "dm", "No unread DMs"],
     ["agent", "groups", "No delegations from groups"],
+    ["unread", "topics", "No unread topic groups"],
     ["all", "dm", "No DMs"],
   ] as const)("names an empty %s list filtered to %s", (view, filter, title) => {
     expect(emptyViewTitle(view, filter)).toBe(title);
@@ -138,6 +145,57 @@ describe("conversationRows", () => {
     ]);
   });
 
+  it("orders topics by their newest reply, and gathers replies whose post is not loaded", () => {
+    const at = (id: string, minute: number, extra: Partial<InboxMessage> = {}) =>
+      ({
+        ...message(id),
+        createdAt: `2026-11-16T10:${String(minute).padStart(2, "0")}:00Z`,
+        ...extra,
+      }) as InboxMessage;
+    const reply = (id: string, minute: number, rootId: string) =>
+      at(id, minute, {
+        rootId,
+        inThread: true,
+        replyTo: { id: rootId, authorName: "Lee", preview: "old post" },
+      });
+    const topics = topicsOf(
+      conversationRows(
+        [
+          at("old", 1),
+          at("new", 2),
+          reply("r1", 3, "old"),
+          reply("o1", 4, "gone"),
+          reply("o2", 5, "gone"),
+        ],
+        [],
+      ),
+    );
+    expect(
+      topics.map((topic) => [
+        topic.id,
+        topic.post?.message.id ?? null,
+        topic.heading,
+        topic.replies.map((row) => row.message.id),
+      ]),
+    ).toEqual([
+      ["new", "new", null, []],
+      ["old", "old", null, ["r1"]],
+      ["gone", null, "Lee: old post", ["o1", "o2"]],
+    ]);
+  });
+
+  it("writes a folded reply as one line, naming an image or file when it has no text", () => {
+    expect(replyLine({ ...message("a"), text: "first\n  second" })).toBe("Sam: first second");
+    expect(
+      replyLine({
+        ...message("b"),
+        text: "",
+        richSummary: null,
+        attachments: [{ key: "k", kind: "image", name: "x.png" }],
+      }),
+    ).toBe("Sam: [Image]");
+  });
+
   it("cuts a quote at 40 characters", () => {
     expect(quoteOf("Sam", "a".repeat(41))).toBe(`Sam: ${"a".repeat(40)}…`);
   });
@@ -203,5 +261,63 @@ describe("mentions", () => {
     expect(names("ping @Zhang Sanfeng")).toBeUndefined();
     expect(names("a@b\nzh")).toBeUndefined();
     expect(mentionSuggestions("ping @zh", 8, people)?.start).toBe(5);
+  });
+});
+
+describe("shortLink", () => {
+  it.each([
+    ["https://cloud.example.net/argos/alarm/detail/0/351?zone=CN", "cloud.example.net/argos/…"],
+    ["https://go.example.com/approval?id=1", "go.example.com/approval/…"],
+    ["https://www.example.com/docs", "example.com/docs"],
+    ["https://example.com/", "example.com"],
+    ["not a url", "not a url"],
+  ])("%s", (link, expected) => {
+    expect(shortLink(link)).toBe(expected);
+  });
+});
+
+describe("matchesFilter", () => {
+  it.each([
+    ["dm", "dm", true],
+    ["groups", "group", true],
+    ["groups", "topic_group", false],
+    ["topics", "topic_group", true],
+    ["all", undefined, true],
+    ["dm", undefined, false],
+  ] as const)("%s takes a %s conversation: %s", (filter, kind, expected) => {
+    expect(matchesFilter(filter, kind)).toBe(expected);
+  });
+});
+
+describe("delegationPreview", () => {
+  it.each([
+    ["Jordan Lee", "Jordan Lee: Hey there", null, "Hey there"],
+    ["Jordan Lee", null, "Jordan Lee: Hey, the nightly export job", "Hey, the nightly export job"],
+    ["Platform team", "Priya Shah: hi", null, "Priya Shah: hi"],
+    ["Platform team", null, null, "Delegated messages"],
+    ["Platform team", "  ", "  ", "Delegated messages"],
+  ])("formats preview for %s", (conversationName, preview, threadTitle, expected) => {
+    expect(delegationPreview(conversationName, preview, threadTitle)).toBe(expected);
+  });
+});
+
+describe("authorsSummary", () => {
+  const msg = (id: string, name: string, isSelf = false) =>
+    ({ author: { id, name, isSelf } }) as InboxMessage;
+
+  it("deduplicates authors in order, renders self as You, and caps with +N", () => {
+    expect(authorsSummary([])).toBeNull();
+    expect(authorsSummary([msg("1", "Priya"), msg("2", "Alex", true), msg("3", "Priya")])).toBe(
+      "Priya, You",
+    );
+    expect(
+      authorsSummary([
+        msg("1", "Priya"),
+        msg("2", "Sam"),
+        msg("3", "Jordan"),
+        msg("4", "Alex", true),
+        msg("5", "Priya"),
+      ]),
+    ).toBe("Priya, Sam, Jordan +1");
   });
 });

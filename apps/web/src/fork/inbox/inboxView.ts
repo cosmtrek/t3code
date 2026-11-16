@@ -9,7 +9,7 @@ import type {
 import { formatSince, formatSpan } from "../presentation";
 
 export type InboxView = "unread" | "all" | "agent";
-export type InboxFilter = "all" | "dm" | "groups";
+export type InboxFilter = "all" | "dm" | "groups" | "topics";
 
 export const INBOX_VIEWS: ReadonlyArray<{ readonly id: InboxView; readonly label: string }> = [
   { id: "unread", label: "Unread" },
@@ -21,6 +21,7 @@ export const INBOX_FILTERS: ReadonlyArray<{ readonly id: InboxFilter; readonly l
   { id: "all", label: "All conversations" },
   { id: "dm", label: "DMs" },
   { id: "groups", label: "Groups" },
+  { id: "topics", label: "Topic groups" },
 ];
 
 const EMPTY_VIEW_TITLES: Readonly<Record<InboxView, string>> = {
@@ -32,6 +33,7 @@ const EMPTY_VIEW_TITLES: Readonly<Record<InboxView, string>> = {
 const FILTER_NOUNS: Readonly<Record<Exclude<InboxFilter, "all">, string>> = {
   dm: "DMs",
   groups: "groups",
+  topics: "topic groups",
 };
 
 /** "Nothing unread", or "No unread DMs" when a filter is what empties the list. */
@@ -54,8 +56,14 @@ export function skippedNotice(skipped: number): string | null {
   return `${skipped} ${skipped === 1 ? "item" : "items"} from the adapter could not be read.`;
 }
 
+const FILTER_KINDS: Readonly<Record<Exclude<InboxFilter, "all">, ConversationKind>> = {
+  dm: "dm",
+  groups: "group",
+  topics: "topic_group",
+};
+
 export const matchesFilter = (filter: InboxFilter, kind: ConversationKind | undefined) =>
-  filter === "all" || (filter === "dm" ? kind === "dm" : kind !== undefined && kind !== "dm");
+  filter === "all" || kind === FILTER_KINDS[filter];
 
 /** What a conversation's delegations show on its row. */
 export interface AgentSignals {
@@ -66,20 +74,30 @@ export interface AgentSignals {
   readonly live: number;
 }
 
+export function agentSignalsFor(delegations: ReadonlyArray<InboxDelegation>): AgentSignals {
+  let unseen = 0;
+  let drafts = 0;
+  let live = 0;
+  for (const delegation of delegations) {
+    if (delegation.agentUnseen) unseen += 1;
+    if (delegation.hasDraft) drafts += 1;
+    if (delegation.thread !== null && delegation.thread.detachedAt === null) live += 1;
+  }
+  return { unseen, drafts, live };
+}
+
 export function agentSignalsByConversation(
   delegations: ReadonlyArray<InboxDelegation>,
 ): ReadonlyMap<string, AgentSignals> {
-  const signals = new Map<string, AgentSignals>();
+  const byConversation = new Map<string, InboxDelegation[]>();
   for (const delegation of delegations) {
-    const current = signals.get(delegation.conversationId) ?? { unseen: 0, drafts: 0, live: 0 };
-    const live = delegation.thread !== null && delegation.thread.detachedAt === null;
-    signals.set(delegation.conversationId, {
-      unseen: current.unseen + (delegation.agentUnseen ? 1 : 0),
-      drafts: current.drafts + (delegation.hasDraft ? 1 : 0),
-      live: current.live + (live ? 1 : 0),
-    });
+    const group = byConversation.get(delegation.conversationId);
+    if (group) group.push(delegation);
+    else byConversation.set(delegation.conversationId, [delegation]);
   }
-  return signals;
+  return new Map(
+    [...byConversation].map(([conversationId, group]) => [conversationId, agentSignalsFor(group)]),
+  );
 }
 
 /**
@@ -163,6 +181,56 @@ export function conversationRows(
     else threads.set(rootId, [...(threads.get(rootId) ?? []), row]);
   }
   return timeline.map((row) => ({ ...row, thread: threads.get(row.message.id) ?? [] }));
+}
+
+/** A topic group's topic: its post, or only its replies when the post is older than the pages read. */
+export interface Topic {
+  readonly id: string;
+  readonly post: ConversationRow | null;
+  /** The post as the replies quote it, for a topic whose post is not loaded. */
+  readonly heading: string | null;
+  readonly replies: ReadonlyArray<ConversationRow>;
+}
+
+const latestActivity = (topic: Topic) =>
+  Math.max(
+    ...(topic.post === null ? [] : [Date.parse(topic.post.message.createdAt)]),
+    ...topic.replies.map((reply) => Date.parse(reply.message.createdAt)),
+  );
+
+/**
+ * A topic group as its chat app lists it: one card per topic, the one with the newest activity
+ * last. Replies whose post was not loaded still share one card.
+ */
+export function topicsOf(rows: ReadonlyArray<ConversationRow>): ReadonlyArray<Topic> {
+  const topics: Topic[] = [];
+  const orphans = new Map<string, ConversationRow[]>();
+  for (const row of rows) {
+    const rootId = row.message.inThread === true ? (row.message.rootId ?? null) : null;
+    if (rootId === null) {
+      topics.push({ id: row.message.id, post: row, heading: null, replies: row.thread });
+    } else {
+      orphans.set(rootId, [...(orphans.get(rootId) ?? []), row]);
+    }
+  }
+  for (const [id, replies] of orphans) {
+    const first = replies[0]!;
+    const heading = first.message.replyTo?.id === id ? first.quote : null;
+    topics.push({ id, post: null, heading, replies });
+  }
+  return topics.toSorted((left, right) => latestActivity(left) - latestActivity(right));
+}
+
+function attachmentLabel(message: InboxMessage): string {
+  const file = message.attachments[0];
+  if (file === undefined) return "";
+  return file.kind === "image" ? "[Image]" : `[File] ${file.name}`;
+}
+
+/** A reply as one line under a folded topic: who wrote it and what, whatever its length. */
+export function replyLine(message: InboxMessage): string {
+  const body = message.text.trim() || message.richSummary || attachmentLabel(message);
+  return `${nameOrUnknown(message.author.name)}: ${body.replace(/\s+/g, " ").trim()}`;
 }
 
 /**
@@ -319,4 +387,49 @@ export function messagesAsText(
   const openUrl = messages.find((message) => message.openUrl)?.openUrl;
   if (openUrl) lines.push(openUrl);
   return lines.join("\n").trim();
+}
+
+/** A link as its site and first path segment; the full address is in the tooltip. */
+export function shortLink(link: string): string {
+  try {
+    const url = new URL(link);
+    const [first, ...rest] = url.pathname.split("/").filter((part) => part.length > 0);
+    const host = url.host.replace(/^www\./, "");
+    if (first === undefined) return host;
+    return rest.length > 0 || url.search.length > 0 ? `${host}/${first}/…` : `${host}/${first}`;
+  } catch {
+    return link;
+  }
+}
+
+/** Preview line for a delegation under its conversation, dropping a redundant "Name: " prefix. */
+export function delegationPreview(
+  conversationName: string,
+  preview: string | null,
+  threadTitle: string | null,
+): string {
+  const raw = preview?.trim() || threadTitle?.trim() || "";
+  if (raw.length === 0) return "Delegated messages";
+  const prefix = `${nameOrUnknown(conversationName)}: `;
+  if (raw.startsWith(prefix)) {
+    const stripped = raw.slice(prefix.length).trim();
+    if (stripped.length > 0) return stripped;
+  }
+  return raw;
+}
+
+/** Unique author labels in order of appearance, capped at `max` with a `+N` overflow count. */
+export function authorsSummary(messages: ReadonlyArray<InboxMessage>, max = 3): string | null {
+  const seen = new Set<string>();
+  const names: string[] = [];
+  for (const message of messages) {
+    const label = message.author.isSelf ? "You" : nameOrUnknown(message.author.name);
+    if (!seen.has(label)) {
+      seen.add(label);
+      names.push(label);
+    }
+  }
+  if (names.length === 0) return null;
+  if (names.length <= max) return names.join(", ");
+  return `${names.slice(0, max).join(", ")} +${names.length - max}`;
 }

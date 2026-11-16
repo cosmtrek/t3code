@@ -52,6 +52,7 @@ import {
 } from "../channels/protocol.ts";
 import {
   applyFallback,
+  discardDraft as discardDraftFile,
   fallbackApplied,
   readArtifacts,
   readSent,
@@ -427,6 +428,8 @@ export interface InboxConversation extends ConversationState {
   readonly name: string;
   readonly lastActivityAt: string;
   readonly lastMessage: ConversationType["lastMessage"];
+  /** Notifications are off for it in the chat app. */
+  readonly muted: boolean;
 }
 
 export interface InboxDelegation {
@@ -557,6 +560,7 @@ const computeChannel = Effect.fn("ForkInbox.computeChannel")(function* (channelI
           name: conversation.name,
           lastActivityAt: conversation.lastActivityAt,
           lastMessage: conversation.lastMessage,
+          muted: conversation.muted,
         }) satisfies InboxConversation,
     )
     .toSorted(compareConversations);
@@ -1646,6 +1650,37 @@ export const upload = Effect.fn("ForkInbox.upload")(function* (
     });
   }
   return uploaded.value;
+});
+
+const DiscardDraftInput = Schema.Struct({
+  channelId: Schema.String,
+  delegationId: Schema.String,
+  /** The draft the client showed. */
+  draft: Schema.String,
+});
+const decodeDiscardDraftInput = Schema.decodeUnknownEffect(DiscardDraftInput);
+
+/** Drops the current thread's draft; "Draft reply" asks for a new one. */
+export const discardDraft = Effect.fn("ForkInbox.discardDraft")(function* (body: unknown) {
+  const input = yield* decodeDiscardDraftInput(body).pipe(
+    Effect.mapError(() => badRequest("Name the delegation and its draft.")),
+  );
+  const runtime = yield* InboxRuntime;
+  const delegation = runtime.store.getDelegation(input.delegationId);
+  const active =
+    delegation !== null && delegation.channelId === input.channelId
+      ? activeLinkOf(runtime.store.linksForDelegation(delegation.id))
+      : undefined;
+  if (active === undefined) return yield* badRequest("This delegation has no thread.");
+  const discarded = yield* Effect.promise(() =>
+    discardDraftFile(
+      threadContextDir(runtime.itemsDir, input.delegationId, active.threadId),
+      input.draft,
+      new Date().toISOString(),
+    ),
+  );
+  runtime.hub.publish({ type: "inbox", channelId: input.channelId });
+  return { discarded };
 });
 
 const AskInput = Schema.Struct({
