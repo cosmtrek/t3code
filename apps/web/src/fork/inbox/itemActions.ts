@@ -2,17 +2,11 @@ import type { EnvironmentId } from "@t3tools/contracts";
 
 import { toastManager } from "../../components/ui/toast";
 import { forkRequest } from "../forkApiAccess";
-import type { InboxItem, TopicDetail } from "../types";
-import { topicAsText } from "./inboxView";
+import type { DelegationDetail, InboxConversation, InboxDelegation } from "../types";
+import { messagesAsText } from "./inboxView";
 
-const topicQuery = (item: InboxItem) =>
-  new URLSearchParams({
-    channelId: item.channelId,
-    conversationId: item.conversationId,
-    topicId: item.topicId,
-  }).toString();
-
-export const topicPath = (item: InboxItem) => `/inbox/topic?${topicQuery(item)}`;
+export const delegationPath = (channelId: string, delegationId: string) =>
+  `/inbox/delegation?${new URLSearchParams({ channelId, delegationId }).toString()}`;
 
 function fail(title: string, error: unknown) {
   toastManager.add({
@@ -23,41 +17,59 @@ function fail(title: string, error: unknown) {
 }
 
 /** False when the server refused; the user has been told. */
-export async function setItemRead(
+export async function setConversationRead(
   environmentId: EnvironmentId,
-  item: InboxItem,
+  conversation: InboxConversation,
   read: boolean,
 ): Promise<boolean> {
   try {
     await forkRequest(environmentId, "/inbox/read", {
       method: "POST",
       body: {
-        channelId: item.channelId,
-        conversationId: item.conversationId,
-        topicId: item.topicId,
+        channelId: conversation.channelId,
+        conversationId: conversation.id,
         read,
         // What the user saw, not what has arrived since.
-        lastMessageAt: item.lastMessageAt,
-        ...(item.thread?.runCompletedAt ? { runCompletedAt: item.thread.runCompletedAt } : {}),
+        ...(conversation.lastMessage ? { lastMessageAt: conversation.lastMessage.createdAt } : {}),
       },
     });
     return true;
   } catch (error) {
-    fail("Could not update the item", error);
+    fail("Could not update the conversation", error);
     return false;
   }
 }
 
-/** Reads everything up to the newest message or run end in `items`, the list the user saw. */
+/** Marks the delegation's finished run as seen; false when there was none or the server refused. */
+export async function markDelegationSeen(
+  environmentId: EnvironmentId,
+  delegation: InboxDelegation,
+): Promise<boolean> {
+  const runCompletedAt = delegation.thread?.runCompletedAt;
+  if (!runCompletedAt) return false;
+  try {
+    await forkRequest(environmentId, "/inbox/seen", {
+      method: "POST",
+      body: { channelId: delegation.channelId, delegationId: delegation.id, runCompletedAt },
+    });
+    return true;
+  } catch (error) {
+    fail("Could not update the delegation", error);
+    return false;
+  }
+}
+
+/** Reads everything up to the newest message or run end the user saw in the lists. */
 export async function markAllRead(
   environmentId: EnvironmentId,
   channelId: string,
-  items: ReadonlyArray<InboxItem>,
+  conversations: ReadonlyArray<InboxConversation>,
+  delegations: ReadonlyArray<InboxDelegation>,
 ): Promise<boolean> {
-  const times = items.flatMap((item) => [
-    Date.parse(item.lastMessageAt),
-    Date.parse(item.thread?.runCompletedAt ?? ""),
-  ]);
+  const times = [
+    ...conversations.map((conversation) => Date.parse(conversation.lastMessage?.createdAt ?? "")),
+    ...delegations.map((delegation) => Date.parse(delegation.thread?.runCompletedAt ?? "")),
+  ];
   const newest = Math.max(...times.filter(Number.isFinite));
   if (!Number.isFinite(newest)) return true;
   try {
@@ -72,30 +84,11 @@ export async function markAllRead(
   }
 }
 
-export async function copyItemContext(environmentId: EnvironmentId, item: InboxItem) {
+export async function copyDelegationContext(detail: DelegationDetail) {
   try {
-    const detail = await forkRequest<TopicDetail>(environmentId, topicPath(item));
-    await navigator.clipboard.writeText(topicAsText(item.conversationName, detail.messages));
-    toastManager.add({ type: "success", title: "Copied the topic" });
+    await navigator.clipboard.writeText(messagesAsText(detail.conversation.name, detail.messages));
+    toastManager.add({ type: "success", title: "Copied the messages" });
   } catch (error) {
-    fail("Could not copy the topic", error);
-  }
-}
-
-export async function openItemInApp(environmentId: EnvironmentId, item: InboxItem) {
-  // Opened before the request so popup blockers see the click.
-  const opened = window.open("", "_blank");
-  if (opened) opened.opener = null;
-  try {
-    const detail = await forkRequest<TopicDetail>(environmentId, topicPath(item));
-    const message =
-      detail.messages.find((candidate) => candidate.id === item.rootMessageId) ??
-      detail.messages[0];
-    if (!message?.openUrl) throw new Error("The adapter gave no link for this topic.");
-    if (opened) opened.location.href = message.openUrl;
-    else window.open(message.openUrl, "_blank", "noopener,noreferrer");
-  } catch (error) {
-    opened?.close();
-    fail("Could not open the topic", error);
+    fail("Could not copy the messages", error);
   }
 }

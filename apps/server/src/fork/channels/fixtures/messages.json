@@ -2,8 +2,9 @@
   "items": [
     {
       "id": "om_3",
-      "topicId": "omt_cache",
       "createdAt": "2026-11-14T09:30:00.000Z",
+      "rootId": "om_1",
+      "replyTo": { "id": "om_2", "authorName": null, "preview": null },
       "author": { "id": "ou_sam", "name": "Sam Okafor", "isSelf": false },
       "mentionsSelf": false,
       "text": "Same on staging.",
@@ -11,9 +12,25 @@
       "links": []
     },
     {
+      "id": "om_2",
+      "createdAt": "2026-11-14T09:10:00.000Z",
+      "rootId": "om_1",
+      "replyTo": {
+        "id": "om_1",
+        "authorName": "Priya Shah",
+        "preview": "@Alex Rivera the cache hit rate dropped after yesterday's deploy."
+      },
+      "author": { "id": "ou_me", "name": "Alex Rivera", "isSelf": true },
+      "mentionsSelf": false,
+      "text": "Looking.",
+      "attachments": [],
+      "links": []
+    },
+    {
       "id": "om_1",
-      "topicId": "omt_cache",
       "createdAt": "2026-11-14T09:00:00.000Z",
+      "rootId": null,
+      "replyTo": null,
       "author": { "id": "ou_priya", "name": "Priya Shah", "isSelf": false },
       "mentionsSelf": true,
       "text": "@Alex Rivera the cache hit rate dropped after yesterday's deploy.",

@@ -24,13 +24,13 @@ import {
 import {
   AdapterConfig,
   AdapterError,
+  CHANNEL_PROTOCOL_VERSION,
   ChannelHealth,
   Conversation,
   Message,
   RawPage,
   SendErrorCode,
   SendResult,
-  Topic,
   createSseParser,
   parseChannelEvent,
   type ChannelEvent,
@@ -51,7 +51,7 @@ const json = (status: number, value: unknown): AdapterResponse => ({
 });
 
 const HEALTH = {
-  protocol: 1,
+  protocol: CHANNEL_PROTOCOL_VERSION,
   adapterVersion: "1.2.3",
   online: true,
   loggedIn: true,
@@ -140,8 +140,15 @@ describe("ChannelHub checks", () => {
       failedStep: "auth",
     },
     {
+      // Protocol v2 dropped topics; an adapter not yet upgraded is refused, not misread.
+      name: "older protocol",
+      handle: () => json(200, { ...HEALTH, protocol: CHANNEL_PROTOCOL_VERSION - 1 }),
+      status: "incompatible",
+      failedStep: "protocol",
+    },
+    {
       name: "newer protocol",
-      handle: () => json(200, { ...HEALTH, protocol: 2 }),
+      handle: () => json(200, { ...HEALTH, protocol: CHANNEL_PROTOCOL_VERSION + 1 }),
       status: "incompatible",
       failedStep: "protocol",
     },
@@ -268,21 +275,13 @@ describe("ChannelHub lists", () => {
     lastActivityAt: "2026-11-14T08:00:00.000Z",
     relevant: true,
     muted: false,
-  });
-  const topic = (id: string) => ({
-    id,
-    rootMessageId: `${id}-root`,
-    rootPreview: id,
-    replyCount: 0,
-    lastMessageAt: "2026-11-14T08:00:00.000Z",
-    lastAuthor: { id: "u2", name: "Other", isSelf: false },
-    participatedBySelf: false,
-    lastOtherMessageAt: "2026-11-14T08:00:00.000Z",
-    mentionsSelfSinceOwn: false,
+    lastMessage: null,
+    lastOtherMessageAt: null,
+    lastSelfMessageAt: null,
+    lastMentionAt: null,
   });
   const message = (id: string) => ({
     id,
-    topicId: "t",
     createdAt: "2026-11-14T08:00:00.000Z",
     author: { id: "u2", name: "Other", isSelf: false },
     mentionsSelf: false,
@@ -293,8 +292,7 @@ describe("ChannelHub lists", () => {
 
   it.each([
     ["conversations", "/conversations?relevant=1", Conversation, conversation],
-    ["topics", "/conversations/c/topics?limit=50", Topic, topic],
-    ["messages", "/conversations/c/messages?topic=t", Message, message],
+    ["messages", "/conversations/c/messages?root=t", Message, message],
   ] as const)("follows nextCursor through every page of %s", async (_name, path, schema, make) => {
     const asked: string[] = [];
     const { hub } = await hubWith((request) => {
@@ -519,23 +517,23 @@ describe("ChannelHub events", () => {
     const { hub, asked, send } = await streamingHub();
     const paths = [
       "/conversations?relevant=1",
-      "/conversations/c%201/topics?limit=200",
-      "/conversations/c%201/messages?topic=t",
-      "/conversations/c2/topics?limit=200",
-      "/conversations/c2/messages?topic=t",
+      "/conversations/c%201/messages?order=desc",
+      "/conversations/c%201/messages?root=t",
+      "/conversations/c2/messages?order=desc",
+      "/conversations/c2/messages?root=t",
     ];
     const readAll = () => Promise.all(paths.map((path) => hub.getJson("chat", path, RawPage)));
     await readAll();
     asked.length = 0;
-    send({ type: "message.created", conversationId: "c 1", topicId: "t" });
+    send({ type: "message.created", conversationId: "c 1" });
     await readAll();
     expect(asked).toEqual(paths.slice(0, 3));
     asked.length = 0;
-    send({ type: "topic.updated", conversationId: "c2" });
+    send({ type: "conversation.updated", conversationId: "c2" });
     await readAll();
     expect(asked).toEqual([paths[0], ...paths.slice(3)]);
     asked.length = 0;
-    send({ type: "topic.updated" });
+    send({ type: "conversation.updated" });
     await readAll();
     expect(asked).toEqual(paths);
     hub.stop();
@@ -589,7 +587,7 @@ describe("ChannelHub events", () => {
 });
 
 describe("example channel simulation", () => {
-  it("lists conversations and topics newest first, so a capped read keeps the latest", async () => {
+  it("lists conversations newest first, so a capped read keeps the latest", async () => {
     const dir = await tempDir();
     const hub = new ChannelHub({
       configPath: NodePath.join(dir, "channels.json"),
@@ -618,19 +616,14 @@ describe("example channel simulation", () => {
     const newest = all.items.toSorted((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt));
     expect(conversations.items).toEqual(newest.slice(0, conversations.items.length));
     for (const conversation of all.items) {
-      const topics = await hub.getAllPages(
+      const messages = await hub.getAllPages(
         "example",
-        `/conversations/${conversation.id}/topics`,
-        Topic,
+        `/conversations/${conversation.id}/messages?order=desc`,
+        Message,
         { maxPages: 20 },
       );
-      expect(topics.skipped).toBe(0);
-      expect(topics.items.map((topic) => topic.lastMessageAt)).toEqual(
-        topics.items
-          .map((topic) => topic.lastMessageAt)
-          .toSorted()
-          .toReversed(),
-      );
+      expect(messages.skipped).toBe(0);
+      expect(messages.items[0]?.id).toBe(conversation.lastMessage?.id);
     }
     hub.stop();
   });
@@ -834,19 +827,23 @@ describe("SSE parsing", () => {
     const frames: Array<[string, string]> = [];
     const parse = createSseParser((event, data) => frames.push([event, data]));
     parse('event: message.created\ndata: {"conversationId":"c",');
-    parse('"topicId":"t","messageId":"m"}\n\n: ping\n\nevent: health.changed\ndata: {}\n\n');
+    parse('"messageId":"m"}\n\n: ping\n\nevent: health.changed\ndata: {}\n\n');
     expect(frames.map(([event, data]) => parseChannelEvent(event, data))).toEqual([
-      { type: "message.created", conversationId: "c", topicId: "t" },
+      { type: "message.created", conversationId: "c" },
       { type: "health.changed" },
     ]);
     // A known event counts whatever its data; it only says that something changed.
     expect(parseChannelEvent("message.created", "{bad")).toEqual({ type: "message.created" });
     expect(parseChannelEvent("message.created", "")).toEqual({ type: "message.created" });
-    expect(parseChannelEvent("topic.updated", '{"conversationId":"c"}')).toEqual({
-      type: "topic.updated",
+    expect(parseChannelEvent("conversation.updated", '{"conversationId":"c"}')).toEqual({
+      type: "conversation.updated",
       conversationId: "c",
     });
-    expect(parseChannelEvent("topic.updated", "{}")).toEqual({ type: "topic.updated" });
+    expect(parseChannelEvent("conversation.updated", "{}")).toEqual({
+      type: "conversation.updated",
+    });
+    // v1's event is gone; an adapter still sending it changes nothing.
+    expect(parseChannelEvent("topic.updated", "{}")).toBeNull();
     expect(parseChannelEvent("other", "{}")).toBeNull();
   });
 
@@ -861,7 +858,7 @@ describe("SSE parsing", () => {
       "",
       "event: message.created",
       'data: {"conversationId":"c",',
-      'data: "topicId":"t","messageId":"m"}',
+      'data: "messageId":"m"}',
       "",
       "",
     ].join(eol);
@@ -872,7 +869,7 @@ describe("SSE parsing", () => {
       parse(stream.slice(cut));
       expect(frames, `cut at ${cut}`).toEqual([
         ["health.changed", "{}"],
-        ["message.created", '{"conversationId":"c",\n"topicId":"t","messageId":"m"}'],
+        ["message.created", '{"conversationId":"c",\n"messageId":"m"}'],
       ]);
     }
   });
@@ -898,7 +895,6 @@ describe("protocol fixtures", () => {
 
   it.each([
     ["conversations.json", Conversation],
-    ["topics.json", Topic],
     ["messages.json", Message],
   ] as const)("every item of %s decodes", async (name, schema) => {
     const page = JSON.parse(await fixture(name)) as { items: ReadonlyArray<unknown> };
@@ -910,7 +906,6 @@ describe("protocol fixtures", () => {
   it("keeps a message whose attachment kind T3 does not know, as a file", () => {
     const message = {
       id: "om_9",
-      topicId: "omt_cache",
       createdAt: "2026-11-14T10:00:00.000Z",
       author: { id: "ou_sam", name: "Sam Okafor", isSelf: false },
       mentionsSelf: false,
@@ -934,8 +929,8 @@ describe("protocol fixtures", () => {
       await fixture("events.sse"),
     );
     expect(events).toEqual([
-      { type: "message.created", conversationId: "oc_platform", topicId: "omt_cache" },
-      { type: "topic.updated", conversationId: "oc_platform" },
+      { type: "message.created", conversationId: "oc_platform" },
+      { type: "conversation.updated", conversationId: "oc_platform" },
       { type: "health.changed" },
     ]);
   });

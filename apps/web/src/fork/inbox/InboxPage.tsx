@@ -1,8 +1,11 @@
-import { Link } from "@tanstack/react-router";
+import { ThreadId } from "@t3tools/contracts";
+import { Link, useNavigate } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
   BotIcon,
   CheckCheckIcon,
+  CopyIcon,
+  ExternalLinkIcon,
   InboxIcon,
   ListFilterIcon,
   MessagesSquareIcon,
@@ -39,24 +42,32 @@ import { Toggle, ToggleGroup } from "../../components/ui/toggle-group";
 import { isElectron } from "../../env";
 import { cn } from "../../lib/utils";
 import { ChannelStatusDot, formatSince } from "../presentation";
-import type { InboxItem, ItemsResponse, TopicDetail as TopicDetailData } from "../types";
+import type { DelegationDetail, InboxConversation, InboxDelegation, InboxResponse } from "../types";
 import { useForkResource } from "../useForkResource";
-import { ConversationPane } from "./ConversationPane";
-import { DelegateDialog } from "./DelegateDialog";
-import { InboxList, ItemMenu } from "./InboxList";
+import { ConversationPane, nextReplyNonce, type ReplyRequest } from "./ConversationPane";
+import { DelegateDialog, type DelegateTarget } from "./DelegateDialog";
+import { DelegationPane } from "./DelegationPane";
+import { ConversationList, DelegationList } from "./InboxList";
 import {
   INBOX_FILTERS,
   INBOX_VIEWS,
+  agentSignalsByConversation,
   channelBanner,
   emptyViewTitle,
   inView,
-  nameOrUnknown,
+  matchesFilter,
+  quoteOfMessage,
   skippedNotice,
   type InboxFilter,
   type InboxView,
 } from "./inboxView";
-import { markAllRead, setItemRead, topicPath } from "./itemActions";
-import { TopicDetail } from "./TopicDetail";
+import {
+  copyDelegationContext,
+  delegationPath,
+  markAllRead,
+  markDelegationSeen,
+  setConversationRead,
+} from "./itemActions";
 import { useInboxOverviews, type EnvironmentInbox } from "./useInboxOverviews";
 
 const ENVIRONMENT_STORAGE_KEY = "t3code:fork-inbox-environment";
@@ -160,6 +171,7 @@ function InboxEmpty({
 
 function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
   const environmentId = inbox.environmentId;
+  const navigate = useNavigate();
   const [channelId, setChannelId] = useState<string | null>(null);
   const channel =
     inbox.channels.find((candidate) => candidate.id === channelId) ??
@@ -167,8 +179,10 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
     inbox.channels[0]!;
   const [view, setView] = useState<InboxView>("unread");
   const [filter, setFilter] = useState<InboxFilter>("all");
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [delegating, setDelegating] = useState<InboxItem | null>(null);
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [delegationId, setDelegationId] = useState<string | null>(null);
+  const [delegating, setDelegating] = useState<DelegateTarget | null>(null);
+  const [replyRequest, setReplyRequest] = useState<ReplyRequest | null>(null);
   // Reads sent but not yet read back, shown at once so the list answers the click.
   const [pendingReads, setPendingReads] = useState<
     ReadonlyMap<string, { readonly read: boolean; readonly token: symbol }>
@@ -176,62 +190,87 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
 
   const refreshChannel = (event: { type: string; channelId?: string }) =>
     event.type === "channels" || (event.type === "inbox" && event.channelId === channel.id);
-  const listing = useForkResource<ItemsResponse>(
+  const listing = useForkResource<InboxResponse>(
     channel.access.read ? environmentId : null,
-    `/inbox/items?channelId=${encodeURIComponent(channel.id)}`,
+    `/inbox/conversations?channelId=${encodeURIComponent(channel.id)}`,
     refreshChannel,
   );
-  const items = (listing.data?.items ?? []).map((item) => {
-    const pending = pendingReads.get(item.id);
-    if (pending === undefined) return item;
+  const conversations = (listing.data?.conversations ?? []).map((conversation) => {
+    const pending = pendingReads.get(conversation.id);
+    if (pending === undefined) return conversation;
     return pending.read
-      ? { ...item, unread: false, agentUnseen: false }
-      : { ...item, unread: true };
+      ? { ...conversation, unread: false, mentioned: false }
+      : { ...conversation, unread: true };
   });
-  const selected = items.find((item) => item.id === selectedId) ?? null;
-  const detail = useForkResource<TopicDetailData>(
-    selected ? environmentId : null,
-    selected ? topicPath(selected) : null,
+  const delegations = listing.data?.delegations ?? [];
+  const agentSignals = agentSignalsByConversation(delegations);
+  const kindOf = new Map(conversations.map((conversation) => [conversation.id, conversation.kind]));
+  const delegation = delegations.find((candidate) => candidate.id === delegationId) ?? null;
+  const conversation = conversations.find((candidate) => candidate.id === conversationId) ?? null;
+  const detail = useForkResource<DelegationDetail>(
+    delegation ? environmentId : null,
+    delegation ? delegationPath(channel.id, delegation.id) : null,
     refreshChannel,
   );
-  const visible = items.filter((item) => inView(view, filter, item, selectedId));
+  const visibleConversations = conversations.filter(
+    (candidate) =>
+      view !== "agent" &&
+      inView(view, filter, candidate, agentSignals.get(candidate.id), conversationId),
+  );
+  const visibleDelegations = delegations.filter((candidate) =>
+    matchesFilter(filter, kindOf.get(candidate.conversationId)),
+  );
   const readOnly = listing.data?.access.stale ?? !channel.access.send;
   const banner = channelBanner(channel);
-  const onSetRead = async (item: InboxItem, read: boolean) => {
-    const token = Symbol(item.id);
+
+  const onSetRead = async (target: InboxConversation, read: boolean) => {
+    const token = Symbol(target.id);
     const settle = () =>
       setPendingReads((current) => {
-        if (current.get(item.id)?.token !== token) return current;
+        if (current.get(target.id)?.token !== token) return current;
         const next = new Map(current);
-        next.delete(item.id);
+        next.delete(target.id);
         return next;
       });
-    // Unread on the open topic would be read again at once; close it instead.
-    if (!read && item.id === selectedId) setSelectedId(null);
-    setPendingReads((current) => new Map(current).set(item.id, { read, token }));
+    // Unread on the open conversation would be read again at once; close it instead.
+    if (!read && target.id === conversationId) {
+      setConversationId(null);
+      setDelegationId(null);
+    }
+    setPendingReads((current) => new Map(current).set(target.id, { read, token }));
     // The event stream may be down; read the list back rather than wait for the poll.
-    if (await setItemRead(environmentId, item, read)) await listing.refresh();
+    if (await setConversationRead(environmentId, target, read)) await listing.refresh();
     settle();
   };
-  const onMarkAllRead = async () => {
-    if (await markAllRead(environmentId, channel.id, listing.data?.items ?? [])) {
+  // Opening is reading. A message that lands while the conversation is open stays unread until
+  // the user acts on it again (opens it once more, or starts a reply), so the dot never just blinks.
+  const readConversation = (target: InboxConversation) => {
+    if (target.unread || target.mentioned) void onSetRead(target, true);
+  };
+  const seeDelegation = async (target: InboxDelegation) => {
+    if (target.agentUnseen && (await markDelegationSeen(environmentId, target))) {
       await listing.refresh();
     }
   };
-  // Selecting is reading. A message that lands while the topic is open stays unread until the
-  // user acts on it again (selects it once more, or starts a reply), so the dot never just blinks.
-  const readItem = (item: InboxItem) => {
-    if (item.unread) void onSetRead(item, true);
+  const selectConversation = (target: InboxConversation) => {
+    setConversationId(target.id);
+    setDelegationId(null);
+    readConversation(target);
   };
-  const handlers = {
-    onSelect: (item: InboxItem) => {
-      setSelectedId(item.id);
-      readItem(item);
-    },
-    onDelegate: (item: InboxItem) => setDelegating(item),
-    onSetRead: (item: InboxItem, read: boolean) => void onSetRead(item, read),
+  const selectDelegation = (target: InboxDelegation) => {
+    setConversationId(target.conversationId);
+    setDelegationId(target.id);
+    void seeDelegation(target);
   };
-  const anyUnread = items.some((item) => item.unread);
+  const onMarkAllRead = async () => {
+    if (await markAllRead(environmentId, channel.id, conversations, delegations)) {
+      await listing.refresh();
+    }
+  };
+  const anyUnread =
+    conversations.some((candidate) => candidate.unread || candidate.mentioned) ||
+    delegations.some((candidate) => candidate.agentUnseen);
+
   let list: ReactNode;
   if (!channel.access.read) {
     list = <InboxEmpty icon={<PlugZapIcon />} title="Channel unavailable" settingsLink />;
@@ -239,9 +278,14 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
     list = <ReadError message={listing.error.message} onRetry={() => void listing.refresh()} />;
   } else if (listing.data === null) {
     list = <p className="px-4 py-6 text-sm text-muted-foreground">Loading…</p>;
-  } else if (visible.length === 0) {
+  } else if (
+    view === "agent" ? visibleDelegations.length === 0 : visibleConversations.length === 0
+  ) {
     list = (
-      <InboxEmpty icon={<InboxIcon />} title={emptyViewTitle(view, filter)}>
+      <InboxEmpty
+        icon={view === "agent" ? <BotIcon /> : <InboxIcon />}
+        title={emptyViewTitle(view, filter)}
+      >
         {filter === "all" ? null : (
           <Button size="sm" variant="outline" onClick={() => setFilter("all")}>
             Clear filter
@@ -249,17 +293,39 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
         )}
       </InboxEmpty>
     );
+  } else if (view === "agent") {
+    list = (
+      <DelegationList
+        environmentId={environmentId}
+        delegations={visibleDelegations}
+        selectedId={delegationId}
+        onSelect={selectDelegation}
+      />
+    );
   } else {
     list = (
-      <InboxList
-        environmentId={environmentId}
-        items={visible}
-        selectedId={selectedId}
-        readOnly={readOnly}
-        handlers={handlers}
+      <ConversationList
+        conversations={visibleConversations}
+        agentSignals={agentSignals}
+        selectedId={conversationId}
+        handlers={{
+          onSelect: selectConversation,
+          onSetRead: (target, read) => void onSetRead(target, read),
+        }}
       />
     );
   }
+
+  const viewCount = (option: InboxView) =>
+    option === "agent"
+      ? delegations.filter((candidate) => candidate.agentUnseen).length
+      : option === "unread"
+        ? conversations.filter((candidate) =>
+            inView("unread", filter, candidate, agentSignals.get(candidate.id)),
+          ).length
+        : 0;
+  const delegationOpen = delegation !== null;
+  const conversationShown = conversation !== null;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -303,10 +369,10 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
 
       <div className="@container/inbox flex min-h-0 flex-1">
         <section
-          aria-label="Topics"
+          aria-label={view === "agent" ? "Delegations" : "Conversations"}
           className={cn(
             "flex min-h-0 w-full flex-col @2xl/inbox:w-80 @2xl/inbox:shrink-0 @2xl/inbox:border-r",
-            selected && "@max-2xl/inbox:hidden",
+            (conversationShown || delegationOpen) && "@max-2xl/inbox:hidden",
           )}
         >
           <div className="flex shrink-0 items-center gap-2 p-2">
@@ -319,11 +385,11 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
               aria-label="Inbox view"
             >
               {INBOX_VIEWS.map((option) => {
-                const count = items.filter((item) => inView(option.id, filter, item)).length;
+                const count = viewCount(option.id);
                 return (
                   <Toggle key={option.id} value={option.id} aria-label={option.label}>
                     {option.label}
-                    {count > 0 && option.id !== "all" ? ` ${count}` : ""}
+                    {count > 0 ? ` ${count}` : ""}
                   </Toggle>
                 );
               })}
@@ -378,84 +444,185 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
           </div>
         </section>
 
-        {selected ? (
+        {conversation ? (
           <ConversationPane
             environmentId={environmentId}
-            selected={selected}
-            items={items}
+            conversation={conversation}
+            delegations={delegations.filter(
+              (candidate) => candidate.conversationId === conversation.id,
+            )}
+            focusMessageId={delegation?.anchorMessageId ?? null}
             readOnly={readOnly}
-            handlers={handlers}
+            replyRequest={replyRequest}
             refreshOn={refreshChannel}
+            // With a delegation open, the chat shares the width only on a wide screen.
+            className={delegationOpen ? "hidden @5xl/inbox:flex" : "flex"}
+            handlers={{
+              onBack: () => {
+                setConversationId(null);
+                setDelegationId(null);
+              },
+              onSetRead: (target, read) => void onSetRead(target, read),
+              onSelectDelegation: selectDelegation,
+              onDelegate: (message, later) =>
+                setDelegating({
+                  channelId: channel.id,
+                  conversation: {
+                    id: conversation.id,
+                    name: conversation.name,
+                    kind: conversation.kind,
+                  },
+                  message,
+                  later,
+                }),
+              onEngage: () => readConversation(conversation),
+            }}
           />
-        ) : null}
+        ) : delegationOpen ? null : (
+          <section className="hidden min-h-0 min-w-0 flex-1 flex-col @2xl/inbox:flex">
+            <InboxEmpty icon={<MessagesSquareIcon />} title="No conversation selected" />
+          </section>
+        )}
 
-        <section
-          aria-label="Topic"
-          className={cn(
-            "min-h-0 min-w-0 flex-1 flex-col",
-            selected && "@5xl/inbox:w-[28rem] @5xl/inbox:flex-none @5xl/inbox:border-l",
-            selected ? "flex" : "hidden @2xl/inbox:flex",
-          )}
-        >
-          {selected ? (
-            <>
-              <div className="flex shrink-0 items-center gap-1 border-b px-2 py-1.5">
-                <Button
-                  size="icon-xs"
-                  variant="ghost"
-                  aria-label="Back to the list"
-                  className="@2xl/inbox:hidden"
-                  onClick={() => setSelectedId(null)}
-                >
-                  <ArrowLeftIcon />
-                </Button>
-                <span className="min-w-0 flex-1 truncate text-xs font-medium">
-                  {nameOrUnknown(selected.conversationName)}
-                </span>
+        {delegation ? (
+          <section
+            aria-label="Delegation"
+            className={cn(
+              "flex min-h-0 min-w-0 flex-1 flex-col",
+              conversation && "@5xl/inbox:w-[28rem] @5xl/inbox:flex-none @5xl/inbox:border-l",
+            )}
+          >
+            <div className="flex shrink-0 items-center gap-1 border-b px-2 py-1.5">
+              <Button
+                size="icon-xs"
+                variant="ghost"
+                aria-label={conversation ? "Back to the conversation" : "Back to the list"}
+                className="@5xl/inbox:hidden"
+                onClick={() => setDelegationId(null)}
+              >
+                <ArrowLeftIcon />
+              </Button>
+              <span className="min-w-0 flex-1 truncate px-1 text-xs font-medium">
+                {delegation.thread?.title ?? delegation.preview ?? "Delegation"}
+              </span>
+              {delegation.thread && delegation.thread.status !== "deleted" ? (
                 <Button
                   size="xs"
                   variant="outline"
-                  disabled={readOnly}
-                  onClick={() => setDelegating(selected)}
+                  onClick={() =>
+                    void navigate({
+                      to: "/$environmentId/$threadId",
+                      params: {
+                        environmentId,
+                        threadId: ThreadId.make(delegation.thread!.threadId),
+                      },
+                    })
+                  }
                 >
-                  <BotIcon />
-                  Delegate
+                  <ExternalLinkIcon />
+                  Thread
                 </Button>
-                <ItemMenu
-                  environmentId={environmentId}
-                  item={selected}
-                  readOnly={readOnly}
-                  onDelegate={handlers.onDelegate}
-                  onSetRead={handlers.onSetRead}
-                />
-              </div>
-              {detail.data && detail.data.item.id === selected.id ? (
-                <TopicDetail
-                  environmentId={environmentId}
+              ) : null}
+              {detail.data && detail.data.delegation.id === delegation.id ? (
+                <DelegationActions
                   detail={detail.data}
-                  sendingOff={readOnly}
-                  onEngage={() => readItem(selected)}
+                  readOnly={readOnly}
+                  onDelegateAgain={(target) => setDelegating(target)}
                 />
-              ) : detail.error ? (
-                <ReadError message={detail.error.message} onRetry={() => void detail.refresh()} />
-              ) : (
-                <p className="p-4 text-sm text-muted-foreground">Loading…</p>
-              )}
-            </>
-          ) : (
-            <InboxEmpty icon={<MessagesSquareIcon />} title="No topic selected" />
-          )}
-        </section>
+              ) : null}
+            </div>
+            {detail.data && detail.data.delegation.id === delegation.id ? (
+              <DelegationPane
+                environmentId={environmentId}
+                detail={detail.data}
+                sendingOff={readOnly}
+                onUseDraft={(text) => {
+                  const data = detail.data!;
+                  const anchor = data.messages.find(
+                    (message) => message.id === delegation.anchorMessageId,
+                  );
+                  // A reply thread's draft answers in that thread; a range's is a new message.
+                  const inThread =
+                    data.conversation.kind !== "dm" && delegation.scope !== "range" && anchor;
+                  setReplyRequest({
+                    nonce: nextReplyNonce(),
+                    replyTo: inThread
+                      ? { messageId: anchor.id, quote: quoteOfMessage(anchor) }
+                      : null,
+                    draft: { text, delegationId: delegation.id },
+                  });
+                  // On a narrow screen the reply box is in the conversation.
+                  setDelegationId(null);
+                }}
+              />
+            ) : detail.error ? (
+              <ReadError message={detail.error.message} onRetry={() => void detail.refresh()} />
+            ) : (
+              <p className="p-4 text-sm text-muted-foreground">Loading…</p>
+            )}
+          </section>
+        ) : null}
       </div>
 
       {delegating ? (
         <DelegateDialog
           environmentId={environmentId}
-          item={delegating}
+          target={delegating}
           onClose={() => setDelegating(null)}
+          onDelegated={(id) => {
+            setDelegating(null);
+            setDelegationId(id);
+            void listing.refresh();
+          }}
         />
       ) : null}
     </div>
+  );
+}
+
+function DelegationActions({
+  detail,
+  readOnly,
+  onDelegateAgain,
+}: {
+  readonly detail: DelegationDetail;
+  readonly readOnly: boolean;
+  readonly onDelegateAgain: (target: DelegateTarget) => void;
+}) {
+  const anchor = detail.messages.find(
+    (message) => message.id === detail.delegation.anchorMessageId,
+  );
+  return (
+    <>
+      <Button
+        size="icon-xs"
+        variant="ghost-muted"
+        aria-label="Copy the messages"
+        title="Copy the messages"
+        onClick={() => void copyDelegationContext(detail)}
+      >
+        <CopyIcon />
+      </Button>
+      <Button
+        size="icon-xs"
+        variant="ghost-muted"
+        aria-label="Delegate again"
+        title="Delegate again"
+        disabled={readOnly || anchor === undefined}
+        onClick={() =>
+          anchor &&
+          onDelegateAgain({
+            channelId: detail.delegation.channelId,
+            conversation: detail.conversation,
+            message: anchor,
+            later: detail.messages.filter((message) => message.id !== anchor.id),
+            scope: detail.delegation.scope,
+          })
+        }
+      >
+        <BotIcon />
+      </Button>
+    </>
   );
 }
 

@@ -25,9 +25,16 @@ import { WorktreeBaseBranchPicker } from "../../components/WorktreeBaseBranchPic
 import { useEnvironmentQuery } from "../../state/query";
 import { vcsEnvironment } from "../../state/vcs";
 import { ForkApiError, forkRequest } from "../forkApiAccess";
-import type { DelegateOptions, InboxItem, ModelChoice, WorkspaceStrategy } from "../types";
+import type {
+  ConversationKind,
+  DelegateOptions,
+  DelegationScope,
+  InboxMessage,
+  ModelChoice,
+  WorkspaceStrategy,
+} from "../types";
 import { useForkResource } from "../useForkResource";
-import { nameOrUnknown } from "./inboxView";
+import { anchorOf, defaultScope, nameOrUnknown, quoteOfMessage } from "./inboxView";
 
 const modelKey = (choice: ModelChoice | null) =>
   choice === null ? "" : `${choice.instanceId}\u0000${choice.model}`;
@@ -45,20 +52,49 @@ function parseModelKey(key: string): ModelChoice | null {
   return instanceId && model ? { instanceId, model } : null;
 }
 
+const SCOPE_LABELS: Readonly<Record<DelegationScope, string>> = {
+  chain: "This message and its replies",
+  range: "From this message on",
+};
+
+const LATEST = "";
+
+export interface DelegateTarget {
+  readonly channelId: string;
+  readonly conversation: {
+    readonly id: string;
+    readonly name: string;
+    readonly kind: ConversationKind;
+  };
+  readonly message: InboxMessage;
+  /** What the chat shows after the message, for where a range ends. */
+  readonly later: ReadonlyArray<InboxMessage>;
+  /** The scope it was delegated with before. */
+  readonly scope?: DelegationScope | null;
+}
+
 export function DelegateDialog({
   environmentId,
-  item,
+  target,
   onClose,
+  onDelegated,
 }: {
   readonly environmentId: EnvironmentId;
-  readonly item: InboxItem;
+  readonly target: DelegateTarget;
   readonly onClose: () => void;
+  /** A new thread started; the delegation it belongs to. */
+  readonly onDelegated: (delegationId: string) => void;
 }) {
   const navigate = useNavigate();
+  const [scope, setScope] = useState<DelegationScope>(
+    target.scope ?? defaultScope(target.conversation.kind),
+  );
+  const [untilMessageId, setUntilMessageId] = useState(LATEST);
+  const anchorMessageId = anchorOf(target.message, scope);
   const query = new URLSearchParams({
-    channelId: item.channelId,
-    conversationId: item.conversationId,
-    topicId: item.topicId,
+    channelId: target.channelId,
+    conversationId: target.conversation.id,
+    anchorMessageId,
   });
   const options = useForkResource<DelegateOptions>(
     environmentId,
@@ -141,32 +177,34 @@ export function DelegateDialog({
     setSubmitting(true);
     setError(null);
     try {
-      const result = await forkRequest<{ threadId: string; existing: boolean }>(
-        environmentId,
-        "/inbox/delegate",
-        {
-          method: "POST",
-          body: {
-            channelId: item.channelId,
-            conversationId: item.conversationId,
-            topicId: item.topicId,
-            projectId: chosenProject,
-            templateId: chosenTemplate,
-            note,
-            modelSelection: chosenModel === defaultModel ? null : parseModelKey(chosenModel),
-            workspaceStrategy,
-            replaceThreadId: forceNew ? (data?.existing?.threadId ?? null) : null,
-          },
+      const result = await forkRequest<{
+        threadId: string;
+        existing: boolean;
+        delegationId: string;
+      }>(environmentId, "/inbox/delegate", {
+        method: "POST",
+        body: {
+          channelId: target.channelId,
+          conversationId: target.conversation.id,
+          anchorMessageId,
+          scope,
+          ...(scope === "range" && untilMessageId !== LATEST ? { untilMessageId } : {}),
+          projectId: chosenProject,
+          templateId: chosenTemplate,
+          note,
+          modelSelection: chosenModel === defaultModel ? null : parseModelKey(chosenModel),
+          workspaceStrategy,
+          replaceThreadId: forceNew ? (data?.existing?.threadId ?? null) : null,
         },
-      );
+      });
       setSubmitting(false);
       if (result.existing) openThread(result.threadId);
-      else onClose();
+      else onDelegated(result.delegationId);
     } catch (cause) {
       setSubmitting(false);
       setError(
-        cause instanceof ForkApiError && cause.code === "topic_too_long"
-          ? "This topic is too long to delegate."
+        cause instanceof ForkApiError && cause.code === "scope_too_long"
+          ? `${cause.message} Choose fewer messages.`
           : cause instanceof Error
             ? cause.message
             : String(cause),
@@ -186,8 +224,8 @@ export function DelegateDialog({
     body = (
       <p className="text-sm">
         {existing.status === "archived"
-          ? "This topic's thread is archived. Open it, or start a new one."
-          : `This topic already has a thread${existing.title ? `: ${existing.title}` : ""}.`}
+          ? "These messages' thread is archived. Open it, or start a new one."
+          : `These messages already have a thread${existing.title ? `: ${existing.title}` : ""}.`}
       </p>
     );
   } else if (data.templates.length === 0) {
@@ -203,6 +241,47 @@ export function DelegateDialog({
   } else {
     body = (
       <div className="flex flex-col gap-3">
+        <Labeled label="Messages">
+          <Select value={scope} onValueChange={(value) => value && setScope(value)}>
+            <SelectTrigger aria-label="Messages" size="sm">
+              <SelectValue>{SCOPE_LABELS[scope]}</SelectValue>
+            </SelectTrigger>
+            <SelectPopup>
+              {(Object.keys(SCOPE_LABELS) as DelegationScope[]).map((option) => (
+                <SelectItem key={option} value={option}>
+                  {SCOPE_LABELS[option]}
+                </SelectItem>
+              ))}
+            </SelectPopup>
+          </Select>
+        </Labeled>
+        {scope === "range" && target.later.length > 0 ? (
+          <Labeled label="Through">
+            <Select
+              value={untilMessageId}
+              onValueChange={(value) => value !== null && setUntilMessageId(value)}
+            >
+              <SelectTrigger aria-label="Through" size="sm">
+                <SelectValue>
+                  {untilMessageId === LATEST
+                    ? "The latest message"
+                    : quoteOfMessage(
+                        target.later.find((message) => message.id === untilMessageId) ??
+                          target.message,
+                      )}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectPopup>
+                <SelectItem value={LATEST}>The latest message</SelectItem>
+                {[target.message, ...target.later].map((message) => (
+                  <SelectItem key={message.id} value={message.id}>
+                    {quoteOfMessage(message)}
+                  </SelectItem>
+                ))}
+              </SelectPopup>
+            </Select>
+          </Labeled>
+        ) : null}
         <Labeled label="Project">
           <Select
             value={chosenProject ?? ""}
@@ -363,7 +442,7 @@ export function DelegateDialog({
             <DialogTitle>Delegate to a thread</DialogTitle>
             <DialogDescription>
               <span className="line-clamp-2">
-                {nameOrUnknown(item.conversationName)}: {item.preview}
+                {nameOrUnknown(target.conversation.name)}: {quoteOfMessage(target.message)}
               </span>
             </DialogDescription>
           </DialogHeader>

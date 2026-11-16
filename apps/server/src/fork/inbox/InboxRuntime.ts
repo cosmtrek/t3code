@@ -86,7 +86,7 @@ const make = Effect.gen(function* () {
       if (!itemId || pending.has(itemId)) return;
       const timer = setTimeout(() => {
         pending.delete(itemId);
-        const link = store.linksForItem(itemId)[0];
+        const link = store.linksForDelegation(itemId)[0];
         if (link) hub.publish({ type: "inbox", channelId: link.channelId });
       }, WATCH_DEBOUNCE_MS);
       timer.unref?.();

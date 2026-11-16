@@ -1,6 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off globalDate:off globalTimers:off globalFetch:off extendsNativeError:off - Runs outside the Effect runtime: adapter sockets, timers, and plain callbacks.
 /**
- * The built-in example channel: protocol v1 served in process from made-up data, for
+ * The built-in example channel: protocol v2 served in process from made-up data, for
  * development, tests, screenshots, and trying the inbox without a real adapter.
  */
 import { CHANNEL_PROTOCOL_VERSION, type ChannelEvent } from "../protocol.ts";
@@ -28,7 +28,8 @@ interface Person {
 
 interface ExampleMessage {
   readonly id: string;
-  readonly topicId: string;
+  /** The message this one answers; its reply thread is that message's thread. */
+  readonly replyToId: string | null;
   readonly createdAt: string;
   readonly author: Person;
   readonly mentionsSelf: boolean;
@@ -65,14 +66,14 @@ function hoursAgo(now: number, hours: number) {
 function seed(now: number): ExampleConversation[] {
   const message = (
     id: string,
-    topicId: string,
+    replyToId: string | null,
     hours: number,
     author: Person,
     text: string,
     extra: Partial<ExampleMessage> = {},
   ): ExampleMessage => ({
     id,
-    topicId,
+    replyToId,
     createdAt: hoursAgo(now, hours),
     author,
     mentionsSelf: false,
@@ -91,14 +92,14 @@ function seed(now: number): ExampleConversation[] {
       messages: [
         message(
           "m-1",
-          "t-dm-1",
+          null,
           2.5,
           JORDAN,
           "Hey, the nightly export job failed again. Can you take a look before the 4pm sync?",
         ),
         message(
           "m-2",
-          "t-dm-1",
+          null,
           2.4,
           JORDAN,
           "Logs are in the dashboard: https://dashboard.example.com/jobs/export-nightly",
@@ -115,7 +116,7 @@ function seed(now: number): ExampleConversation[] {
       messages: [
         message(
           "m-10",
-          "t-platform-1",
+          null,
           5,
           PRIYA,
           "@Alex Rivera the cache hit rate dropped after yesterday's deploy, see the chart.",
@@ -124,16 +125,16 @@ function seed(now: number): ExampleConversation[] {
             attachments: [{ key: "chart", kind: "image", name: "cache-hit-rate.svg" }],
           },
         ),
-        message("m-11", "t-platform-1", 4.5, SAM, "I saw the same on the staging cluster."),
-        message("m-20", "t-platform-2", 52, PRIYA, "Who owns the retry budget config now?"),
+        message("m-11", "m-10", 4.5, SAM, "I saw the same on the staging cluster."),
+        message("m-20", null, 52, PRIYA, "Who owns the retry budget config now?"),
         message(
           "m-21",
-          "t-platform-2",
+          "m-20",
           30,
           SELF,
           "I do. I'll send a proposal for the new limits by Friday.",
         ),
-        message("m-30", "t-platform-3", 8, SAM, "Reminder: on-call handover is at 10am tomorrow."),
+        message("m-30", null, 8, SAM, "Reminder: on-call handover is at 10am tomorrow."),
       ],
     },
     {
@@ -143,21 +144,14 @@ function seed(now: number): ExampleConversation[] {
       relevant: true,
       muted: false,
       messages: [
-        message("m-40", "t-release-1", 3, BOT, "Release 2.14.0 is ready for sign-off.", {
+        message("m-40", null, 3, BOT, "Release 2.14.0 is ready for sign-off.", {
           richSummary: "[Card] Release 2.14.0 · 37 changes · Approve / Reject",
         }),
-        message("m-50", "t-release-2", 26, JORDAN, "Can we move the freeze to Thursday?"),
-        message("m-51", "t-release-2", 25, SELF, "Fine by me if QA agrees."),
-        message(
-          "m-52",
-          "t-release-2",
-          1,
-          PRIYA,
-          "QA agrees. @Alex Rivera can you update the calendar?",
-          {
-            mentionsSelf: true,
-          },
-        ),
+        message("m-50", null, 26, JORDAN, "Can we move the freeze to Thursday?"),
+        message("m-51", "m-50", 25, SELF, "Fine by me if QA agrees."),
+        message("m-52", "m-51", 1, PRIYA, "QA agrees. @Alex Rivera can you update the calendar?", {
+          mentionsSelf: true,
+        }),
       ],
     },
     {
@@ -166,7 +160,7 @@ function seed(now: number): ExampleConversation[] {
       name: "Random",
       relevant: false,
       muted: true,
-      messages: [message("m-60", "t-random-1", 6, SAM, "Lunch at the new place?")],
+      messages: [message("m-60", null, 6, SAM, "Lunch at the new place?")],
     },
   ];
 }
@@ -225,56 +219,91 @@ export function createExampleChannel(
     for (const listener of listeners) listener(event);
   };
 
-  const topicsOf = (conversation: ExampleConversation) => {
-    const byTopic = new Map<string, ExampleMessage[]>();
-    for (const item of conversation.messages) {
-      const list = byTopic.get(item.topicId) ?? [];
-      list.push(item);
-      byTopic.set(item.topicId, list);
-    }
-    return [...byTopic.entries()]
-      .map(([topicId, messages]) => {
-        const root = messages[0]!;
-        const last = lastOf(messages)!;
-        const lastOwn = messages.findLastIndex((item) => item.author.id === SELF.id);
-        return {
-          id: topicId,
-          rootMessageId: root.id,
-          rootPreview: root.text.slice(0, 140),
-          replyCount: messages.length - 1,
-          lastMessageAt: last.createdAt,
-          lastAuthor: { ...last.author, isSelf: last.author.id === SELF.id },
-          participatedBySelf: lastOwn !== -1,
-          lastOtherMessageAt:
-            messages.findLast((item) => item.author.id !== SELF.id)?.createdAt ?? null,
-          mentionsSelfSinceOwn: messages.slice(lastOwn + 1).some((item) => item.mentionsSelf),
-        };
-      })
-      .toSorted((a, b) => b.lastMessageAt.localeCompare(a.lastMessageAt));
+  const isSelf = (person: Person) => person.id === SELF.id;
+  const preview = (item: ExampleMessage) =>
+    (item.text || item.richSummary || item.attachments[0]?.name || "").slice(0, 140);
+  const byTime = (items: ReadonlyArray<ExampleMessage>) =>
+    items.toSorted((left, right) => left.createdAt.localeCompare(right.createdAt));
+
+  /** The thread's root: a reply's root is the root of the message it answers. */
+  const rootOf = (conversation: ExampleConversation, item: ExampleMessage): ExampleMessage => {
+    const parent =
+      item.replyToId === null
+        ? undefined
+        : conversation.messages.find((candidate) => candidate.id === item.replyToId);
+    return parent ? rootOf(conversation, parent) : item;
+  };
+
+  const toWire = (conversation: ExampleConversation, item: ExampleMessage) => {
+    const parent = conversation.messages.find((candidate) => candidate.id === item.replyToId);
+    const root = rootOf(conversation, item);
+    return {
+      id: item.id,
+      createdAt: item.createdAt,
+      rootId: root.id === item.id ? null : root.id,
+      replyTo:
+        item.replyToId === null
+          ? null
+          : {
+              id: item.replyToId,
+              authorName: parent?.author.name ?? null,
+              preview: parent ? preview(parent) : null,
+            },
+      author: { ...item.author, isSelf: isSelf(item.author) },
+      mentionsSelf: item.mentionsSelf,
+      text: item.text,
+      richSummary: item.richSummary ?? null,
+      attachments: item.attachments,
+      links: item.links,
+      openUrl: `${OPEN_URL_BASE}/${conversation.id}/${item.id}`,
+    };
+  };
+
+  const summaryOf = (conversation: ExampleConversation) => {
+    const messages = byTime(conversation.messages);
+    const last = lastOf(messages);
+    return {
+      id: conversation.id,
+      kind: conversation.kind,
+      name: conversation.name,
+      lastActivityAt: last?.createdAt ?? new Date(0).toISOString(),
+      relevant: conversation.relevant,
+      muted: conversation.muted,
+      lastMessage: last
+        ? {
+            id: last.id,
+            createdAt: last.createdAt,
+            author: { ...last.author, isSelf: isSelf(last.author) },
+            preview: preview(last),
+          }
+        : null,
+      lastOtherMessageAt: messages.findLast((item) => !isSelf(item.author))?.createdAt ?? null,
+      lastSelfMessageAt: messages.findLast((item) => isSelf(item.author))?.createdAt ?? null,
+      lastMentionAt: messages.findLast((item) => item.mentionsSelf)?.createdAt ?? null,
+      selfReadThroughAt: null,
+    };
   };
 
   const append = (conversation: ExampleConversation, item: ExampleMessage) => {
     conversation.messages.push(item);
-    emit({ type: "message.created", conversationId: conversation.id, topicId: item.topicId });
+    emit({ type: "message.created", conversationId: conversation.id });
   };
 
   const send = (body: unknown): AdapterResponse => {
-    const input = body as { conversationId?: unknown; topicId?: unknown; text?: unknown } | null;
+    const input = body as { conversationId?: unknown; replyToId?: unknown; text?: unknown } | null;
     const conversation = conversations.find((item) => item.id === input?.conversationId);
     if (!conversation || typeof input?.text !== "string" || input.text.trim().length === 0) {
       return json(400, {
         error: { code: "rejected", message: "Unknown conversation or empty text." },
       });
     }
-    const topicId =
-      typeof input.topicId === "string" &&
-      conversation.messages.some((item) => item.topicId === input.topicId)
-        ? input.topicId
-        : `t-new-${nextId}`;
+    // Like Feishu, a reply lands under its thread's root, whichever message it answered.
+    const target = conversation.messages.find((item) => item.id === input.replyToId);
+    const replyToId = target ? rootOf(conversation, target).id : null;
     const messageId = `m-${nextId++}`;
     append(conversation, {
       id: messageId,
-      topicId,
+      replyToId,
       createdAt: new Date(now()).toISOString(),
       author: SELF,
       mentionsSelf: false,
@@ -288,7 +317,7 @@ export function createExampleChannel(
       timers.delete(timer);
       append(conversation, {
         id: `m-${nextId++}`,
-        topicId,
+        replyToId,
         createdAt: new Date(now()).toISOString(),
         author: other,
         mentionsSelf: false,
@@ -355,33 +384,18 @@ export function createExampleChannel(
       const relevantOnly = url.searchParams.get("relevant") === "1";
       const items = conversations
         .filter((item) => !relevantOnly || item.relevant)
-        .map((item) => ({
-          id: item.id,
-          kind: item.kind,
-          name: item.name,
-          lastActivityAt: lastOf(item.messages)?.createdAt ?? new Date(0).toISOString(),
-          relevant: item.relevant,
-          muted: item.muted,
-        }))
+        .map(summaryOf)
         // Newest first, as the protocol requires: a capped read keeps the latest.
         .toSorted((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt));
       return json(200, paginate(items, url));
     }
     const conversation =
       head === "conversations" ? conversations.find((item) => item.id === id) : undefined;
-    if (conversation && tail === "topics" && segments.length === 3) {
-      return json(200, paginate(topicsOf(conversation), url));
-    }
     if (conversation && tail === "messages" && segments.length === 3) {
-      const topic = url.searchParams.get("topic");
+      const root = url.searchParams.get("root");
       const items = conversation.messages
-        .filter((item) => topic === null || item.topicId === topic)
-        .map((item) => ({
-          ...item,
-          author: { ...item.author, isSelf: item.author.id === SELF.id },
-          richSummary: item.richSummary ?? null,
-          openUrl: `${OPEN_URL_BASE}/${conversation.id}/${item.topicId}/${item.id}`,
-        }));
+        .filter((item) => root === null || rootOf(conversation, item).id === root)
+        .map((item) => toWire(conversation, item));
       // Seed messages are not stored in time order.
       const ordered =
         url.searchParams.get("order") === "desc"

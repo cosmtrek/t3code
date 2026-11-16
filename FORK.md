@@ -246,21 +246,21 @@ Review this list after every sync, and upstream whatever upstream would take.
 
 ## Inbox and channels
 
-The inbox (`/inbox`) shows messages an external chat adapter collects, delegates a topic to a
-thread, and sends the thread's draft back. Settings → Channels configures adapters per
+The inbox (`/inbox`) mirrors the conversations an external chat adapter collects, delegates
+messages to a thread, and sends the thread's draft back. Settings → Channels configures adapters per
 environment. Everything lives in fork-only directories:
 
 - Server: `apps/server/src/fork/` (`layer.ts` merges it all; `channels/` holds the protocol client,
-  `channels.json`, and the in-process example channel; `inbox/` holds items, delegation, and
+  `channels.json`, and the in-process example channel; `inbox/` holds conversations, delegations, and
   `inbox.sqlite`). Routes are plain `HttpRouter` routes under `/api/fork/channels` and
   `/api/fork/inbox`, authenticated with `authenticateMediaRequest` like the device hub proxy.
 - Web: `apps/web/src/fork/`, plus the thin routes `_chat.inbox.tsx` and
   `_chat.settings.channels.tsx`. `forkApiAccess.ts` mints the per-environment media ticket, so
   remote environments work.
-- State: `<stateDir>/channels/` only (`channels.json`, `inbox.sqlite`, `items/<itemId>/`). No
+- State: `<stateDir>/channels/` only (`channels.json`, `inbox.sqlite`, `items/<delegationId>/`). No
   contracts, `settings.json`, or main-database changes.
 
-The adapter protocol (v1) is defined by `apps/server/src/fork/channels/protocol.ts` alone;
+The adapter protocol (v2) is defined by `apps/server/src/fork/channels/protocol.ts` alone;
 [docs/fork/channel-protocol.md](docs/fork/channel-protocol.md) explains it, and
 `channels/fixtures/` holds a valid answer per endpoint for adapters' contract tests. The example
 channel (`channels/example/exampleChannel.ts`) implements all of it with made-up data.
@@ -309,25 +309,26 @@ seam files. Then try the example channel end to end in a browser before releasin
   `creationSource: "server"` and `createdBy: "user"`. The default model is the project's, through
   the shared `resolveNewThreadModelSelection`, else the first ready provider's default model. The
   title is `<sender>: <summary>`, cut at a word or sentence near 48 characters.
-- A protocol v1 template is only a prompt. "Read only" in a template is an instruction to the
+- A protocol template is only a prompt. "Read only" in a template is an instruction to the
   agent; the thread runs in the project's default runtime mode. Enforcing a mode would need a
   `runtimeMode` field in the protocol's templates.
-- Each delegation gets its own context folder, `items/<itemId>/<thread>/`, so a newer thread never
-  shows an older thread's files and an older thread that finishes late cannot overwrite them. Only
-  the item's current thread drives its state and fills the reply box; a deleted or replaced
-  thread's conclusion shows as history. One delegation per item runs at a time, and "Start a new
-  thread" replaces only the thread the dialog showed. A topic longer than the message page cap is
-  refused rather than delegated with part of the conversation.
+- Each thread gets its own context folder, `items/<delegationId>/<thread>/`, so a newer thread
+  never shows an older thread's files and an older thread that finishes late cannot overwrite
+  them. Only the delegation's current thread drives its state and offers its draft; a deleted or
+  replaced thread's conclusion shows as history. One launch per delegation runs at a time, and
+  "Start a new thread" replaces only the thread the dialog showed. A reply thread longer than the
+  page cap, or a range whose first message is further back than the inbox reads, is refused
+  rather than delegated with part of it.
 - The dialog chooses the thread's checkout: the project's, a new worktree, or an existing one.
-  Another delegation of the same topic defaults to the worktree its last thread worked in, read
+  Delegating the same messages again defaults to the worktree its last thread worked in, read
   from that thread rather than stored.
-- A question asked from the topic's thread card goes to the current thread with a note to update
-  its files; the topic detail shows the latest five questions and answers without that note.
+- A question asked from the delegation's thread card goes to the current thread with a note to
+  update its files; the delegation shows the latest five questions and answers without that note.
 - The thread writes `conclusion.md` and `draft.md` into its folder. When it cannot (a sandbox
   limited to the workspace), it ends its reply with `<conclusion>` and `<draft>` tags; the inbox
   reads each finished run once and writes the files (`.fallback.json` records the run and what it
   wrote). A later run's tags replace an earlier run's; a file the thread wrote itself always wins.
-- A sent reply is kept as `items/<itemId>/sent.<time>.<hash>.md`: the text as sent, its message
+- A reply sent from a delegation's draft is kept as `items/<delegationId>/sent.<time>.<hash>.md`: the text as sent, its message
   id, and whether it was the draft, an edited draft, or typed. An adapter answer without a message
   id leaves the draft in place and reports the delivery as unknown. A send whose copy cannot be
   written still succeeds and says so.
