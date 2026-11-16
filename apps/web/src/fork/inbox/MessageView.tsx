@@ -63,7 +63,7 @@ export function MessageView({
       {hasText ? (
         <p
           className={cn(
-            "rounded-2xl px-3 py-2 text-sm break-words whitespace-pre-wrap",
+            "rounded-2xl px-3 py-2 text-sm whitespace-pre-wrap wrap-anywhere",
             self ? "rounded-tr-sm bg-primary text-primary-foreground" : "rounded-tl-sm bg-muted",
           )}
         >
@@ -72,7 +72,7 @@ export function MessageView({
       ) : null}
       {message.richSummary ? (
         <div className="rounded-xl border border-border/60 bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-          <p className="break-words whitespace-pre-wrap">{message.richSummary}</p>
+          <p className="whitespace-pre-wrap wrap-anywhere">{message.richSummary}</p>
           {message.openUrl ? (
             <a
               className="mt-1 inline-flex items-center gap-1 text-foreground underline-offset-2 hover:underline"
