@@ -7,6 +7,7 @@ import {
   mergeConversationPages,
   quoteOf,
   replyTargetOf,
+  inView,
   itemMeta,
   minuteToMs,
   nextReplyText,
@@ -30,8 +31,8 @@ describe("nextReplyText", () => {
 
 describe("emptyViewTitle", () => {
   it.each([
-    ["pending", "all", "Nothing pending"],
-    ["pending", "dm", "No pending DMs"],
+    ["unread", "all", "Nothing unread"],
+    ["unread", "dm", "No unread DMs"],
     ["waiting", "groups", "No waiting group topics"],
     ["all", "dm", "No DMs"],
   ] as const)("names an empty %s list filtered to %s", (view, filter, title) => {
@@ -42,12 +43,23 @@ describe("emptyViewTitle", () => {
 describe("itemMeta", () => {
   const author = (name: string) => ({ id: "u", name, isSelf: false });
   it.each([
-    ["names the last author", 40, "Sam Okafor", "needs_reply", "40 replies · Sam Okafor"],
-    ["leaves out a nameless author", 40, "  ", "needs_reply", "40 replies"],
-    ["has nothing to say", 0, "", "needs_reply", null],
-    ["leaves the author to a waiting topic's label", 1, "Sam", "waiting", "1 reply"],
-  ] as const)("%s", (_case, replyCount, name, state, meta) => {
-    expect(itemMeta({ replyCount, lastAuthor: author(name), state })).toBe(meta);
+    ["names the last author", 40, "Sam Okafor", false, "40 replies · Sam Okafor"],
+    ["leaves out a nameless author", 40, "  ", false, "40 replies"],
+    ["has nothing to say", 0, "", false, null],
+    ["leaves the author to a waiting topic's label", 1, "Sam", true, "1 reply"],
+  ] as const)("%s", (_case, replyCount, name, awaitingReply, meta) => {
+    expect(itemMeta({ replyCount, lastAuthor: author(name), awaitingReply })).toBe(meta);
+  });
+});
+
+describe("inView", () => {
+  const topic = (unread: boolean) =>
+    ({ id: "i", conversationKind: "group", unread, awaitingReply: false }) as InboxItem;
+  it("keeps the open topic in Unread after it is read, and only that one", () => {
+    expect(inView("unread", "all", topic(true))).toBe(true);
+    expect(inView("unread", "all", topic(false))).toBe(false);
+    expect(inView("unread", "all", topic(false), "i")).toBe(true);
+    expect(inView("unread", "dm", topic(false), "i")).toBe(false);
   });
 });
 

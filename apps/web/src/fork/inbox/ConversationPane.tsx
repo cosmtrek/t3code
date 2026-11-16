@@ -1,5 +1,5 @@
 import type { EnvironmentId } from "@t3tools/contracts";
-import { BotIcon, CheckIcon, CopyIcon, ExternalLinkIcon, EyeOffIcon } from "lucide-react";
+import { BotIcon, CopyIcon, ExternalLinkIcon, MailIcon, MailOpenIcon } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 
 import { Button } from "../../components/ui/button";
@@ -9,20 +9,19 @@ import { forkRequest } from "../forkApiAccess";
 import type { ConversationResponse, InboxItem } from "../types";
 import { useForkResource, type ForkRefreshFilter } from "../useForkResource";
 import {
-  STATE_LABELS,
   conversationRows,
   mergeConversationPages,
   nameOrUnknown,
   skippedNotice,
   type OlderPages,
 } from "./inboxView";
-import { copyItemContext, openItemInApp, type MarkTarget } from "./itemActions";
+import { copyItemContext, openItemInApp } from "./itemActions";
 import { MessageView } from "./MessageView";
 
 interface TopicHandlers {
   readonly onSelect: (item: InboxItem) => void;
   readonly onDelegate: (item: InboxItem) => void;
-  readonly onMark: (item: InboxItem, state: MarkTarget) => void;
+  readonly onSetRead: (item: InboxItem, read: boolean) => void;
 }
 
 /** Older messages load once the reader scrolls this close to the top. */
@@ -268,7 +267,7 @@ function ConversationMessages({
                 showAuthor={rows[index - 1]?.message.author.id !== row.message.author.id}
                 quote={row.quote}
               >
-                {decorated && (replies > 0 || item.state !== "open") ? (
+                {decorated && (replies > 0 || item.unread) ? (
                   <span className="flex items-center gap-2 text-xs text-muted-foreground">
                     {replies > 0 ? (
                       <button
@@ -279,7 +278,7 @@ function ConversationMessages({
                         {replies} {replies === 1 ? "reply" : "replies"}
                       </button>
                     ) : null}
-                    {item.state === "open" ? null : <span>{STATE_LABELS[item.state]}</span>}
+                    {item.unread ? <span className="text-primary">Unread</span> : null}
                   </span>
                 ) : null}
               </MessageView>
@@ -310,7 +309,6 @@ function TopicToolbar({
   readonly readOnly: boolean;
   readonly handlers: TopicHandlers;
 }) {
-  const marked = item.state === "done" || item.state === "ignored";
   return (
     // Its clicks act on the topic, not select it.
     <div
@@ -326,26 +324,14 @@ function TopicToolbar({
       >
         <BotIcon />
       </Button>
-      {marked ? null : (
-        <>
-          <Button
-            size="icon-xs"
-            variant="ghost"
-            aria-label="Mark done"
-            onClick={() => handlers.onMark(item, "done")}
-          >
-            <CheckIcon />
-          </Button>
-          <Button
-            size="icon-xs"
-            variant="ghost"
-            aria-label="Ignore"
-            onClick={() => handlers.onMark(item, "ignored")}
-          >
-            <EyeOffIcon />
-          </Button>
-        </>
-      )}
+      <Button
+        size="icon-xs"
+        variant="ghost"
+        aria-label={item.unread ? "Mark read" : "Mark unread"}
+        onClick={() => handlers.onSetRead(item, !item.unread)}
+      >
+        {item.unread ? <MailOpenIcon /> : <MailIcon />}
+      </Button>
       <Button
         size="icon-xs"
         variant="ghost"

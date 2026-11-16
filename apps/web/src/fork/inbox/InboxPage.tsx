@@ -2,6 +2,7 @@ import { Link } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
   BotIcon,
+  CheckCheckIcon,
   InboxIcon,
   ListFilterIcon,
   MessagesSquareIcon,
@@ -46,7 +47,6 @@ import { InboxList, ItemMenu } from "./InboxList";
 import {
   INBOX_FILTERS,
   INBOX_VIEWS,
-  STATE_LABELS,
   channelBanner,
   emptyViewTitle,
   inView,
@@ -55,7 +55,7 @@ import {
   type InboxFilter,
   type InboxView,
 } from "./inboxView";
-import { markItem, topicPath, type MarkTarget } from "./itemActions";
+import { markAllRead, setItemRead, topicPath } from "./itemActions";
 import { TopicDetail } from "./TopicDetail";
 import { useInboxOverviews, type EnvironmentInbox } from "./useInboxOverviews";
 
@@ -106,7 +106,7 @@ export function InboxPage() {
                 {inboxes.map((candidate) => (
                   <SelectItem key={candidate.environmentId} value={candidate.environmentId}>
                     {candidate.label}
-                    {candidate.pendingCount > 0 ? ` (${candidate.pendingCount})` : ""}
+                    {candidate.unreadCount > 0 ? ` (${candidate.unreadCount})` : ""}
                   </SelectItem>
                 ))}
               </SelectPopup>
@@ -165,16 +165,13 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
     inbox.channels.find((candidate) => candidate.id === channelId) ??
     inbox.channels.find((candidate) => candidate.access.read) ??
     inbox.channels[0]!;
-  const [view, setView] = useState<InboxView>("pending");
+  const [view, setView] = useState<InboxView>("unread");
   const [filter, setFilter] = useState<InboxFilter>("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [delegating, setDelegating] = useState<InboxItem | null>(null);
-  // Marks sent but not yet read back, shown at once so the list answers the click.
-  const [pendingMarks, setPendingMarks] = useState<
-    ReadonlyMap<
-      string,
-      { readonly state: MarkTarget; readonly markedAt: string; readonly token: symbol }
-    >
+  // Reads sent but not yet read back, shown at once so the list answers the click.
+  const [pendingReads, setPendingReads] = useState<
+    ReadonlyMap<string, { readonly read: boolean; readonly token: symbol }>
   >(new Map());
 
   const refreshChannel = (event: { type: string; channelId?: string }) =>
@@ -185,14 +182,11 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
     refreshChannel,
   );
   const items = (listing.data?.items ?? []).map((item) => {
-    const pending = pendingMarks.get(item.id);
-    return pending?.state
-      ? {
-          ...item,
-          state: pending.state,
-          mark: { state: pending.state, markedAt: pending.markedAt },
-        }
-      : item;
+    const pending = pendingReads.get(item.id);
+    if (pending === undefined) return item;
+    return pending.read
+      ? { ...item, unread: false, agentUnseen: false }
+      : { ...item, unread: true };
   });
   const selected = items.find((item) => item.id === selectedId) ?? null;
   const detail = useForkResource<TopicDetailData>(
@@ -200,30 +194,44 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
     selected ? topicPath(selected) : null,
     refreshChannel,
   );
-  const visible = items.filter((item) => inView(view, filter, item));
+  const visible = items.filter((item) => inView(view, filter, item, selectedId));
   const readOnly = listing.data?.access.stale ?? !channel.access.send;
   const banner = channelBanner(channel);
-  const onMark = async (item: InboxItem, state: MarkTarget) => {
+  const onSetRead = async (item: InboxItem, read: boolean) => {
     const token = Symbol(item.id);
     const settle = () =>
-      setPendingMarks((current) => {
+      setPendingReads((current) => {
         if (current.get(item.id)?.token !== token) return current;
         const next = new Map(current);
         next.delete(item.id);
         return next;
       });
-    setPendingMarks((current) =>
-      new Map(current).set(item.id, { state, markedAt: new Date().toISOString(), token }),
-    );
+    // Unread on the open topic would be read again at once; close it instead.
+    if (!read && item.id === selectedId) setSelectedId(null);
+    setPendingReads((current) => new Map(current).set(item.id, { read, token }));
     // The event stream may be down; read the list back rather than wait for the poll.
-    if (await markItem(environmentId, item, state)) await listing.refresh();
+    if (await setItemRead(environmentId, item, read)) await listing.refresh();
     settle();
   };
-  const handlers = {
-    onSelect: (item: InboxItem) => setSelectedId(item.id),
-    onDelegate: (item: InboxItem) => setDelegating(item),
-    onMark: (item: InboxItem, state: MarkTarget) => void onMark(item, state),
+  const onMarkAllRead = async () => {
+    if (await markAllRead(environmentId, channel.id, listing.data?.items ?? [])) {
+      await listing.refresh();
+    }
   };
+  // Selecting is reading. A message that lands while the topic is open stays unread until the
+  // user acts on it again (selects it once more, or starts a reply), so the dot never just blinks.
+  const readItem = (item: InboxItem) => {
+    if (item.unread) void onSetRead(item, true);
+  };
+  const handlers = {
+    onSelect: (item: InboxItem) => {
+      setSelectedId(item.id);
+      readItem(item);
+    },
+    onDelegate: (item: InboxItem) => setDelegating(item),
+    onSetRead: (item: InboxItem, read: boolean) => void onSetRead(item, read),
+  };
+  const anyUnread = items.some((item) => item.unread);
   let list: ReactNode;
   if (!channel.access.read) {
     list = <InboxEmpty icon={<PlugZapIcon />} title="Channel unavailable" settingsLink />;
@@ -320,17 +328,19 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
                 );
               })}
             </ToggleGroup>
+            <Button
+              size="icon-xs"
+              variant="ghost-muted"
+              className="ms-auto"
+              aria-label="Mark all as read"
+              title="Mark all as read"
+              disabled={!anyUnread}
+              onClick={() => void onMarkAllRead()}
+            >
+              <CheckCheckIcon />
+            </Button>
             <Menu>
-              <MenuTrigger
-                render={
-                  <Button
-                    size="xs"
-                    variant="ghost-muted"
-                    className="ms-auto"
-                    aria-label="Filters"
-                  />
-                }
-              >
+              <MenuTrigger render={<Button size="xs" variant="ghost-muted" aria-label="Filters" />}>
                 <ListFilterIcon />
                 {filter === "all" ? null : (
                   <span>{INBOX_FILTERS.find((option) => option.id === filter)?.label}</span>
@@ -399,13 +409,8 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
                 >
                   <ArrowLeftIcon />
                 </Button>
-                <span className="min-w-0 flex-1 truncate text-xs">
-                  <span className="font-medium">{nameOrUnknown(selected.conversationName)}</span>
-                  <span className="text-muted-foreground">
-                    {" · "}
-                    {STATE_LABELS[selected.state]}
-                    {selected.reopened ? " · reopened" : ""}
-                  </span>
+                <span className="min-w-0 flex-1 truncate text-xs font-medium">
+                  {nameOrUnknown(selected.conversationName)}
                 </span>
                 <Button
                   size="xs"
@@ -421,7 +426,7 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
                   item={selected}
                   readOnly={readOnly}
                   onDelegate={handlers.onDelegate}
-                  onMark={handlers.onMark}
+                  onSetRead={handlers.onSetRead}
                 />
               </div>
               {detail.data && detail.data.item.id === selected.id ? (
@@ -429,6 +434,7 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
                   environmentId={environmentId}
                   detail={detail.data}
                   sendingOff={readOnly}
+                  onEngage={() => readItem(selected)}
                 />
               ) : detail.error ? (
                 <ReadError message={detail.error.message} onRetry={() => void detail.refresh()} />

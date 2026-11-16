@@ -10,7 +10,7 @@ export interface EnvironmentInbox {
   readonly environmentId: EnvironmentId;
   readonly label: string;
   readonly channels: ReadonlyArray<InboxChannelSummary>;
-  readonly pendingCount: number;
+  readonly unreadCount: number;
 }
 
 const REFRESH_DEBOUNCE_MS = 1_000;
@@ -62,8 +62,8 @@ export function useInboxOverviews(
                   environmentId: target.id,
                   label: target.label,
                   channels: overview.channels,
-                  pendingCount: overview.channels.reduce(
-                    (sum, channel) => sum + (channel.pendingCount ?? 0),
+                  unreadCount: overview.channels.reduce(
+                    (sum, channel) => sum + (channel.unreadCount ?? 0),
                     0,
                   ),
                 });

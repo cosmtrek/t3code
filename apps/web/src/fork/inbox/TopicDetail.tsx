@@ -35,14 +35,17 @@ export function TopicDetail({
   environmentId,
   detail,
   sendingOff,
+  onEngage,
 }: {
   readonly environmentId: EnvironmentId;
   readonly detail: TopicDetailData;
   readonly sendingOff: boolean;
+  /** The user acts inside the topic, such as starting a reply: what arrived since is read. */
+  readonly onEngage: () => void;
 }) {
   const { item } = detail;
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div className="flex min-h-0 flex-1 flex-col" onFocus={onEngage}>
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-3">
         {detail.truncatedAtPages !== null ? (
           <p className="mb-3 text-xs text-muted-foreground">
@@ -255,7 +258,7 @@ function AskThread({
 }
 
 /** The thread's status as the sidebar shows it, live from this client's thread state. */
-function ThreadStatus({
+export function ThreadStatus({
   environmentId,
   thread,
 }: {

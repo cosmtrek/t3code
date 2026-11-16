@@ -73,15 +73,14 @@ import {
 } from "./context.ts";
 import {
   compareItems,
+  countsTowardBadge,
   deriveItem,
   itemIdFor,
-  PENDING_STATES,
   sortMessages,
   type DerivedItem,
-  type ItemState,
 } from "./derive.ts";
 import { InboxRuntime } from "./InboxRuntime.ts";
-import type { Link, MarkState, TopicKey } from "./store.ts";
+import type { Link, TopicKey } from "./store.ts";
 
 export class ForkHttpError extends Schema.TaggedError<ForkHttpError>()("ForkHttpError", {
   status: Schema.Number,
@@ -150,6 +149,8 @@ const CONVERSATION_PAGES = 20;
 const TOPIC_PAGES = 5;
 const MESSAGE_PAGES = 50;
 const SENDER_HISTORY_MS = 7 * 24 * 3_600_000;
+/** A channel read for the first time shows only its last week as unread. */
+const FIRST_READ_LOOKBACK_MS = 7 * 24 * 3_600_000;
 
 const decodeSendResultOption = Schema.decodeUnknownOption(SendResult);
 const decodeModelSelection = Schema.decodeUnknownEffect(ModelSelection);
@@ -272,6 +273,8 @@ export interface LinkedThreadView {
   readonly projectId: string;
   readonly title: string | null;
   readonly status: LinkedThreadStatus;
+  /** When its last run worth a look finished; null while running or after a quiet run. */
+  readonly runCompletedAt: string | null;
   readonly createdAt: string;
   readonly detachedAt: string | null;
 }
@@ -281,6 +284,22 @@ const RUNNING = new Set<string>(ThreadManagement.ACTIVE_RUN_STATUSES);
 function threadStatus(shell: OrchestrationV2ThreadShell): LinkedThreadStatus {
   if (shell.archivedAt !== null) return "archived";
   return shell.activeRunId !== null || RUNNING.has(shell.status) ? "running" : "idle";
+}
+
+/** A stopped run, a rollback, or a background-work wake (a Monitor line) has nothing new to show. */
+const NOTABLE_RUN_STATUSES = new Set<string>(["completed", "failed", "interrupted"]);
+
+function runCompletedAt(shell: OrchestrationV2ThreadShell): string | null {
+  if (
+    threadStatus(shell) === "running" ||
+    !NOTABLE_RUN_STATUSES.has(shell.status) ||
+    shell.latestRunStopRequested === true ||
+    shell.latestRunBackgroundWake === true ||
+    !shell.latestRunCompletedAt
+  ) {
+    return null;
+  }
+  return DateTime.formatIso(shell.latestRunCompletedAt);
 }
 
 /**
@@ -335,25 +354,46 @@ const inspectLink = Effect.fn("ForkInbox.inspectLink")(function* (
     detachedAt: link.detachedAt,
   };
   if (link.detachedAt !== null && link.detachedReason === "deleted") {
-    return { ...base, title: null, status: "deleted" } satisfies LinkedThreadView;
+    return {
+      ...base,
+      title: null,
+      status: "deleted",
+      runCompletedAt: null,
+    } satisfies LinkedThreadView;
   }
   const threads = yield* ThreadManagement.ThreadManagementService;
   const shell = yield* threads
     .getThreadShell(ThreadId.make(link.threadId))
     .pipe(Effect.orElseSucceed(() => undefined));
   if (shell === undefined)
-    return { ...base, title: null, status: "unknown" } satisfies LinkedThreadView;
+    return {
+      ...base,
+      title: null,
+      status: "unknown",
+      runCompletedAt: null,
+    } satisfies LinkedThreadView;
   if (shell === null || shell.deletedAt !== null) {
     const at = link.detachedAt ?? new Date().toISOString();
     if (link.detachedAt === null) {
       runtime.store.detachLink(link.itemId, link.threadId, "deleted", at);
     }
-    return { ...base, detachedAt: at, title: null, status: "deleted" } satisfies LinkedThreadView;
+    return {
+      ...base,
+      detachedAt: at,
+      title: null,
+      status: "deleted",
+      runCompletedAt: null,
+    } satisfies LinkedThreadView;
   }
   if (options.current && link.detachedAt === null) {
     yield* applyFallbackFor(threadContextDir(runtime.itemsDir, link.itemId, link.threadId), shell);
   }
-  return { ...base, title: shell.title, status: threadStatus(shell) } satisfies LinkedThreadView;
+  return {
+    ...base,
+    title: shell.title,
+    status: threadStatus(shell),
+    runCompletedAt: runCompletedAt(shell),
+  } satisfies LinkedThreadView;
 });
 
 /** The newest link still attached; older ones were replaced or lost their thread. */
@@ -375,7 +415,6 @@ export interface InboxItem extends DerivedItem {
   readonly lastMessageAt: string;
   readonly lastAuthor: TopicType["lastAuthor"];
   readonly participatedBySelf: boolean;
-  readonly mark: { readonly state: MarkState; readonly markedAt: string } | null;
   readonly thread: LinkedThreadView | null;
   readonly hasConclusion: boolean;
   readonly hasDraft: boolean;
@@ -431,7 +470,7 @@ const itemsMemos = new WeakMap<ChannelHub, Map<string, ItemsMemo>>();
 
 /**
  * One event sends the overview, the list, and the open topic here at once. They share one read
- * of the channel, reused until the hub's revision for it moves (an adapter event, a mark, a
+ * of the channel, reused until the hub's revision for it moves (an adapter event, a read, a
  * link, a thread's run) or it gets old.
  */
 const readChannelItems = Effect.fn("ForkInbox.readChannelItems")(function* (channelId: string) {
@@ -472,7 +511,7 @@ const computeChannelItems = Effect.fn("ForkInbox.computeChannelItems")(function*
   let stale = conversations.stale;
   let topicsTruncated = false;
   let skipped = conversations.skipped;
-  const marks = new Map(store.listMarks(channelId).map((mark) => [itemIdFor(mark), mark] as const));
+  const reads = new Map(store.listReads(channelId).map((read) => [itemIdFor(read), read] as const));
   const linksByItem = new Map<string, Link[]>();
   // Newest first, so each item's list starts with its latest link.
   for (const link of store.listLinks(channelId)) {
@@ -481,6 +520,10 @@ const computeChannelItems = Effect.fn("ForkInbox.computeChannelItems")(function*
     linksByItem.set(link.itemId, list);
   }
   const now = Date.now();
+  const readAllBefore = store.readAllBefore(
+    channelId,
+    new Date(now - FIRST_READ_LOOKBACK_MS).toISOString(),
+  );
   const perConversation = yield* Effect.forEach(
     conversations.items,
     (conversation) =>
@@ -504,7 +547,6 @@ const computeChannelItems = Effect.fn("ForkInbox.computeChannelItems")(function*
                 topicId: topic.id,
               };
               const id = itemIdFor(key);
-              const storedMark = marks.get(id) ?? null;
               const links = linksByItem.get(id) ?? [];
               const shown = activeLinkOf(links) ?? links[0];
               const thread = shown
@@ -515,21 +557,18 @@ const computeChannelItems = Effect.fn("ForkInbox.computeChannelItems")(function*
                     readArtifacts(threadContextDir(runtime.itemsDir, id, thread.threadId)),
                   )
                 : { conclusion: null, draft: null };
-              // A deleted or replaced thread's draft is history: it no longer drives the state.
-              const hasDraft = isCurrent(thread) && artifacts.draft !== null;
+              // A deleted or replaced thread is history: its draft and runs no longer count.
+              const current = isCurrent(thread);
               const derived = deriveItem({
                 conversation,
                 topic,
                 mentionsSelf: topic.mentionsSelfSinceOwn,
                 lastOtherMessageAt: topic.lastOtherMessageAt,
-                mark: storedMark,
-                threadRunning: thread?.status === "running",
-                hasDraft,
+                read: reads.get(id) ?? null,
+                readAllBefore,
+                runCompletedAt: current ? thread.runCompletedAt : null,
                 now,
               });
-              // Someone wrote after the mark: the mark is spent, and the state follows messages.
-              if (derived.reopened) store.clearMark(key);
-              const mark = derived.reopened ? null : storedMark;
               return {
                 ...derived,
                 id,
@@ -544,10 +583,9 @@ const computeChannelItems = Effect.fn("ForkInbox.computeChannelItems")(function*
                 lastMessageAt: topic.lastMessageAt,
                 lastAuthor: topic.lastAuthor,
                 participatedBySelf: topic.participatedBySelf,
-                mark: mark ? { state: mark.state, markedAt: mark.markedAt } : null,
                 thread,
                 hasConclusion: artifacts.conclusion !== null,
-                hasDraft,
+                hasDraft: current && artifacts.draft !== null,
               } satisfies InboxItem;
             }),
           { concurrency: 4 },
@@ -579,11 +617,11 @@ export interface InboxChannelSummary {
   readonly lastSyncAt: string | null;
   readonly selfName: string | null;
   readonly access: ReturnType<typeof channelAccess>;
-  readonly pendingCount: number | null;
+  readonly unreadCount: number | null;
   readonly error: string | null;
 }
 
-/** Enabled channels with their state; the sidebar badge sums `pendingCount`. */
+/** Enabled channels with their state; the sidebar badge sums `unreadCount`. */
 export const overview = Effect.fn("ForkInbox.overview")(function* () {
   const { hub } = yield* InboxRuntime;
   const channels = hub.list().filter((channel) => channel.enabled);
@@ -609,10 +647,8 @@ export const overview = Effect.fn("ForkInbox.overview")(function* () {
           lastSyncAt: channel.health?.lastSyncAt ?? null,
           selfName: channel.health?.self.name ?? null,
           access,
-          pendingCount:
-            listing?.ok === true
-              ? listing.result.items.filter((item) => PENDING_STATES.has(item.state)).length
-              : null,
+          unreadCount:
+            listing?.ok === true ? listing.result.items.filter(countsTowardBadge).length : null,
           error:
             listing?.ok === false
               ? listing.error
@@ -795,53 +831,52 @@ export const media = Effect.fn("ForkInbox.media")(function* (query: URLSearchPar
   return yield* attempt(() => hub.getMedia(channelId, `/media/${enc(messageId)}/${enc(key)}`));
 });
 
-const MarkInput = Schema.Struct({
+const ReadInput = Schema.Struct({
   channelId: Schema.String,
   conversationId: Schema.String,
   topicId: Schema.String,
-  state: Schema.NullOr(Schema.Literals(["done", "ignored"])),
-  /** The topic's last message as the client saw it: what was marked is what the user saw. */
+  read: Schema.Boolean,
+  /** The topic as the client showed it: what is marked read is what the user saw. */
   lastMessageAt: Schema.optional(Timestamp),
+  runCompletedAt: Schema.optional(Timestamp),
 });
-const decodeMarkInput = Schema.decodeUnknownEffect(MarkInput);
+const decodeReadInput = Schema.decodeUnknownEffect(ReadInput);
 
-/** Without the client's view, only the topic's own conversation is read, not the whole channel. */
-const topicLastMessageAt = Effect.fn("ForkInbox.topicLastMessageAt")(function* (key: TopicKey) {
-  const { hub } = yield* InboxRuntime;
-  const topics = yield* attempt(() =>
-    hub.getAllPages(key.channelId, topicsPath(key.conversationId), Topic, {
-      maxPages: TOPIC_PAGES,
-    }),
-  );
-  const topic = topics.items.find((candidate) => candidate.id === key.topicId);
-  if (!topic) {
-    return yield* new ForkHttpError({
-      status: 404,
-      code: "missing",
-      detail: "This topic is no longer listed by the channel.",
-    });
-  }
-  return topic.lastMessageAt;
-});
-
-export const mark = Effect.fn("ForkInbox.mark")(function* (body: unknown) {
-  const input = yield* decodeMarkInput(body).pipe(
-    Effect.mapError(() => badRequest("Name the topic and a state.")),
+export const setRead = Effect.fn("ForkInbox.setRead")(function* (body: unknown) {
+  const input = yield* decodeReadInput(body).pipe(
+    Effect.mapError(() => badRequest("Name the topic and whether it is read.")),
   );
   const runtime = yield* InboxRuntime;
-  if (input.state === null) {
-    runtime.store.clearMark(input);
-  } else {
-    const watermarkMessageAt = input.lastMessageAt ?? (yield* topicLastMessageAt(input));
-    runtime.store.setMark({
-      channelId: input.channelId,
-      conversationId: input.conversationId,
-      topicId: input.topicId,
-      state: input.state,
-      markedAt: new Date().toISOString(),
-      watermarkMessageAt,
+  const key: TopicKey = {
+    channelId: input.channelId,
+    conversationId: input.conversationId,
+    topicId: input.topicId,
+  };
+  if (input.read) {
+    runtime.store.markRead(key, {
+      ...(input.lastMessageAt === undefined ? {} : { readAt: input.lastMessageAt }),
+      ...(input.runCompletedAt === undefined ? {} : { agentSeenAt: input.runCompletedAt }),
     });
+  } else {
+    runtime.store.pinUnread(key);
   }
+  runtime.hub.publish({ type: "inbox", channelId: input.channelId });
+  return { ok: true };
+});
+
+const ReadAllInput = Schema.Struct({
+  channelId: Schema.String,
+  /** The newest message or run end the client showed, so nothing it did not show is cleared. */
+  before: Timestamp,
+});
+const decodeReadAllInput = Schema.decodeUnknownEffect(ReadAllInput);
+
+export const markAllRead = Effect.fn("ForkInbox.markAllRead")(function* (body: unknown) {
+  const input = yield* decodeReadAllInput(body).pipe(
+    Effect.mapError(() => badRequest("Name the channel and a time.")),
+  );
+  const runtime = yield* InboxRuntime;
+  runtime.store.markAllRead(input.channelId, input.before);
   runtime.hub.publish({ type: "inbox", channelId: input.channelId });
   return { ok: true };
 });
@@ -1125,7 +1160,7 @@ export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown
         at: candidate.lastMessageAt,
         conversationName: candidate.conversationName,
         preview: candidate.preview.slice(0, 160),
-        state: candidate.state satisfies ItemState,
+        state: candidate.unread ? "unread" : candidate.awaitingReply ? "waiting" : "read",
       }));
     const openUrl =
       messages.items.find((message) => message.id === item.rootMessageId)?.openUrl ??
@@ -1298,8 +1333,6 @@ export const send = Effect.fn("ForkInbox.send")(function* (body: unknown) {
       () => false,
     ),
   );
-  runtime.store.clearMark(key);
-  runtime.hub.publish({ type: "inbox", channelId: input.channelId });
   return { messageId, archived };
 });
 
