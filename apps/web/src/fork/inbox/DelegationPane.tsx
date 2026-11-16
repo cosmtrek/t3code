@@ -1,17 +1,18 @@
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { ThreadId, type EnvironmentId } from "@t3tools/contracts";
-import { useNavigate } from "@tanstack/react-router";
-import { BotIcon, CornerDownLeftIcon } from "lucide-react";
-import { useState } from "react";
+import { ChevronDownIcon, CornerDownLeftIcon } from "lucide-react";
+import { useState, type ReactNode } from "react";
 
+import ChatMarkdown from "../../components/ChatMarkdown";
 import { resolveThreadStatusPill } from "../../components/Sidebar.logic";
 import { Button } from "../../components/ui/button";
 import { Textarea } from "../../components/ui/textarea";
 import { cn } from "../../lib/utils";
 import { useThreadShell } from "../../state/entities";
 import { forkRequest } from "../forkApiAccess";
-import type { DelegationDetail, LinkedThread } from "../types";
-import { skippedNotice } from "./inboxView";
+import { formatTimestamp } from "../presentation";
+import type { DelegationDetail, FollowUp, LinkedThread } from "../types";
+import { quoteOfMessage, skippedNotice } from "./inboxView";
 import { MessageView } from "./MessageView";
 
 /** The sidebar's words, for when the thread is not in this client's sidebar state. */
@@ -23,7 +24,10 @@ const THREAD_STATUS_LABELS: Readonly<Record<LinkedThread["status"], string | nul
   unknown: null,
 };
 
-/** A delegation: the messages it covers, its thread, and what the thread reported back. */
+/**
+ * A delegation: what the thread found, the conversation with it, and the reply. The thread does
+ * the work; this pane only asks it things and takes the reply when the user wants one.
+ */
 export function DelegationPane({
   environmentId,
   detail,
@@ -36,137 +40,211 @@ export function DelegationPane({
   /** Puts the draft into the conversation's reply box. */
   readonly onUseDraft: (text: string) => void;
 }) {
-  const { delegation } = detail;
+  const thread = detail.delegation.thread;
+  const live = thread !== null && thread.status !== "deleted" ? thread : null;
+  const shell = useThreadShell(
+    live ? scopeThreadRef(environmentId, ThreadId.make(live.threadId)) : null,
+  );
+  const cwd = shell?.worktreePath ?? undefined;
+  const canAsk = live !== null && live.status !== "archived" && !detail.conclusionIsHistorical;
+  const draft = detail.draft?.trim() ?? "";
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-3">
-      {!detail.complete ? (
-        <p className="mb-3 text-xs text-muted-foreground">
-          These messages run past what T3 Code reads; only part of them is shown.
-        </p>
-      ) : null}
-      {detail.rootMissing ? (
-        <p className="mb-3 text-xs text-muted-foreground">
-          The message this reply thread started from is no longer available.
-        </p>
-      ) : null}
-      {skippedNotice(detail.skipped) ? (
-        <p className="mb-3 text-xs text-warning">{skippedNotice(detail.skipped)}</p>
-      ) : null}
-      <ol className="flex flex-col gap-3">
-        {detail.messages.map((message, index) => (
-          <li key={message.id} className="flex min-w-0 flex-col">
-            <MessageView
-              environmentId={environmentId}
-              channelId={delegation.channelId}
-              message={message}
-              showAuthor={detail.messages[index - 1]?.author.id !== message.author.id}
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto overscroll-contain px-4 py-3">
+        <SourceMessages environmentId={environmentId} detail={detail} />
+
+        <Section
+          title={detail.conclusionIsHistorical ? "Earlier conclusion" : "Conclusion"}
+          accessory={live ? <ThreadStatus environmentId={environmentId} thread={live} /> : null}
+        >
+          {detail.conclusion !== null ? (
+            <ChatMarkdown
+              text={detail.conclusion}
+              cwd={cwd}
+              headingLevelOffset={3}
+              className="text-sm"
             />
-          </li>
-        ))}
-      </ol>
-      {delegation.thread || detail.conclusion !== null || detail.previousThreads.length > 0 ? (
-        <ThreadCard environmentId={environmentId} detail={detail} />
-      ) : null}
-      {detail.draft !== null && detail.draft.trim().length > 0 ? (
-        <section className="mt-3 flex flex-col gap-2 rounded-lg border border-border/70 p-3">
-          <h3 className="text-xs font-medium">Draft reply</h3>
-          <p className="text-sm whitespace-pre-wrap wrap-anywhere">{detail.draft.trim()}</p>
-          <Button
-            size="xs"
-            variant="outline"
-            className="self-start"
-            disabled={sendingOff || !detail.canSend}
-            onClick={() => onUseDraft(detail.draft!.trim())}
-          >
-            <CornerDownLeftIcon />
-            Use in reply
-          </Button>
-        </section>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              {thread === null
+                ? "No thread yet."
+                : live === null
+                  ? "The thread was deleted."
+                  : live.status === "idle"
+                    ? "Finished without a conclusion."
+                    : "None yet."}
+            </p>
+          )}
+        </Section>
+
+        {detail.followUps.length > 0 ? (
+          <Section title="With the agent">
+            <ol className="flex flex-col gap-3">
+              {detail.followUps.map((entry) => (
+                <li key={`${entry.role}:${entry.at}`} className="flex min-w-0 flex-col gap-0.5">
+                  <FollowUpEntry entry={entry} cwd={cwd} />
+                </li>
+              ))}
+            </ol>
+          </Section>
+        ) : null}
+
+        {draft.length > 0 ? (
+          <Section title="Draft reply">
+            <p className="text-sm whitespace-pre-wrap wrap-anywhere">{draft}</p>
+            <Button
+              size="xs"
+              variant="outline"
+              className="self-start"
+              disabled={sendingOff || !detail.canSend}
+              onClick={() => onUseDraft(draft)}
+            >
+              <CornerDownLeftIcon />
+              Use in reply
+            </Button>
+          </Section>
+        ) : null}
+
+        {detail.sent.length > 0 ? (
+          <Section title="Replied">
+            <ol className="flex flex-col gap-2">
+              {detail.sent.map((reply) => (
+                <li key={reply.sentAt} className="flex min-w-0 flex-col gap-0.5">
+                  <span className="text-xs text-muted-foreground">
+                    <time dateTime={reply.sentAt}>{formatTimestamp(reply.sentAt)}</time> ·{" "}
+                    {reply.source}
+                  </span>
+                  <p className="line-clamp-3 text-sm whitespace-pre-wrap wrap-anywhere text-foreground/80">
+                    {reply.text}
+                  </p>
+                </li>
+              ))}
+            </ol>
+          </Section>
+        ) : null}
+      </div>
+      {canAsk ? (
+        <AgentComposer key={live.threadId} environmentId={environmentId} detail={detail} />
       ) : null}
     </div>
   );
 }
 
-function ThreadCard({
+function Section({
+  title,
+  accessory,
+  children,
+}: {
+  readonly title: string;
+  readonly accessory?: ReactNode;
+  readonly children: ReactNode;
+}) {
+  return (
+    <section className="flex min-w-0 flex-col gap-2">
+      <header className="flex min-w-0 items-center gap-2">
+        <h3 className="min-w-0 flex-1 truncate text-xs font-medium text-muted-foreground">
+          {title}
+        </h3>
+        {accessory}
+      </header>
+      {children}
+    </section>
+  );
+}
+
+/** The delegated messages, folded to their first line: once delegated, the findings matter more. */
+function SourceMessages({
   environmentId,
   detail,
 }: {
   readonly environmentId: EnvironmentId;
   readonly detail: DelegationDetail;
 }) {
-  const navigate = useNavigate();
-  const thread = detail.delegation.thread;
-  const live = thread !== null && thread.status !== "deleted" ? thread : null;
+  const [open, setOpen] = useState(false);
+  const first = detail.messages[0];
+  const count = detail.messages.length;
+  const notices = [
+    detail.complete
+      ? null
+      : "These messages run past what T3 Code reads; only part of them is shown.",
+    detail.rootMissing
+      ? "The message this reply thread started from is no longer available."
+      : null,
+    skippedNotice(detail.skipped),
+  ].filter((notice) => notice !== null);
   return (
-    <section className="mt-4 flex flex-col gap-2 rounded-lg border border-border/70 p-3">
-      <header className="flex min-w-0 items-center gap-2">
-        <h3 className="min-w-0 flex-1 truncate text-sm font-medium">
-          {live
-            ? (live.title ?? "Linked thread")
-            : detail.conclusion !== null
-              ? "Earlier conclusion"
-              : "Thread deleted"}
-        </h3>
-        {live ? (
-          <>
-            <ThreadStatus environmentId={environmentId} thread={live} />
-            <Button
-              size="xs"
-              variant="outline"
-              onClick={() =>
-                void navigate({
-                  to: "/$environmentId/$threadId",
-                  params: { environmentId, threadId: ThreadId.make(live.threadId) },
-                })
-              }
-            >
-              Open
-            </Button>
-          </>
-        ) : null}
-      </header>
-      {detail.conclusion !== null ? (
-        <Conclusion text={detail.conclusion} />
-      ) : live?.status === "idle" ? (
-        <p className="text-xs text-muted-foreground">Finished without a conclusion</p>
-      ) : null}
-      {live && live.status !== "archived" && !detail.conclusionIsHistorical ? (
-        <AskThread key={live.threadId} environmentId={environmentId} detail={detail} />
+    <section className="flex min-w-0 flex-col gap-2">
+      {count === 0 ? null : (
+        <button
+          type="button"
+          aria-expanded={open}
+          className="flex min-w-0 items-center gap-2 text-left text-xs text-muted-foreground hover:text-foreground"
+          onClick={() => setOpen(!open)}
+        >
+          <ChevronDownIcon className={cn("size-3 shrink-0", !open && "-rotate-90")} />
+          <span className="shrink-0 font-medium">
+            {count === 1 ? "1 message" : `${count} messages`}
+          </span>
+          {first && !open ? (
+            <span className="min-w-0 truncate">{quoteOfMessage(first)}</span>
+          ) : null}
+        </button>
+      )}
+      {notices.map((notice) => (
+        <p key={notice} className="text-xs text-warning">
+          {notice}
+        </p>
+      ))}
+      {open ? (
+        <ol className="flex flex-col gap-3">
+          {detail.messages.map((message, index) => (
+            <li key={message.id} className="flex min-w-0 flex-col">
+              <MessageView
+                environmentId={environmentId}
+                channelId={detail.delegation.channelId}
+                message={message}
+                showAuthor={detail.messages[index - 1]?.author.id !== message.author.id}
+              />
+            </li>
+          ))}
+        </ol>
       ) : null}
     </section>
   );
 }
 
-const CONCLUSION_LINES = 8;
-
-function Conclusion({ text }: { readonly text: string }) {
-  const [expanded, setExpanded] = useState(false);
-  // Lines as written; a long wrapped line also counts as more than fits.
-  const long = text.split("\n").length > CONCLUSION_LINES || text.length > 640;
+function FollowUpEntry({
+  entry,
+  cwd,
+}: {
+  readonly entry: FollowUp;
+  readonly cwd: string | undefined;
+}) {
+  if (entry.role === "assistant") {
+    return (
+      <>
+        <span className="text-xs font-medium text-muted-foreground">Agent</span>
+        <ChatMarkdown text={entry.text} cwd={cwd} headingLevelOffset={3} className="text-sm" />
+      </>
+    );
+  }
   return (
-    <div className="flex flex-col items-start gap-1">
-      <p
-        className={cn(
-          "text-xs whitespace-pre-wrap wrap-anywhere",
-          long && !expanded && "line-clamp-8",
-        )}
-      >
-        {text}
-      </p>
-      {long ? (
-        <Button size="xs" variant="ghost-muted" onClick={() => setExpanded(!expanded)}>
-          {expanded ? "Show less" : "Show more"}
-        </Button>
+    <>
+      <span className="text-xs font-medium text-muted-foreground">
+        {entry.kind === "draft" ? "You asked for a reply" : "You"}
+      </span>
+      {entry.text.length > 0 ? (
+        <p className="text-sm whitespace-pre-wrap wrap-anywhere">{entry.text}</p>
       ) : null}
-    </div>
+    </>
   );
 }
 
 /**
- * Questions for the delegation's thread. A box of its own, apart from the reply: what goes in
- * here never reaches the chat app.
+ * One box for the thread: a question, or how to write the reply. Nothing typed here reaches the
+ * chat app; the reply lands in the draft and goes out only from the conversation's reply box.
  */
-function AskThread({
+function AgentComposer({
   environmentId,
   detail,
 }: {
@@ -174,91 +252,81 @@ function AskThread({
   readonly detail: DelegationDetail;
 }) {
   const [text, setText] = useState("");
-  const [asked, setAsked] = useState<string | null>(null);
-  const [asking, setAsking] = useState(false);
+  // The newest request the thread had recorded when this one was sent; waiting until it moves.
+  const [sentAfter, setSentAfter] = useState<string | null | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
-  const followUps = detail.followUps;
-  const lastQuestion = followUps.findLast((entry) => entry.role === "user")?.text ?? null;
-  // Shown until the thread's own record of it comes back.
-  const pending = asked !== null && asked !== lastQuestion ? asked : null;
-  const working = pending !== null || followUps.at(-1)?.role === "user";
+  const lastAsked = detail.followUps.findLast((entry) => entry.role === "user")?.at ?? null;
+  const waiting = sentAfter !== undefined && sentAfter === lastAsked;
+  const working = waiting || detail.followUps.at(-1)?.role === "user";
 
-  const ask = async () => {
-    const question = text.trim();
-    if (question.length === 0) return;
-    setAsking(true);
+  const submit = async (kind: FollowUp["kind"]) => {
+    const value = text.trim();
+    if (kind === "question" && value.length === 0) return;
+    setSentAfter(lastAsked);
     setError(null);
-    setAsked(question);
     setText("");
-    try {
-      await forkRequest(environmentId, "/inbox/ask", {
-        method: "POST",
-        body: {
-          channelId: detail.delegation.channelId,
-          delegationId: detail.delegation.id,
-          text: question,
-        },
-      });
-    } catch (cause) {
-      setAsked(null);
-      setText(question);
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setAsking(false);
+    const failure = await forkRequest(environmentId, "/inbox/ask", {
+      method: "POST",
+      body: {
+        channelId: detail.delegation.channelId,
+        delegationId: detail.delegation.id,
+        text: value,
+        kind,
+      },
+    }).then(
+      () => null,
+      (cause: unknown) => (cause instanceof Error ? cause.message : String(cause)),
+    );
+    if (failure !== null) {
+      setSentAfter(undefined);
+      setText(value);
+      setError(failure);
     }
   };
 
   return (
-    <div className="flex flex-col gap-2 border-t border-border/60 pt-2">
-      {followUps.length > 0 || pending !== null ? (
-        <ol className="flex flex-col gap-1.5 text-xs">
-          {followUps.map((entry) => (
-            <li key={`${entry.role}:${entry.at}`} className="whitespace-pre-wrap wrap-anywhere">
-              <span className="font-medium">{entry.role === "user" ? "You" : "Agent"}: </span>
-              {entry.text}
-            </li>
-          ))}
-          {pending !== null ? (
-            <li className="whitespace-pre-wrap wrap-anywhere">
-              <span className="font-medium">You: </span>
-              {pending}
-            </li>
-          ) : null}
-          {working ? <li className="text-muted-foreground">Working…</li> : null}
-        </ol>
-      ) : null}
-      <form
-        className="flex items-end gap-2"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void ask();
+    <form
+      className="flex shrink-0 flex-col gap-2 border-t border-border/70 p-3"
+      onSubmit={(event) => {
+        event.preventDefault();
+        void submit("question");
+      }}
+    >
+      <Textarea
+        aria-label="Message the agent"
+        value={text}
+        rows={2}
+        placeholder="Ask the agent, or say how to write the reply…"
+        onChange={(event) => setText(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+            event.preventDefault();
+            event.currentTarget.form?.requestSubmit();
+          }
         }}
-      >
-        <BotIcon className="mb-2 size-4 shrink-0 text-muted-foreground" />
-        <Textarea
-          aria-label="Ask the agent"
-          value={text}
-          rows={2}
-          placeholder="Ask the agent…"
-          onChange={(event) => setText(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-              event.preventDefault();
-              event.currentTarget.form?.requestSubmit();
-            }
-          }}
-        />
+      />
+      <div className="flex items-center gap-2">
+        {error ? (
+          <p className="min-w-0 flex-1 text-xs text-destructive-foreground">{error}</p>
+        ) : (
+          <p className="min-w-0 flex-1 text-xs text-muted-foreground">
+            {working ? "Working…" : null}
+          </p>
+        )}
         <Button
-          type="submit"
+          type="button"
           size="sm"
           variant="outline"
-          disabled={asking || text.trim().length === 0}
+          disabled={waiting}
+          onClick={() => void submit("draft")}
         >
+          Draft reply
+        </Button>
+        <Button type="submit" size="sm" disabled={waiting || text.trim().length === 0}>
           Ask
         </Button>
-      </form>
-      {error ? <p className="text-xs text-destructive-foreground">{error}</p> : null}
-    </div>
+      </div>
+    </form>
   );
 }
 

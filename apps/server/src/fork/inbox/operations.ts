@@ -43,7 +43,9 @@ import {
   Conversation,
   Message,
   RawPage,
+  Mention,
   SendResult,
+  Upload,
   Timestamp,
   type Conversation as ConversationType,
   type Message as MessageType,
@@ -52,6 +54,7 @@ import {
   applyFallback,
   fallbackApplied,
   readArtifacts,
+  readSent,
   recordSent,
   threadContextDir,
 } from "./artifacts.ts";
@@ -156,6 +159,17 @@ const SENDER_HISTORY_MS = 7 * 24 * 3_600_000;
 const FIRST_READ_LOOKBACK_MS = 7 * 24 * 3_600_000;
 
 const decodeSendResultOption = Schema.decodeUnknownOption(SendResult);
+const decodeUpload = Schema.decodeUnknownOption(Upload);
+
+/**
+ * A list of ids in the adapter's send answer. Read apart from `messageId`, so a malformed one
+ * never hides that the message went out.
+ */
+const idsIn = (answer: unknown, key: string): ReadonlySet<string> => {
+  const value: unknown =
+    typeof answer === "object" && answer !== null ? Reflect.get(answer, key) : undefined;
+  return new Set(Array.isArray(value) ? value.filter((id) => typeof id === "string") : []);
+};
 const decodeModelSelection = Schema.decodeUnknownEffect(ModelSelection);
 const decodeWorkspaceStrategy = Schema.decodeUnknownEffect(
   OrchestrationV2ThreadLaunchWorkspaceStrategy,
@@ -430,6 +444,8 @@ export interface InboxDelegation {
   readonly agentUnseen: boolean;
   readonly hasConclusion: boolean;
   readonly hasDraft: boolean;
+  /** When the user last replied from this delegation; null before the first reply. */
+  readonly lastSentAt: string | null;
 }
 
 /** The count only: the records themselves may hold message text. */
@@ -502,12 +518,15 @@ const inspectDelegation = Effect.fn("ForkInbox.inspectDelegation")(function* (
   const runtime = yield* InboxRuntime;
   const shown = activeLinkOf(links) ?? links[0];
   const thread = shown ? yield* inspectLink(shown, { current: shown.detachedAt === null }) : null;
-  const artifacts = thread
-    ? yield* Effect.promise(() =>
-        readArtifacts(threadContextDir(runtime.itemsDir, delegation.id, thread.threadId)),
-      )
-    : { conclusion: null, draft: null };
-  return { thread, artifacts };
+  const [artifacts, sent] = yield* Effect.promise(() =>
+    Promise.all([
+      thread
+        ? readArtifacts(threadContextDir(runtime.itemsDir, delegation.id, thread.threadId))
+        : { conclusion: null, draft: null },
+      readSent(NodePath.join(runtime.itemsDir, delegation.id)),
+    ]),
+  );
+  return { thread, artifacts, lastSentAt: sent[0]?.sentAt ?? null };
 });
 
 const computeChannel = Effect.fn("ForkInbox.computeChannel")(function* (channelId: string) {
@@ -553,7 +572,7 @@ const computeChannel = Effect.fn("ForkInbox.computeChannel")(function* (channelI
     store.listDelegations(channelId),
     (delegation) =>
       Effect.gen(function* () {
-        const { thread, artifacts } = yield* inspectDelegation(
+        const { thread, artifacts, lastSentAt } = yield* inspectDelegation(
           delegation,
           linksByDelegation.get(delegation.id) ?? [],
         );
@@ -576,6 +595,7 @@ const computeChannel = Effect.fn("ForkInbox.computeChannel")(function* (channelI
           }),
           hasConclusion: artifacts.conclusion !== null,
           hasDraft: current !== null && artifacts.draft !== null,
+          lastSentAt,
         } satisfies InboxDelegation;
       }),
     { concurrency: 4 },
@@ -600,6 +620,8 @@ export interface InboxChannelSummary {
   readonly lastSyncAt: string | null;
   readonly selfName: string | null;
   readonly access: ReturnType<typeof channelAccess>;
+  /** The optional parts of the protocol the adapter implements. */
+  readonly capabilities: ReadonlyArray<string>;
   readonly unreadCount: number | null;
   readonly error: string | null;
 }
@@ -635,6 +657,7 @@ export const overview = Effect.fn("ForkInbox.overview")(function* () {
           lastSyncAt: channel.health?.lastSyncAt ?? null,
           selfName: channel.health?.self.name ?? null,
           access,
+          capabilities: channel.config?.capabilities ?? [],
           unreadCount: listing?.ok === true ? badgeCount(listing.result) : null,
           error:
             listing?.ok === false
@@ -845,11 +868,14 @@ export const readDelegation = Effect.fn("ForkInbox.readDelegation")(function* (
   );
   const scoped = yield* readScope(delegation, conversation.kind, { cacheMs: 5_000 });
   const thread = item.thread;
-  const artifacts = thread
-    ? yield* Effect.promise(() =>
-        readArtifacts(threadContextDir(runtime.itemsDir, item.id, thread.threadId)),
-      )
-    : { conclusion: null, draft: null };
+  const [artifacts, sent] = yield* Effect.promise(() =>
+    Promise.all([
+      thread
+        ? readArtifacts(threadContextDir(runtime.itemsDir, item.id, thread.threadId))
+        : { conclusion: null, draft: null },
+      readSent(NodePath.join(runtime.itemsDir, item.id)),
+    ]),
+  );
   const current = isCurrent(thread);
   const history = yield* Effect.forEach(
     runtime.store.linksForDelegation(item.id).filter((link) => link.threadId !== thread?.threadId),
@@ -879,6 +905,7 @@ export const readDelegation = Effect.fn("ForkInbox.readDelegation")(function* (
     conclusionIsHistorical: artifacts.conclusion !== null && !current,
     previousThreads: history,
     followUps,
+    sent,
   };
 });
 
@@ -1452,6 +1479,12 @@ const SendInput = Schema.Struct({
   /** The delegation whose draft this is; a copy of what was sent goes into its folder. */
   delegationId: Schema.optional(Schema.String),
   text: Schema.String,
+  mentions: Schema.optional(Schema.Array(Mention)),
+  format: Schema.optional(Schema.Literals(["text", "markdown"])),
+  /** Files uploaded before; `name` is only for telling the user which one failed. */
+  attachments: Schema.optional(
+    Schema.Array(Schema.Struct({ uploadId: Schema.String, name: Schema.String })),
+  ),
 });
 const decodeSendInput = Schema.decodeUnknownEffect(SendInput);
 
@@ -1461,15 +1494,52 @@ const SEND_ERROR_MESSAGES: Readonly<Record<string, string>> = {
   rejected: "The chat app refused the message.",
 };
 
+const MAX_MENTIONS = 20;
+const MAX_ATTACHMENTS = 9;
+/** The adapter's own limit; a larger file is refused before it is read. */
+export const UPLOAD_MAX_BYTES = 100 * 1024 * 1024;
+
+type Capability = "mentions" | "markdown" | "attachments";
+const supports = (channel: ChannelView, capability: Capability) =>
+  channel.config?.capabilities?.includes(capability) ?? false;
+
+/** The adapter replaces each `@name` literally, so a name stands for one person and is in the text. */
+function mentionsToSend(text: string, mentions: ReadonlyArray<Mention>): ReadonlyArray<Mention> {
+  const ids = new Set<string>();
+  const names = new Set<string>();
+  return mentions
+    .filter(({ userId, name }) => {
+      if (userId.length === 0 || name.length === 0 || !text.includes(`@${name}`)) return false;
+      if (ids.has(userId) || names.has(name)) return false;
+      ids.add(userId);
+      names.add(name);
+      return true;
+    })
+    .slice(0, MAX_MENTIONS);
+}
+
 export const send = Effect.fn("ForkInbox.send")(function* (body: unknown) {
   const input = yield* decodeSendInput(body).pipe(
     Effect.mapError(() => badRequest("The message is missing fields.")),
   );
   const text = input.text.trim();
-  if (text.length === 0 || text.length > 20_000) {
+  const runtime = yield* InboxRuntime;
+  const channel = yield* channelOrMissing(input.channelId);
+  const attachments = input.attachments ?? [];
+  if (attachments.length > 0 && !supports(channel, "attachments")) {
+    return yield* badRequest("This channel cannot send files.", "attachments");
+  }
+  if (
+    attachments.length > MAX_ATTACHMENTS ||
+    new Set(attachments.map((attachment) => attachment.uploadId)).size !== attachments.length
+  ) {
+    return yield* badRequest(`Attach up to ${MAX_ATTACHMENTS} different files.`, "attachments");
+  }
+  if ((text.length === 0 && attachments.length === 0) || text.length > 20_000) {
     return yield* badRequest("Write a message of up to 20,000 characters.", "text");
   }
-  const runtime = yield* InboxRuntime;
+  const mentions = supports(channel, "mentions") ? mentionsToSend(text, input.mentions ?? []) : [];
+  const markdown = input.format === "markdown" && supports(channel, "markdown");
   const delegation =
     input.delegationId === undefined ? null : runtime.store.getDelegation(input.delegationId);
   const delegationId =
@@ -1489,6 +1559,11 @@ export const send = Effect.fn("ForkInbox.send")(function* (body: unknown) {
       conversationId: input.conversationId,
       ...(input.replyToId === undefined ? {} : { replyToId: input.replyToId }),
       text,
+      ...(mentions.length === 0 ? {} : { mentions }),
+      ...(markdown ? { format: "markdown" } : {}),
+      ...(attachments.length === 0
+        ? {}
+        : { attachments: attachments.map(({ uploadId }) => ({ uploadId })) }),
     }),
   ).pipe(
     Effect.mapError((error) =>
@@ -1513,7 +1588,20 @@ export const send = Effect.fn("ForkInbox.send")(function* (body: unknown) {
     });
   }
   const messageId = result.value.messageId;
-  if (delegationId === null) return { messageId, archived: null };
+  const unresolved = idsIn(answer, "unresolvedMentions");
+  const failed = idsIn(answer, "failedAttachments");
+  const outcome = {
+    messageId,
+    /** Names whose mention went out as plain text: nobody was notified for these. */
+    unresolvedMentions: mentions
+      .filter((mention) => unresolved.has(mention.userId))
+      .map((mention) => mention.name),
+    /** Names of the files that did not go out; the text and the other files did. */
+    failedAttachments: attachments
+      .filter((attachment) => failed.has(attachment.uploadId))
+      .map((attachment) => attachment.name),
+  };
+  if (delegationId === null) return { ...outcome, archived: null };
   // The message went out either way; a failed copy is reported, never retried by resending.
   const archived = yield* Effect.promise(() =>
     recordSent({
@@ -1521,6 +1609,7 @@ export const send = Effect.fn("ForkInbox.send")(function* (body: unknown) {
       draftDir,
       draftAtSend,
       text,
+      files: attachments.map((attachment) => attachment.name),
       messageId,
       sentAt: new Date().toISOString(),
     }).then(
@@ -1528,23 +1617,54 @@ export const send = Effect.fn("ForkInbox.send")(function* (body: unknown) {
       () => false,
     ),
   );
-  return { messageId, archived };
+  return { ...outcome, archived };
+});
+
+/** Hands the adapter a file to attach to a later send. */
+export const upload = Effect.fn("ForkInbox.upload")(function* (
+  query: URLSearchParams,
+  bytes: Uint8Array,
+) {
+  const channelId = query.get("channelId");
+  const name = query.get("name")?.trim() ?? "";
+  if (channelId === null || name.length === 0) {
+    return yield* badRequest("Name the channel and the file.");
+  }
+  const channel = yield* channelOrMissing(channelId);
+  if (!supports(channel, "attachments")) {
+    return yield* badRequest("This channel cannot send files.");
+  }
+  if (bytes.byteLength === 0) return yield* badRequest("The file is empty.");
+  const { hub } = yield* InboxRuntime;
+  const answer = yield* attempt(() => hub.upload(channelId, `/uploads?name=${enc(name)}`, bytes));
+  const uploaded = decodeUpload(answer);
+  if (uploaded._tag === "None") {
+    return yield* new ForkHttpError({
+      status: 502,
+      code: "upload_failed",
+      detail: "The adapter did not confirm the upload.",
+    });
+  }
+  return uploaded.value;
 });
 
 const AskInput = Schema.Struct({
   channelId: Schema.String,
   delegationId: Schema.String,
   text: Schema.String,
+  /** `draft` asks for the reply to send, with `text` as an optional instruction for it. */
+  kind: Schema.optional(Schema.Literals(["question", "draft"])),
 });
 const decodeAskInput = Schema.decodeUnknownEffect(AskInput);
 
-/** A question for the delegation's thread. It never reaches the chat app. */
+/** A question, or a request for the reply, for the delegation's thread. It never reaches the chat app. */
 export const ask = Effect.fn("ForkInbox.ask")(function* (body: unknown) {
   const input = yield* decodeAskInput(body).pipe(
     Effect.mapError(() => badRequest("The question is missing fields.")),
   );
+  const kind = input.kind ?? "question";
   const text = input.text.trim();
-  if (text.length === 0 || text.length > 20_000) {
+  if ((kind === "question" && text.length === 0) || text.length > 20_000) {
     return yield* badRequest("Write a question of up to 20,000 characters.", "text");
   }
   const runtime = yield* InboxRuntime;
@@ -1564,7 +1684,12 @@ export const ask = Effect.fn("ForkInbox.ask")(function* (body: unknown) {
     commandId,
     threadId: ThreadId.make(active.threadId),
     messageId: MessageId.make(commandId),
-    text: followUpMessage(text, threadContextDir(runtime.itemsDir, delegationId, active.threadId)),
+    text: followUpMessage(
+      text,
+      threadContextDir(runtime.itemsDir, delegationId, active.threadId),
+      kind,
+      { markdown: supports(yield* channelOrMissing(input.channelId), "markdown") },
+    ),
     attachments: [],
     // A running thread takes the question after its current run.
     mode: "queue",

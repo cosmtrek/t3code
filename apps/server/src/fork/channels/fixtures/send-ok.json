@@ -1,1 +1,6 @@
-{ "messageId": "om_4" }
+{
+  "messageId": "om_4",
+  "messageIds": ["om_4", "om_5"],
+  "unresolvedMentions": ["ou_bbb"],
+  "failedAttachments": ["up_2"]
+}

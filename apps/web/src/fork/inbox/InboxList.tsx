@@ -299,7 +299,11 @@ export function DelegationList({
               </span>
               <span className="flex min-w-0 items-center gap-2 text-xs">
                 {live ? <ThreadStatus environmentId={environmentId} thread={live} /> : null}
-                {item.hasDraft ? <span className="shrink-0 text-success">Draft</span> : null}
+                {item.hasDraft ? (
+                  <span className="shrink-0 text-success">Draft</span>
+                ) : item.lastSentAt !== null ? (
+                  <span className="shrink-0 text-muted-foreground">Replied</span>
+                ) : null}
                 {item.hasConclusion ? (
                   <span className="shrink-0 text-muted-foreground">Conclusion</span>
                 ) : null}

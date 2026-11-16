@@ -322,16 +322,28 @@ seam files. Then try the example channel end to end in a browser before releasin
 - The dialog chooses the thread's checkout: the project's, a new worktree, or an existing one.
   Delegating the same messages again defaults to the worktree its last thread worked in, read
   from that thread rather than stored.
-- A question asked from the delegation's thread card goes to the current thread with a note to
-  update its files; the delegation shows the latest five questions and answers without that note.
-- The thread writes `conclusion.md` and `draft.md` into its folder. When it cannot (a sandbox
-  limited to the workspace), it ends its reply with `<conclusion>` and `<draft>` tags; the inbox
-  reads each finished run once and writes the files (`.fallback.json` records the run and what it
-  wrote). A later run's tags replace an earlier run's; a file the thread wrote itself always wins.
+- A question asked from the delegation pane goes to the current thread with a note to keep its
+  conclusion current; the pane shows the latest five questions and answers without that note.
+- The thread writes `conclusion.md` into its folder on every run, and `draft.md` only when the
+  user asks for a reply ("Draft reply", sent like a question and queued behind a running turn).
+  Asking for the reply separately keeps a run from drafting before its findings and from
+  overwriting a reply the user is editing; templates should not ask for `draft.md` either. When
+  the thread cannot write there (a sandbox limited to the workspace), it ends its reply with
+  `<conclusion>` or `<draft>` tags; the inbox reads each finished run once and writes the files
+  (`.fallback.json` records the run and what it wrote). A later run's tags replace an earlier
+  run's; a file the thread wrote itself always wins.
 - A reply sent from a delegation's draft is kept as `items/<delegationId>/sent.<time>.<hash>.md`: the text as sent, its message
   id, and whether it was the draft, an edited draft, or typed. An adapter answer without a message
   id leaves the draft in place and reports the delivery as unknown. A send whose copy cannot be
-  written still succeeds and says so.
+  written still succeeds and says so. The delegation lists these records as its replies.
+- What a reply can carry depends on the adapter's `capabilities`. With `mentions`, it mentions
+  whoever its `@Name` matches among the people who wrote in the conversation; the reply box shows
+  who will be notified before sending, and a mention the chat app refused is reported after. With
+  `markdown`, a draft is asked for and sent as Markdown, and typed text stays text unless
+  switched. With `attachments`, picked or pasted files are uploaded to the adapter at once and
+  named in the send; they are not kept with the saved reply.
+- Replies the chat app keeps inside a thread (`inThread`) are folded under their root in the chat
+  view, and a range delegation takes them only together with their thread.
 - Linked threads' run, archive, and delete events refresh the inbox; nothing else in orchestration
   is followed.
 - The example channel's settings offer **Simulate**, to see each adapter state in the browser.

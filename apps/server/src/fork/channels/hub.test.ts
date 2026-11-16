@@ -31,6 +31,7 @@ import {
   RawPage,
   SendErrorCode,
   SendResult,
+  Upload,
   createSseParser,
   parseChannelEvent,
   type ChannelEvent,
@@ -888,6 +889,7 @@ describe("protocol fixtures", () => {
     ["health.json", ChannelHealth],
     ["config.json", AdapterConfig],
     ["send-ok.json", SendResult],
+    ["upload-ok.json", Upload],
     ["send-error.json", AdapterError],
   ] as const)("%s decodes", async (name, schema) => {
     expect(decodes(schema, JSON.parse(await fixture(name)))).toBe("Success");

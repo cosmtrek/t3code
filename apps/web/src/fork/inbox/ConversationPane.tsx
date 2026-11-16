@@ -1,6 +1,16 @@
 import type { EnvironmentId } from "@t3tools/contracts";
-import { ArrowLeftIcon, BotIcon, ExternalLinkIcon, ReplyIcon, SendIcon, XIcon } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
+import {
+  ArrowLeftIcon,
+  BotIcon,
+  ChevronRightIcon,
+  ExternalLinkIcon,
+  PaperclipIcon,
+  ReplyIcon,
+  SendIcon,
+  XIcon,
+} from "lucide-react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { flushSync } from "react-dom";
 
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
@@ -14,20 +24,27 @@ import type {
   InboxConversation,
   InboxDelegation,
   InboxMessage,
+  Mention,
   SendResult,
+  Upload,
 } from "../types";
 import { useForkResource, type ForkRefreshFilter } from "../useForkResource";
 import { ThreadStatus } from "./DelegationPane";
 import { ConversationMenu } from "./InboxList";
 import {
   conversationRows,
+  mentionablePeople,
+  mentionsIn,
+  mentionSuggestions,
   mergeConversationPages,
   nameOrUnknown,
   quoteOfMessage,
   skippedNotice,
+  type ConversationRow,
   type OlderPages,
 } from "./inboxView";
 import { MessageView } from "./MessageView";
+import { loadReply, replyDraftKey, saveReply } from "./replyDrafts";
 
 export interface ConversationPaneHandlers {
   readonly onBack: () => void;
@@ -42,6 +59,8 @@ export interface ConversationPaneHandlers {
 /** What the reply box should hold; a new `nonce` replaces what it holds. */
 export interface ReplyRequest {
   readonly nonce: number;
+  /** The conversation it is for; another conversation's reply box ignores it. */
+  readonly conversationId: string;
   readonly replyTo: ReplyTarget | null;
   /** A delegation's draft, sent on its behalf. */
   readonly draft: { readonly text: string; readonly delegationId: string } | null;
@@ -51,6 +70,15 @@ export interface ReplyTarget {
   readonly messageId: string;
   readonly quote: string;
 }
+
+/** A file picked for the reply; `uploadId` is null while it is on its way to the adapter. */
+interface AttachedFile {
+  readonly key: number;
+  readonly name: string;
+  readonly uploadId: string | null;
+}
+
+const MAX_ATTACHMENTS = 9;
 
 let replyNonce = 0;
 /** Orders requests from the page and from the chat's own toolbar; the newest wins. */
@@ -72,6 +100,7 @@ export function ConversationPane({
   delegations,
   focusMessageId,
   readOnly,
+  capabilities,
   replyRequest,
   handlers,
   refreshOn,
@@ -83,6 +112,8 @@ export function ConversationPane({
   /** The selected delegation's first message, scrolled to and marked. */
   readonly focusMessageId: string | null;
   readonly readOnly: boolean;
+  /** The optional parts of the protocol the channel's adapter implements. */
+  readonly capabilities: ReadonlyArray<string>;
   readonly replyRequest: ReplyRequest | null;
   readonly handlers: ConversationPaneHandlers;
   readonly refreshOn: ForkRefreshFilter;
@@ -98,6 +129,7 @@ export function ConversationPane({
   const replyTo = (message: InboxMessage) =>
     setLocalRequest({
       nonce: nextReplyNonce(),
+      conversationId: conversation.id,
       replyTo: { messageId: message.id, quote: quoteOfMessage(message) },
       draft: null,
     });
@@ -143,6 +175,7 @@ export function ConversationPane({
         conversation={conversation}
         request={request}
         disabled={readOnly}
+        capabilities={capabilities}
         onEngage={handlers.onEngage}
       />
     </section>
@@ -194,6 +227,8 @@ function ConversationMessages({
   // Distance from the bottom to keep while older messages are added above.
   const restoreFromBottom = useRef<number | null>(null);
   const atBottom = useRef(true);
+  /** Threads the reader opened, or closed after one opened by itself. */
+  const [toggledThreads, setToggledThreads] = useState<ReadonlySet<string>>(new Set());
 
   const merged = newest.data ? mergeConversationPages(newest.data, older) : null;
   const rows = merged ? conversationRows(merged.messages, delegations) : [];
@@ -206,29 +241,25 @@ function ConversationMessages({
     const base = merged?.older?.messages ?? [];
     loadingOlder.current = true;
     setOlderStatus({ loading: true, error: null });
-    try {
-      const page = await forkRequest<ConversationResponse>(
-        environmentId,
-        `${path}&${new URLSearchParams({ cursor }).toString()}`,
-      );
-      const container = scrollRef.current;
-      restoreFromBottom.current =
-        container === null ? null : container.scrollHeight - container.scrollTop;
-      const known = new Set(base.map((message) => message.id));
-      setOlder({
-        messages: [...page.messages.filter((message) => !known.has(message.id)), ...base],
-        nextCursor: page.nextCursor,
-        joinId,
-      });
-      setOlderStatus({ loading: false, error: null });
-    } catch (cause) {
-      setOlderStatus({
-        loading: false,
-        error: cause instanceof Error ? cause.message : String(cause),
-      });
-    } finally {
-      loadingOlder.current = false;
+    const page = await forkRequest<ConversationResponse>(
+      environmentId,
+      `${path}&${new URLSearchParams({ cursor }).toString()}`,
+    ).catch((cause: unknown) => (cause instanceof Error ? cause.message : String(cause)));
+    loadingOlder.current = false;
+    if (typeof page === "string") {
+      setOlderStatus({ loading: false, error: page });
+      return;
     }
+    const container = scrollRef.current;
+    restoreFromBottom.current =
+      container === null ? null : container.scrollHeight - container.scrollTop;
+    const known = new Set(base.map((message) => message.id));
+    setOlder({
+      messages: [...page.messages.filter((message) => !known.has(message.id)), ...base],
+      nextCursor: page.nextCursor,
+      joinId,
+    });
+    setOlderStatus({ loading: false, error: null });
   };
 
   // Runs after every render: it keeps the reader's place as older messages land above, and a
@@ -246,7 +277,11 @@ function ConversationMessages({
   });
 
   // The focused message may be older than the pages read; read back a few pages to find it.
-  const focusShown = rows.some((row) => row.message.id === focusMessageId);
+  const focusShown = rows.some(
+    (row) =>
+      row.message.id === focusMessageId ||
+      row.thread.some((reply) => reply.message.id === focusMessageId),
+  );
   const searched = useRef({ id: focusMessageId, pages: 0 });
   const canSearch =
     loaded &&
@@ -278,6 +313,53 @@ function ConversationMessages({
     else container.scrollTop = container.scrollHeight;
     atBottom.current = isAtBottom(container);
   }, [focusMessageId, loaded, focusShown]);
+
+  const item = (
+    row: ConversationRow,
+    previous: ConversationRow | undefined,
+    later: ReadonlyArray<ConversationRow>,
+  ) => (
+    <li
+      key={row.message.id}
+      data-message-id={row.message.id}
+      className={cn(
+        "group relative flex min-w-0 scroll-mt-4 flex-col rounded-lg px-1 py-1",
+        row.message.id === focusMessageId && "bg-accent/40 ring-1 ring-primary/40",
+      )}
+    >
+      <MessageView
+        environmentId={environmentId}
+        channelId={conversation.channelId}
+        message={row.message}
+        showAuthor={previous?.message.author.id !== row.message.author.id}
+        quote={row.quote}
+      >
+        {row.delegations.length > 0 ? (
+          <span className="flex flex-wrap items-center gap-2 text-xs">
+            {row.delegations.map((delegation) => (
+              <DelegationChip
+                key={delegation.id}
+                environmentId={environmentId}
+                delegation={delegation}
+                onSelect={handlers.onSelectDelegation}
+              />
+            ))}
+          </span>
+        ) : null}
+      </MessageView>
+      <MessageToolbar
+        message={row.message}
+        readOnly={readOnly}
+        onReply={() => onReply(row.message)}
+        onDelegate={() =>
+          handlers.onDelegate(
+            row.message,
+            later.map((next) => next.message),
+          )
+        }
+      />
+    </li>
+  );
 
   if (merged === null) {
     return (
@@ -322,48 +404,48 @@ function ConversationMessages({
         <p className="px-4 pt-3 text-xs text-warning">{skippedNotice(newest.data.skipped)}</p>
       ) : null}
       <ol className="flex flex-col gap-3 px-3 py-3">
-        {rows.map((row, index) => (
-          <li
-            key={row.message.id}
-            data-message-id={row.message.id}
-            className={cn(
-              "group relative flex min-w-0 scroll-mt-4 flex-col rounded-lg px-1 py-1",
-              row.message.id === focusMessageId && "bg-accent/40 ring-1 ring-primary/40",
-            )}
-          >
-            <MessageView
-              environmentId={environmentId}
-              channelId={conversation.channelId}
-              message={row.message}
-              showAuthor={rows[index - 1]?.message.author.id !== row.message.author.id}
-              quote={row.quote}
-            >
-              {row.delegations.length > 0 ? (
-                <span className="flex flex-wrap items-center gap-2 text-xs">
-                  {row.delegations.map((delegation) => (
-                    <DelegationChip
-                      key={delegation.id}
-                      environmentId={environmentId}
-                      delegation={delegation}
-                      onSelect={handlers.onSelectDelegation}
-                    />
-                  ))}
-                </span>
+        {rows.map((row, index) => {
+          const holdsFocus = row.thread.some((reply) => reply.message.id === focusMessageId);
+          // A thread opens by itself for the message a delegation points at.
+          const open = toggledThreads.has(row.message.id) ? !holdsFocus : holdsFocus;
+          const replies = row.thread.length;
+          return (
+            <Fragment key={row.message.id}>
+              {item(row, rows[index - 1], rows.slice(index + 1))}
+              {replies > 0 ? (
+                <li className="flex min-w-0 flex-col gap-2 ps-3">
+                  <span>
+                    <Button
+                      size="xs"
+                      variant="ghost-muted"
+                      aria-expanded={open}
+                      onClick={() =>
+                        setToggledThreads((current) => {
+                          const next = new Set(current);
+                          if (!next.delete(row.message.id)) next.add(row.message.id);
+                          return next;
+                        })
+                      }
+                    >
+                      <ChevronRightIcon className={cn(open && "rotate-90")} />
+                      {replies} {replies === 1 ? "reply" : "replies"} in thread
+                      {row.thread.some((reply) => reply.message.mentionsSelf)
+                        ? " · mentions you"
+                        : ""}
+                    </Button>
+                  </span>
+                  {open ? (
+                    <ol className="flex flex-col gap-3 border-s border-border/70 ps-2">
+                      {row.thread.map((reply, at) =>
+                        item(reply, row.thread[at - 1] ?? row, row.thread.slice(at + 1)),
+                      )}
+                    </ol>
+                  ) : null}
+                </li>
               ) : null}
-            </MessageView>
-            <MessageToolbar
-              message={row.message}
-              readOnly={readOnly}
-              onReply={() => onReply(row.message)}
-              onDelegate={() =>
-                handlers.onDelegate(
-                  row.message,
-                  rows.slice(index + 1).map((later) => later.message),
-                )
-              }
-            />
-          </li>
-        ))}
+            </Fragment>
+          );
+        })}
       </ol>
     </div>
   );
@@ -447,74 +529,181 @@ function Composer({
   conversation,
   request,
   disabled,
+  capabilities,
   onEngage,
 }: {
   readonly environmentId: EnvironmentId;
   readonly conversation: InboxConversation;
   readonly request: ReplyRequest | null;
   readonly disabled: boolean;
+  readonly capabilities: ReadonlyArray<string>;
   readonly onEngage: () => void;
 }) {
+  const canMention = capabilities.includes("mentions");
+  const canMarkdown = capabilities.includes("markdown");
+  const canAttach = capabilities.includes("attachments");
+  const storageKey = replyDraftKey(environmentId, conversation.channelId, conversation.id);
+  const [saved] = useState(() => loadReply(storageKey));
   const [applied, setApplied] = useState<number | null>(null);
-  const [text, setText] = useState("");
-  const [replyTo, setReplyTo] = useState<ReplyTarget | null>(null);
+  const [text, setText] = useState(saved?.text ?? "");
+  const [replyTo, setReplyTo] = useState<ReplyTarget | null>(saved?.replyTo ?? null);
   const [draft, setDraft] = useState<{
     readonly delegationId: string;
     readonly text: string;
-  } | null>(null);
+  } | null>(saved?.draft ?? null);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  if (request !== null && request.nonce !== applied) {
+  // An agent writes its draft in Markdown; what the user types is sent as typed unless they ask.
+  const [markdown, setMarkdown] = useState(saved?.draft != null);
+  const [files, setFiles] = useState<ReadonlyArray<AttachedFile>>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  // Null until the reply first holds an `@`.
+  const [people, setPeople] = useState<ReadonlyArray<Mention> | null>(null);
+  const [caret, setCaret] = useState(0);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  if (request !== null && request.conversationId === conversation.id && request.nonce !== applied) {
     setApplied(request.nonce);
     setReplyTo(request.replyTo);
     if (request.draft !== null) {
       setDraft(request.draft);
       setText(request.draft.text);
+      setMarkdown(true);
     }
   }
   const fromDraft = draft !== null && text === draft.text;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- mirrors the reply into browser storage
+  useEffect(() => {
+    saveReply(storageKey, { text, replyTo, draft });
+  }, [storageKey, text, replyTo, draft]);
+
+  const readPeople = async () => {
+    if (!canMention) return [];
+    const page = await forkRequest<ConversationResponse>(
+      environmentId,
+      `/inbox/conversation?${new URLSearchParams({
+        channelId: conversation.channelId,
+        conversationId: conversation.id,
+      }).toString()}`,
+    ).catch(() => null);
+    // A failed read keeps who was known: the message still goes out, with fewer mentions.
+    if (page === null) return people ?? [];
+    const next = mentionablePeople(page.messages);
+    setPeople(next);
+    return next;
+  };
+  const wantPeople = (value: string) => {
+    if (canMention && people === null && value.includes("@")) void readPeople();
+  };
+
+  const attach = (picked: ReadonlyArray<File>) => {
+    const added = picked.slice(0, MAX_ATTACHMENTS - files.length).map((file) => ({
+      key: nextReplyNonce(),
+      name: file.name,
+      file,
+    }));
+    if (added.length < picked.length) setError(`Attach up to ${MAX_ATTACHMENTS} files.`);
+    setFiles((current) => [
+      ...current,
+      ...added.map(({ key, name }) => ({ key, name, uploadId: null })),
+    ]);
+    for (const { key, name, file } of added) {
+      const path = `/inbox/upload?${new URLSearchParams({ channelId: conversation.channelId, name }).toString()}`;
+      void forkRequest<Upload>(environmentId, path, { method: "POST", file }).then(
+        (uploaded) =>
+          setFiles((current) =>
+            current.map((entry) =>
+              entry.key === key ? { ...entry, uploadId: uploaded.uploadId } : entry,
+            ),
+          ),
+        (cause: unknown) => {
+          setFiles((current) => current.filter((entry) => entry.key !== key));
+          setError(
+            `Could not attach ${name}: ${cause instanceof Error ? cause.message : String(cause)}`,
+          );
+        },
+      );
+    }
+  };
+  const uploading = files.some((entry) => entry.uploadId === null);
+  const mentions = mentionsIn(text, people ?? []);
+  const suggestions = mentionSuggestions(text, caret, people ?? []);
+  const complete = (person: Mention) => {
+    if (suggestions === null) return;
+    const head = `${text.slice(0, suggestions.start)}@${person.name} `;
+    // The caret can only be placed once the textarea holds the new text.
+    flushSync(() => {
+      setText(head + text.slice(caret));
+      setCaret(head.length);
+    });
+    textareaRef.current?.focus();
+    textareaRef.current?.setSelectionRange(head.length, head.length);
+  };
 
   const send = async () => {
     setSending(true);
     setError(null);
-    try {
-      const result = await forkRequest<SendResult>(environmentId, "/inbox/send", {
-        method: "POST",
-        body: {
-          channelId: conversation.channelId,
-          conversationId: conversation.id,
-          ...(replyTo ? { replyToId: replyTo.messageId } : {}),
-          // An edited draft still answers for its delegation; the copy records the edit.
-          ...(draft ? { delegationId: draft.delegationId } : {}),
-          text,
-        },
-      });
-      setText("");
-      setReplyTo(null);
-      setDraft(null);
-      setSending(false);
-      if (result.archived === false) {
-        toastManager.add({
-          type: "warning",
-          title: "Sent, but the copy in the delegation's folder could not be saved.",
-        });
-      }
-    } catch (cause) {
-      setSending(false);
-      setError(
+    // Read again at send, so someone who wrote a moment ago can be mentioned.
+    const mentioned = text.includes("@") ? mentionsIn(text, await readPeople()) : [];
+    const result = await forkRequest<SendResult>(environmentId, "/inbox/send", {
+      method: "POST",
+      body: {
+        channelId: conversation.channelId,
+        conversationId: conversation.id,
+        ...(replyTo ? { replyToId: replyTo.messageId } : {}),
+        // An edited draft still answers for its delegation; the copy records the edit.
+        ...(draft ? { delegationId: draft.delegationId } : {}),
+        text,
+        ...(mentioned.length > 0 ? { mentions: mentioned } : {}),
+        ...(canMarkdown && markdown ? { format: "markdown" } : {}),
+        ...(files.length > 0
+          ? { attachments: files.map(({ uploadId, name }) => ({ uploadId, name })) }
+          : {}),
+      },
+    }).catch((cause: unknown) => ({
+      failure:
         cause instanceof ForkApiError && cause.code === "delivery_unknown"
           ? "Delivery unknown: the adapter did not confirm the message. Check the chat before sending again."
           : cause instanceof Error
             ? cause.message
             : String(cause),
-      );
+    }));
+    setSending(false);
+    if ("failure" in result) {
+      setError(result.failure);
+      return;
+    }
+    setText("");
+    setReplyTo(null);
+    setDraft(null);
+    setMarkdown(false);
+    setFiles([]);
+    if (result.failedAttachments.length > 0) {
+      toastManager.add({
+        type: "warning",
+        title: `Sent, but these files did not go out: ${result.failedAttachments.join(", ")}.`,
+      });
+    }
+    if (result.unresolvedMentions.length > 0) {
+      toastManager.add({
+        type: "warning",
+        title: `Sent, but not everyone was notified: ${result.unresolvedMentions.join(", ")}.`,
+      });
+    }
+    if (result.archived === false) {
+      toastManager.add({
+        type: "warning",
+        title: "Sent, but the copy in the delegation's folder could not be saved.",
+      });
     }
   };
 
   return (
     <form
       className="flex shrink-0 flex-col gap-2 border-t border-border/70 p-3"
-      onFocus={onEngage}
+      onFocus={() => {
+        onEngage();
+        wantPeople(text);
+      }}
       onSubmit={(event) => {
         event.preventDefault();
         void send();
@@ -544,26 +733,127 @@ function Composer({
         </div>
       ) : null}
       <Textarea
+        ref={textareaRef}
         aria-label="Reply"
         value={text}
         rows={2}
         disabled={disabled}
         placeholder={disabled ? "Sending is off" : `Message ${nameOrUnknown(conversation.name)}`}
-        onChange={(event) => setText(event.target.value)}
+        onChange={(event) => {
+          setText(event.target.value);
+          setCaret(event.target.selectionStart);
+          wantPeople(event.target.value);
+        }}
+        onSelect={(event) => setCaret(event.currentTarget.selectionStart)}
+        onPaste={(event) => {
+          // A pasted screenshot arrives as a file; pasted text is left to the textarea.
+          if (!canAttach || event.clipboardData.files.length === 0) return;
+          event.preventDefault();
+          attach([...event.clipboardData.files]);
+        }}
         onKeyDown={(event) => {
           if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
             event.preventDefault();
             event.currentTarget.form?.requestSubmit();
+          } else if (event.key === "Tab" && !event.shiftKey && suggestions !== null) {
+            event.preventDefault();
+            complete(suggestions.people[0]!);
           }
         }}
       />
+      {suggestions !== null ? (
+        <div className="flex flex-wrap gap-1" aria-label="People to mention">
+          {suggestions.people.map((person) => (
+            <Button
+              key={person.userId}
+              type="button"
+              size="xs"
+              variant="outline"
+              onClick={() => complete(person)}
+            >
+              @{person.name}
+            </Button>
+          ))}
+        </div>
+      ) : null}
+      {files.length > 0 ? (
+        <ul className="flex flex-wrap gap-1" aria-label="Attached files">
+          {files.map((entry) => (
+            <li
+              key={entry.key}
+              className="flex min-w-0 items-center gap-1 rounded-md border border-border/70 py-0.5 ps-2 pe-0.5 text-xs"
+            >
+              <span className="max-w-48 truncate">{entry.name}</span>
+              {entry.uploadId === null ? (
+                <span className="text-muted-foreground">Uploading…</span>
+              ) : null}
+              <Button
+                type="button"
+                size="icon-xs"
+                variant="ghost-muted"
+                aria-label={`Remove ${entry.name}`}
+                onClick={() => setFiles(files.filter((other) => other.key !== entry.key))}
+              >
+                <XIcon />
+              </Button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
       <div className="flex items-center gap-2">
         {error ? (
           <p className="min-w-0 flex-1 text-xs text-destructive-foreground">{error}</p>
+        ) : mentions.length > 0 ? (
+          <p className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+            Notifies {mentions.map((mention) => mention.name).join(", ")}
+          </p>
         ) : (
           <span className="flex-1" />
         )}
-        <Button type="submit" size="sm" disabled={disabled || sending || text.trim().length === 0}>
+        {canMarkdown ? (
+          <Button
+            type="button"
+            size="xs"
+            variant={markdown ? "outline" : "ghost-muted"}
+            aria-pressed={markdown}
+            disabled={disabled}
+            onClick={() => setMarkdown(!markdown)}
+          >
+            Markdown
+          </Button>
+        ) : null}
+        {canAttach ? (
+          <>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              hidden
+              onChange={(event) => {
+                attach([...(event.target.files ?? [])]);
+                // The same file can be picked again after it was removed.
+                event.target.value = "";
+              }}
+            />
+            <Button
+              type="button"
+              size="icon-xs"
+              variant="ghost"
+              aria-label="Attach files"
+              disabled={disabled || files.length >= MAX_ATTACHMENTS}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <PaperclipIcon />
+            </Button>
+          </>
+        ) : null}
+        <Button
+          type="submit"
+          size="sm"
+          disabled={
+            disabled || sending || uploading || (text.trim().length === 0 && files.length === 0)
+          }
+        >
           <SendIcon />
           {sending ? "Sending…" : "Send"}
         </Button>

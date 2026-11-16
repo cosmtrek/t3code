@@ -4,6 +4,7 @@ import type {
   InboxConversation,
   InboxDelegation,
   InboxMessage,
+  Mention,
 } from "../types";
 import { formatSince, formatSpan } from "../presentation";
 
@@ -122,11 +123,15 @@ export interface ConversationRow {
   readonly quote: string | null;
   /** The delegations that start at this message. */
   readonly delegations: ReadonlyArray<InboxDelegation>;
+  /** The replies the chat app keeps inside this message's thread, off the timeline. */
+  readonly thread: ReadonlyArray<ConversationRow>;
 }
 
 /**
- * A conversation as its chat app shows it: every message, a reply quoting what it answers. The
- * adapter names the answered message; one older than what was loaded is quoted from that.
+ * A conversation as its chat app shows it: the timeline, a reply quoting what it answers, and
+ * under a message the replies kept inside its thread. The adapter names the answered message; one
+ * older than what was loaded is quoted from that, and a thread reply whose root is not loaded
+ * stays on the timeline.
  */
 export function conversationRows(
   messages: ReadonlyArray<InboxMessage>,
@@ -139,7 +144,9 @@ export function conversationRows(
     list.push(delegation);
     byAnchor.set(delegation.anchorMessageId, list);
   }
-  return messages.map((message) => {
+  const timeline: ConversationRow[] = [];
+  const threads = new Map<string, ConversationRow[]>();
+  for (const message of messages) {
     const replyTo = message.replyTo ?? null;
     const loaded = replyTo === null ? undefined : byId.get(replyTo.id);
     const quote =
@@ -150,8 +157,12 @@ export function conversationRows(
           : replyTo.preview !== null
             ? quoteOf(replyTo.authorName, replyTo.preview)
             : "An earlier message";
-    return { message, quote, delegations: byAnchor.get(message.id) ?? [] };
-  });
+    const row = { message, quote, delegations: byAnchor.get(message.id) ?? [], thread: [] };
+    const rootId = message.inThread === true ? (message.rootId ?? null) : null;
+    if (rootId === null || !byId.has(rootId)) timeline.push(row);
+    else threads.set(rootId, [...(threads.get(rootId) ?? []), row]);
+  }
+  return timeline.map((row) => ({ ...row, thread: threads.get(row.message.id) ?? [] }));
 }
 
 /**
@@ -247,6 +258,48 @@ export function channelBanner(
     case "disabled":
       return { tone: "error", text: channel.error ?? "This channel cannot be read" };
   }
+}
+
+/** Who a reply can mention: everyone else who wrote, except a name two people share. */
+export function mentionablePeople(messages: ReadonlyArray<InboxMessage>): ReadonlyArray<Mention> {
+  const names = new Map<string, string>();
+  for (const { author } of messages) {
+    if (!author.isSelf && author.name.trim().length > 0) names.set(author.id, author.name);
+  }
+  const people = [...names].map(([userId, name]) => ({ userId, name }));
+  return people.filter(
+    (person) => people.filter((other) => other.name === person.name).length === 1,
+  );
+}
+
+/** Who the text mentions: at each `@`, the longest name that follows it. */
+export function mentionsIn(text: string, people: ReadonlyArray<Mention>): ReadonlyArray<Mention> {
+  const longestFirst = people.toSorted((left, right) => right.name.length - left.name.length);
+  const found = new Map<string, Mention>();
+  for (let at = text.indexOf("@"); at !== -1; at = text.indexOf("@", at + 1)) {
+    const person = longestFirst.find((candidate) => text.startsWith(candidate.name, at + 1));
+    if (person) found.set(person.userId, person);
+  }
+  return [...found.values()];
+}
+
+const MENTION_QUERY_MAX = 30;
+const MENTION_SUGGESTIONS = 5;
+
+/** The names that complete the `@…` being typed at the caret, and where that `@` is. */
+export function mentionSuggestions(
+  text: string,
+  caret: number,
+  people: ReadonlyArray<Mention>,
+): { readonly start: number; readonly people: ReadonlyArray<Mention> } | null {
+  const start = text.lastIndexOf("@", caret - 1);
+  if (start === -1) return null;
+  const query = text.slice(start + 1, caret).toLowerCase();
+  if (query.includes("\n") || query.length > MENTION_QUERY_MAX) return null;
+  const matches = people.filter(
+    ({ name }) => name.length > query.length && name.toLowerCase().startsWith(query),
+  );
+  return matches.length === 0 ? null : { start, people: matches.slice(0, MENTION_SUGGESTIONS) };
 }
 
 /** The messages as plain text, for pasting into another tool. */
