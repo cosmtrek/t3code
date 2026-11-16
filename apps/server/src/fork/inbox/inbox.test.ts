@@ -122,19 +122,18 @@ describe("deriveItem", () => {
     expect(at(hoursAgo(1), true, hoursAgo(2))).toMatchObject({ state: "waiting", reopened: true });
   });
 
-  it("ranks by category weight times wait, open topics after pending ones", () => {
-    const direct = deriveItem(
-      facts({ mentionsSelf: true, topic: { ...facts().topic, lastMessageAt: hoursAgo(1) } }),
-    );
-    const joined = deriveItem(
-      facts({ topic: { ...facts().topic, participatedBySelf: true, lastMessageAt: hoursAgo(1) } }),
-    );
-    const joinedOlder = deriveItem(
-      facts({ topic: { ...facts().topic, participatedBySelf: true, lastMessageAt: hoursAgo(8) } }),
-    );
-    const followed = deriveItem(facts());
-    const sorted = [followed, joined, direct, joinedOlder].toSorted(compareItems);
-    expect(sorted).toEqual([joinedOlder, direct, joined, followed]);
+  it("lists the newest first whatever the state, ties by id", () => {
+    const item = (id: string, lastMessageAt: string) => ({ id, lastMessageAt });
+    const pendingOld = item("b", hoursAgo(8));
+    const waitingNew = item("c", hoursAgo(1));
+    const tieA = item("a", hoursAgo(3));
+    const tieB = item("d", hoursAgo(3));
+    expect([pendingOld, tieB, waitingNew, tieA].toSorted(compareItems)).toEqual([
+      waitingNew,
+      tieA,
+      tieB,
+      pendingOld,
+    ]);
   });
 
   it("derives stable item ids", () => {
