@@ -83,12 +83,11 @@ sequenceDiagram
   A-->>H: page {items, nextCursor}
   Note over H: Decode items one by one and skip bad ones.<br/>When the adapter is unreachable, serve the last good answer (stale).
   H-->>O: conversations, topics
-  O->>O: merge marks, links, and thread folders; deriveItem, compareItems
+  O->>O: merge reads, links, and thread folders; deriveItem, compareItems
   O-->>UI: items, newest first
 ```
 
-The list is ordered by `lastMessageAt` alone, newest first; the views already split items by
-state. The other routes go through the same layers. `conversation` reads one page of a
+The list is ordered by `lastMessageAt` alone, newest first; the views already pick their items. The other routes go through the same layers. `conversation` reads one page of a
 conversation's messages for the chat view, unlike `topic`, which reads every page of one topic.
 `delegate` ends in `launchThread`, in the checkout the dialog chose; `ask` ends in
 `sendToThread` on the topic's current thread, queued behind a running turn, and never reaches the
@@ -107,11 +106,30 @@ again.
 | Only `lastSyncAt` moved (sent as `{ type: "sync" }`)                | `ChannelHub.check`           |
 | A thread wrote to its context folder (300 ms debounce)              | `fs.watch` in `InboxRuntime` |
 | A linked thread's run status changed, or it was archived or deleted | `linkedThreads.ts`           |
-| Save, remove, delegate, ask, send, or mark                          | the operation itself         |
+| Save, remove, delegate, ask, send, read, or read all                | the operation itself         |
 
 Item state is derived on fetch. Requests for one channel share a derivation until the hub's
 `revision` for it moves (any signal above except `sync`) or it is 10 s old, so a missed signal is
 fixed by the next one, or by the client's 60 s poll while the page is visible. Wait times are not
 sent: the client works them out from `lastMessageAt`, so an unchanged list keeps its ETag and the
-browser's revalidation gets a 304. `inbox.sqlite` stores only what cannot be derived:
-done and ignored marks, and links between topics and threads.
+browser's revalidation gets a 304. `inbox.sqlite` stores only what cannot be derived: how far
+each topic was read, and links between topics and threads.
+
+## Read state
+
+A topic is unread when someone else wrote after every read mark, when its thread finished a run
+after the user last looked, or when the user pinned it unread. Each mark moves forward only and
+compares with one kind of time:
+
+- Message marks are message times: `read_at` (the newest message the client showed when the
+  topic was opened), the adapter's `selfReadThroughAt`, and the channel's `read_all_before`.
+- `agent_seen_at` is the run end the client showed. A run still going has no end, so opening a
+  topic mid-run leaves the run's result unseen once it finishes. Stopped, cancelled, and
+  rolled-back runs and background-work wakes have nothing new and do not count.
+- `read_all_before` starts a week before the channel is first read, so connecting a channel does
+  not flood the list, and "Mark all as read" moves it. It also covers run ends.
+
+The client reports reads; fetching a topic never does, since polls and background tabs fetch too.
+A message that arrives while a topic is open stays unread until the user acts on the topic again.
+The sidebar badge counts unseen runs and unread topics the user is part of (direct or
+participated); topics in groups the user only follows show in Unread but are not counted.

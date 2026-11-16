@@ -73,6 +73,8 @@ export const Topic = Schema.Struct({
   lastOtherMessageAt: Schema.NullOr(Timestamp),
   /** Whether a message after my last one (or any, if I never wrote) mentions me. */
   mentionsSelfSinceOwn: Schema.Boolean,
+  /** The newest message not from me that the chat app shows as read; null when unknown. */
+  selfReadThroughAt: Schema.optional(Schema.NullOr(Timestamp)),
 });
 export type Topic = typeof Topic.Type;
 
@@ -135,14 +137,14 @@ export const AdapterError = Schema.Struct({
  */
 export type ChannelEvent =
   | {
-      readonly type: "message.created";
+      readonly type: "message.created" | "topic.updated";
       readonly conversationId?: string;
       readonly topicId?: string;
     }
   | { readonly type: "health.changed" }
   | { readonly type: "connected" };
 
-const decodeMessageCreated = Schema.decodeUnknownOption(
+const decodeTopicEvent = Schema.decodeUnknownOption(
   Schema.fromJsonString(
     Schema.Struct({
       conversationId: Schema.optional(Schema.String),
@@ -154,12 +156,12 @@ const decodeMessageCreated = Schema.decodeUnknownOption(
 /** One SSE frame from `/events`. A known event counts even when its data does not parse. */
 export function parseChannelEvent(event: string, data: string): ChannelEvent | null {
   if (event === "health.changed") return { type: "health.changed" };
-  if (event !== "message.created") return null;
-  const named = decodeMessageCreated(data);
-  if (named._tag === "None") return { type: "message.created" };
+  if (event !== "message.created" && event !== "topic.updated") return null;
+  const named = decodeTopicEvent(data);
+  if (named._tag === "None") return { type: event };
   const { conversationId, topicId } = named.value;
   return {
-    type: "message.created",
+    type: event,
     ...(conversationId === undefined ? {} : { conversationId }),
     ...(topicId === undefined ? {} : { topicId }),
   };

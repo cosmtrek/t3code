@@ -2,6 +2,7 @@
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeSqlite from "node:sqlite";
 
 import { describe, expect, it } from "@effect/vitest";
 
@@ -15,7 +16,14 @@ import {
   parseFallbackReply,
   threadTitle,
 } from "./context.ts";
-import { compareItems, deriveItem, itemIdFor, sortMessages, type TopicFacts } from "./derive.ts";
+import {
+  compareItems,
+  countsTowardBadge,
+  deriveItem,
+  itemIdFor,
+  sortMessages,
+  type TopicFacts,
+} from "./derive.ts";
 import { InboxStore } from "./store.ts";
 
 const NOW = Date.parse("2026-11-14T12:00:00.000Z");
@@ -30,56 +38,134 @@ const facts = (overrides: Partial<TopicFacts> = {}): TopicFacts => ({
   },
   mentionsSelf: false,
   lastOtherMessageAt: hoursAgo(1),
-  mark: null,
-  threadRunning: false,
-  hasDraft: false,
+  read: null,
+  readAllBefore: hoursAgo(24 * 7),
+  runCompletedAt: null,
   now: NOW,
   ...overrides,
+});
+
+const mine = (lastMessageAt: string) => ({
+  lastMessageAt,
+  lastAuthor: { id: "me", name: "Me", isSelf: true },
+  participatedBySelf: true,
+});
+const seen = (readAt: string | null, agentSeenAt: string | null = null, pinnedUnread = false) => ({
+  readAt,
+  agentSeenAt,
+  pinnedUnread,
 });
 
 describe("deriveItem", () => {
   it.each([
     [
-      "a direct message waits for me",
+      "a direct message",
       facts({ conversation: { kind: "dm", relevant: true, muted: false } }),
-      "needs_reply",
+      "direct",
     ],
-    ["a mention waits for me", facts({ mentionsSelf: true }), "needs_reply"],
+    ["a mention", facts({ mentionsSelf: true }), "direct"],
     [
-      "a reply in a topic I joined waits for me",
+      "a reply in a topic I joined",
       facts({
-        topic: {
-          lastMessageAt: hoursAgo(1),
-          lastAuthor: { id: "u2", name: "Other", isSelf: false },
-          participatedBySelf: true,
-        },
+        topic: { ...mine(hoursAgo(1)), lastAuthor: { id: "u2", name: "x", isSelf: false } },
       }),
-      "needs_reply",
+      "participated",
     ],
-    ["a new topic in a followed conversation is open", facts(), "open"],
+    ["a topic in a followed conversation", facts(), "followed"],
     [
-      "my own last message waits for the other side",
+      "a topic in a muted conversation",
+      facts({ conversation: { kind: "group", relevant: true, muted: true } }),
+      "other",
+    ],
+  ] as const)("files %s", (_name, input, category) => {
+    expect(deriveItem(input).category).toBe(category);
+  });
+
+  it.each([
+    ["a message nobody read is unread", facts(), { unread: true, awaitingReply: false }],
+    ["reading through it in T3 reads it", facts({ read: seen(hoursAgo(1)) }), { unread: false }],
+    [
+      "a later message from them unreads it again",
+      facts({ read: seen(hoursAgo(2)) }),
+      { unread: true },
+    ],
+    [
+      "reading it in the chat app reads it",
+      facts({ topic: { ...facts().topic, selfReadThroughAt: hoursAgo(1) } }),
+      { unread: false },
+    ],
+    [
+      "an offset time compares as an instant",
+      facts({ topic: { ...facts().topic, selfReadThroughAt: "2026-11-14T19:00:00+08:00" } }),
+      { unread: false },
+    ],
+    [
+      "my own last message reads it and waits on them",
+      facts({ topic: mine(hoursAgo(1)), lastOtherMessageAt: hoursAgo(2) }),
+      { unread: false, awaitingReply: true },
+    ],
+    [
+      "anything before read-all-before is read",
+      facts({ readAllBefore: hoursAgo(0.5) }),
+      { unread: false },
+    ],
+    [
+      "a pin keeps it unread past every read mark",
       facts({
-        topic: {
-          lastMessageAt: hoursAgo(1),
-          lastAuthor: { id: "me", name: "Me", isSelf: true },
-          participatedBySelf: true,
-        },
+        read: seen(hoursAgo(0), null, true),
+        topic: { ...facts().topic, selfReadThroughAt: hoursAgo(0) },
       }),
-      "waiting",
+      { unread: true },
     ],
     [
-      "a running thread is investigating",
-      facts({ mentionsSelf: true, threadRunning: true }),
-      "investigating",
+      "a run that finished after I looked is unseen",
+      facts({
+        topic: mine(hoursAgo(3)),
+        runCompletedAt: hoursAgo(1),
+        read: seen(null, hoursAgo(2)),
+      }),
+      { unread: true, agentUnseen: true },
     ],
     [
-      "a draft wins over a running thread",
-      facts({ threadRunning: true, hasDraft: true }),
-      "drafted",
+      "a run I saw is not",
+      facts({
+        topic: mine(hoursAgo(3)),
+        runCompletedAt: hoursAgo(1),
+        read: seen(null, hoursAgo(1)),
+      }),
+      { unread: false, agentUnseen: false },
     ],
-  ] as const)("%s", (_name, input, state) => {
-    expect(deriveItem(input).state).toBe(state);
+    [
+      "a running thread has no unseen run, while their message stays unread",
+      facts({ runCompletedAt: null, read: seen(null, hoursAgo(5)) }),
+      { unread: true, agentUnseen: false },
+    ],
+  ] as const)("%s", (_name, input, expected) => {
+    expect(deriveItem(input)).toMatchObject(expected);
+  });
+
+  it("shows a run that ends after I opened the topic mid-run", () => {
+    // Opened mid-run: the client had no finished run to report, so only the message mark moved.
+    const read = seen(hoursAgo(1), hoursAgo(5));
+    expect(deriveItem(facts({ read, runCompletedAt: null })).unread).toBe(false);
+    expect(deriveItem(facts({ read, runCompletedAt: hoursAgo(0) }))).toMatchObject({
+      unread: true,
+      agentUnseen: true,
+    });
+  });
+
+  it("counts agent results and unread topics I am part of toward the badge", () => {
+    expect(countsTowardBadge({ unread: true, agentUnseen: false, category: "direct" })).toBe(true);
+    expect(countsTowardBadge({ unread: true, agentUnseen: false, category: "participated" })).toBe(
+      true,
+    );
+    expect(countsTowardBadge({ unread: true, agentUnseen: false, category: "followed" })).toBe(
+      false,
+    );
+    expect(countsTowardBadge({ unread: true, agentUnseen: true, category: "other" })).toBe(true);
+    expect(countsTowardBadge({ unread: false, agentUnseen: false, category: "direct" })).toBe(
+      false,
+    );
   });
 
   it("highlights waiting longer than a day", () => {
@@ -95,32 +181,6 @@ describe("deriveItem", () => {
       );
     expect(waiting(23).highlight).toBe(false);
     expect(waiting(25).highlight).toBe(true);
-  });
-
-  it("keeps a mark until someone else writes after its watermark", () => {
-    const mark = { state: "done" as const, watermarkMessageAt: hoursAgo(3) };
-    const at = (lastMessageAt: string, isSelf: boolean, lastOtherMessageAt: string | null) =>
-      deriveItem(
-        facts({
-          mentionsSelf: true,
-          mark,
-          lastOtherMessageAt,
-          topic: {
-            lastMessageAt,
-            lastAuthor: { id: isSelf ? "me" : "u2", name: "x", isSelf },
-            participatedBySelf: true,
-          },
-        }),
-      );
-    expect(at(hoursAgo(3), false, hoursAgo(3))).toMatchObject({ state: "done", reopened: false });
-    // Only I wrote since the mark.
-    expect(at(hoursAgo(1), true, hoursAgo(4))).toMatchObject({ state: "done", reopened: false });
-    expect(at(hoursAgo(1), false, hoursAgo(1))).toMatchObject({
-      state: "needs_reply",
-      reopened: true,
-    });
-    // t0 marked, t1 they wrote, t2 I answered in the chat app: waiting on them, not done.
-    expect(at(hoursAgo(1), true, hoursAgo(2))).toMatchObject({ state: "waiting", reopened: true });
   });
 
   it("lists the newest first whatever the state, ties by id", () => {
@@ -263,26 +323,24 @@ describe("delegation text", () => {
 });
 
 describe("InboxStore", () => {
-  it("migrates and round-trips marks and links", () => {
+  it("migrates and round-trips reads and links", () => {
     const store = new InboxStore(":memory:");
     const key = { channelId: "a", conversationId: "b", topicId: "c" };
-    store.setMark({
-      ...key,
-      state: "ignored",
-      markedAt: hoursAgo(1),
-      watermarkMessageAt: hoursAgo(2),
-    });
-    store.setMark({
-      ...key,
-      state: "done",
-      markedAt: hoursAgo(0),
-      watermarkMessageAt: hoursAgo(1),
-    });
-    expect(store.listMarks("a")).toEqual([
-      { ...key, state: "done", markedAt: hoursAgo(0), watermarkMessageAt: hoursAgo(1) },
+    store.markRead(key, { readAt: hoursAgo(1) });
+    store.pinUnread(key);
+    store.markRead(key, { agentSeenAt: hoursAgo(2) });
+    // A stale view moves nothing back.
+    store.markRead(key, { readAt: hoursAgo(3), agentSeenAt: hoursAgo(3) });
+    expect(store.listReads("a")).toEqual([
+      { ...key, readAt: hoursAgo(1), agentSeenAt: hoursAgo(2), pinnedUnread: false },
     ]);
-    store.clearMark(key);
-    expect(store.listMarks("a")).toEqual([]);
+    store.pinUnread(key);
+    expect(store.readAllBefore("a", hoursAgo(5))).toBe(hoursAgo(5));
+    expect(store.readAllBefore("a", hoursAgo(4))).toBe(hoursAgo(5));
+    store.markAllRead("a", hoursAgo(0));
+    store.markAllRead("a", hoursAgo(2));
+    expect(store.readAllBefore("a", hoursAgo(9))).toBe(hoursAgo(0));
+    expect(store.listReads("a")[0]?.pinnedUnread).toBe(false);
     const itemId = itemIdFor(key);
     store.addLink({ ...key, itemId, threadId: "t1", projectId: "p", createdAt: hoursAgo(1) });
     store.detachLink(itemId, "t1", "deleted", hoursAgo(0));
@@ -296,6 +354,29 @@ describe("InboxStore", () => {
         detachedAt: hoursAgo(0),
         detachedReason: "deleted",
       },
+    ]);
+    store.close();
+  });
+
+  it("carries done and ignored marks over as read", async () => {
+    const file = NodePath.join(
+      await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "inbox-")),
+      "db",
+    );
+    const v1 = new NodeSqlite.DatabaseSync(file);
+    v1.exec(`CREATE TABLE marks (
+      channel_id TEXT, conversation_id TEXT, topic_id TEXT, state TEXT, marked_at TEXT,
+      watermark_message_at TEXT);
+      CREATE TABLE links (item_id TEXT);
+      INSERT INTO marks VALUES ('a', 'b', 'done', 'done', '${hoursAgo(0)}', '${hoursAgo(1)}');
+      INSERT INTO marks VALUES ('a', 'b', 'ignored', 'ignored', '${hoursAgo(0)}', '${hoursAgo(2)}');
+      PRAGMA user_version = 1;`);
+    v1.close();
+    const store = new InboxStore(file);
+    const read = { conversationId: "b", agentSeenAt: null, pinnedUnread: false, channelId: "a" };
+    expect(store.listReads("a").toSorted((x, y) => x.topicId.localeCompare(y.topicId))).toEqual([
+      { ...read, topicId: "done", readAt: hoursAgo(1) },
+      { ...read, topicId: "ignored", readAt: hoursAgo(2) },
     ]);
     store.close();
   });

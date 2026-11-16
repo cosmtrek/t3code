@@ -689,11 +689,11 @@ export class ChannelHub {
   }
 
   /**
-   * Any event, or a (re)connected stream, means the lists may have changed. A message that names
+   * Any event, or a (re)connected stream, means the lists may have changed. An event that names
    * its conversation only stales the conversation list and that conversation's own lists.
    */
   private onEvent(runtime: Runtime, event: ChannelEvent) {
-    if (event.type === "message.created" && event.conversationId !== undefined) {
+    if ("conversationId" in event && event.conversationId !== undefined) {
       this.dropCached(runtime, [
         "/conversations?",
         `/conversations/${encodeURIComponent(event.conversationId)}/`,

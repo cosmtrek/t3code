@@ -22,29 +22,52 @@ function fail(title: string, error: unknown) {
   });
 }
 
-export type MarkTarget = "done" | "ignored" | null;
-
 /** False when the server refused; the user has been told. */
-export async function markItem(
+export async function setItemRead(
   environmentId: EnvironmentId,
   item: InboxItem,
-  state: MarkTarget,
+  read: boolean,
 ): Promise<boolean> {
   try {
-    await forkRequest(environmentId, "/inbox/mark", {
+    await forkRequest(environmentId, "/inbox/read", {
       method: "POST",
       body: {
         channelId: item.channelId,
         conversationId: item.conversationId,
         topicId: item.topicId,
-        state,
-        // The watermark is what the user saw, and the server need not read the channel for it.
+        read,
+        // What the user saw, not what has arrived since.
         lastMessageAt: item.lastMessageAt,
+        ...(item.thread?.runCompletedAt ? { runCompletedAt: item.thread.runCompletedAt } : {}),
       },
     });
     return true;
   } catch (error) {
     fail("Could not update the item", error);
+    return false;
+  }
+}
+
+/** Reads everything up to the newest message or run end in `items`, the list the user saw. */
+export async function markAllRead(
+  environmentId: EnvironmentId,
+  channelId: string,
+  items: ReadonlyArray<InboxItem>,
+): Promise<boolean> {
+  const times = items.flatMap((item) => [
+    Date.parse(item.lastMessageAt),
+    Date.parse(item.thread?.runCompletedAt ?? ""),
+  ]);
+  const newest = Math.max(...times.filter(Number.isFinite));
+  if (!Number.isFinite(newest)) return true;
+  try {
+    await forkRequest(environmentId, "/inbox/read-all", {
+      method: "POST",
+      body: { channelId, before: new Date(newest).toISOString() },
+    });
+    return true;
+  } catch (error) {
+    fail("Could not mark everything read", error);
     return false;
   }
 }

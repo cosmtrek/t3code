@@ -232,9 +232,15 @@ const routes = (runtime: InboxRuntimeShape) => {
     ),
     route(
       "POST",
-      `${INBOX}/mark`,
+      `${INBOX}/read`,
       AuthOrchestrationOperateScope,
-      body.pipe(Effect.flatMap(Inbox.mark)),
+      body.pipe(Effect.flatMap(Inbox.setRead)),
+    ),
+    route(
+      "POST",
+      `${INBOX}/read-all`,
+      AuthOrchestrationOperateScope,
+      body.pipe(Effect.flatMap(Inbox.markAllRead)),
     ),
     route(
       "POST",

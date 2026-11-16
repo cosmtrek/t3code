@@ -216,9 +216,12 @@ async function harness(
     },
     { create: true },
   );
+  const store = new InboxStore(":memory:");
+  // Fixtures are at fixed past times; none should fall before the first-read cutoff.
+  store.readAllBefore(channelId, "2026-01-01T00:00:00.000Z");
   const runtime = {
     hub,
-    store: new InboxStore(":memory:"),
+    store,
     channelsDir: dir,
     itemsDir: NodePath.join(dir, "items"),
     subscribe: (listener: Parameters<ChannelHub["subscribe"]>[0]) => hub.subscribe(listener),
@@ -313,8 +316,8 @@ describe("inbox listing", () => {
       const byTopic = new Map(result.items.map((item) => [item.topicId, item] as const));
       expect([...byTopic.keys()].toSorted()).toEqual(["t-a", "t-joined", "t-second-page"]);
       // A topic I joined that mentions me after my last message is direct, not participated.
-      expect(byTopic.get("t-joined")).toMatchObject({ category: "direct", state: "needs_reply" });
-      expect(byTopic.get("t-second-page")).toMatchObject({ state: "waiting" });
+      expect(byTopic.get("t-joined")).toMatchObject({ category: "direct", unread: true });
+      expect(byTopic.get("t-second-page")).toMatchObject({ unread: false, awaitingReply: true });
 
       const topic = yield* Inbox.readTopic(
         new URLSearchParams(h.keyOf("c-second", "t-joined")),
@@ -339,43 +342,87 @@ describe("inbox listing", () => {
     }),
   );
 
-  it.effect("clears a mark once someone else writes after it, even if I wrote last", () =>
+  it.effect("reads a topic up to what the client saw, and unreads it on a newer message", () =>
     Effect.gen(function* () {
       const messages: FakeMessage[] = [{ id: "m1", minute: 1, author: THEM }];
       const h = yield* Effect.promise(() =>
         harness(() => [{ conversationId: "c", topicId: "t", messages }]),
       );
       const key = h.keyOf("c", "t");
-      yield* Inbox.mark({ ...key, state: "done" }).pipe(Effect.provide(h.layer));
-      messages.push({ id: "m2", minute: 2, author: THEM }, { id: "m3", minute: 3, author: ME });
-      h.runtime.hub.invalidate(h.channelId);
-      const result = yield* Inbox.listItems(h.channelId).pipe(Effect.provide(h.layer));
-      expect(result.items[0]).toMatchObject({ state: "waiting", mark: null });
-      expect(h.runtime.store.listMarks(h.channelId)).toEqual([]);
-    }),
-  );
-
-  it.effect("marks with the client's last message without reading the channel", () =>
-    Effect.gen(function* () {
-      const messages: FakeMessage[] = [{ id: "m1", minute: 1, author: THEM }];
-      const h = yield* Effect.promise(() =>
-        harness(() => [{ conversationId: "c", topicId: "t", messages }]),
-      );
-      const key = h.keyOf("c", "t");
+      const list = () =>
+        Inbox.listItems(h.channelId).pipe(
+          Effect.map((result) => result.items[0]),
+          Effect.provide(h.layer),
+        );
       h.requests.length = 0;
-      yield* Inbox.mark({ ...key, state: "ignored", lastMessageAt: at(1) }).pipe(
+      yield* Inbox.setRead({ ...key, read: true, lastMessageAt: at(1) }).pipe(
         Effect.provide(h.layer),
       );
       expect(h.requests).toEqual([]);
-      expect(h.runtime.store.listMarks(h.channelId)).toMatchObject([
-        { state: "ignored", watermarkMessageAt: at(1) },
-      ]);
-      // An older client reads only the topic's own conversation.
-      yield* Inbox.mark({ ...key, state: "done" }).pipe(Effect.provide(h.layer));
-      expect(h.requests.every((path) => path.startsWith("/conversations/c/topics"))).toBe(true);
-      expect(h.runtime.store.listMarks(h.channelId)).toMatchObject([
-        { state: "done", watermarkMessageAt: at(1) },
-      ]);
+      expect(yield* list()).toMatchObject({ unread: false });
+      messages.push({ id: "m2", minute: 2, author: THEM });
+      h.runtime.hub.invalidate(h.channelId);
+      expect(yield* list()).toMatchObject({ unread: true });
+      yield* Inbox.setRead({ ...key, read: true, lastMessageAt: at(2) }).pipe(
+        Effect.provide(h.layer),
+      );
+      yield* Inbox.setRead({ ...key, read: false }).pipe(Effect.provide(h.layer));
+      expect(yield* list()).toMatchObject({ unread: true });
+      yield* Inbox.markAllRead({ channelId: h.channelId, before: at(2) }).pipe(
+        Effect.provide(h.layer),
+      );
+      expect(yield* list()).toMatchObject({ unread: false });
+      // Overview counts only what is still unread.
+      const overview = yield* Inbox.overview().pipe(Effect.provide(h.layer));
+      expect(overview.channels.find((channel) => channel.id === h.channelId)?.unreadCount).toBe(0);
+    }),
+  );
+
+  it.effect("shows a finished run until the client reports seeing it", () =>
+    Effect.gen(function* () {
+      const h = yield* Effect.promise(() =>
+        harness(() => [
+          { conversationId: "c", topicId: "t", messages: [{ id: "m1", minute: 1, author: ME }] },
+        ]),
+      );
+      const key = h.keyOf("c", "t");
+      yield* linkThread(h, key, "thread-1", 1);
+      const finished = (status: string, extra: Record<string, unknown> = {}) => {
+        h.shells.set("thread-1", {
+          ...idleShell("thread-1"),
+          status,
+          latestRunId: "run-1",
+          latestRunCompletedAt: DateTime.makeUnsafe(at(5)),
+          ...extra,
+        } as never);
+        h.runtime.hub.invalidate(h.channelId);
+      };
+      const item = () =>
+        Inbox.listItems(h.channelId).pipe(
+          Effect.map((result) => result.items[0]),
+          Effect.provide(h.layer),
+        );
+      finished("completed");
+      expect(yield* item()).toMatchObject({
+        unread: true,
+        agentUnseen: true,
+        thread: { runCompletedAt: at(5) },
+      });
+      const quietRuns: ReadonlyArray<[string, Record<string, unknown>]> = [
+        ["rolled_back", {}],
+        ["cancelled", {}],
+        ["completed", { latestRunBackgroundWake: true }],
+        ["interrupted", { latestRunStopRequested: true }],
+      ];
+      for (const [status, extra] of quietRuns) {
+        finished(status, extra);
+        expect(yield* item()).toMatchObject({ agentUnseen: false });
+      }
+      finished("failed");
+      yield* Inbox.setRead({ ...key, read: true, runCompletedAt: at(5) }).pipe(
+        Effect.provide(h.layer),
+      );
+      expect(yield* item()).toMatchObject({ unread: false, agentUnseen: false });
     }),
   );
 
@@ -386,18 +433,18 @@ describe("inbox listing", () => {
         harness(() => [{ conversationId: "c", topicId: "t", messages }]),
       );
       const key = h.keyOf("c", "t");
-      const reads = vi.spyOn(h.runtime.store, "listMarks");
+      const reads = vi.spyOn(h.runtime.store, "listReads");
       yield* Effect.all(
         [Inbox.overview(), Inbox.listItems(h.channelId), Inbox.readTopic(new URLSearchParams(key))],
         { concurrency: "unbounded" },
       ).pipe(Effect.provide(h.layer));
       expect(reads).toHaveBeenCalledTimes(1);
-      yield* Inbox.mark({ ...key, state: "done", lastMessageAt: at(1) }).pipe(
+      yield* Inbox.setRead({ ...key, read: true, lastMessageAt: at(1) }).pipe(
         Effect.provide(h.layer),
       );
       const result = yield* Inbox.listItems(h.channelId).pipe(Effect.provide(h.layer));
       expect(reads).toHaveBeenCalledTimes(2);
-      expect(result.items[0]).toMatchObject({ state: "done" });
+      expect(result.items[0]).toMatchObject({ unread: false });
       expect(result.items[0]).not.toHaveProperty("waitMs");
     }),
   );
@@ -623,14 +670,14 @@ describe("linked threads and their files", () => {
         ]),
       );
       const query = new URLSearchParams(key);
-      expect((yield* Inbox.readTopic(query).pipe(Effect.provide(h.layer))).item.state).toBe(
-        "drafted",
+      expect((yield* Inbox.readTopic(query).pipe(Effect.provide(h.layer))).item.hasDraft).toBe(
+        true,
       );
       h.shells.set("thread-1", null);
       // What followLinkedThreads publishes on thread.deleted.
       h.runtime.hub.publish({ type: "inbox", channelId: h.channelId });
       const after = yield* Inbox.readTopic(query).pipe(Effect.provide(h.layer));
-      expect(after.item).toMatchObject({ state: "needs_reply", hasDraft: false });
+      expect(after.item).toMatchObject({ hasDraft: false });
       expect(after).toMatchObject({
         draft: null,
         conclusion: "cause",
@@ -645,7 +692,7 @@ describe("linked threads and their files", () => {
       const dir = yield* linkThread(h, h.keyOf("c", "t"), "thread-1", 1);
       yield* Effect.promise(() => NodeFSP.writeFile(NodePath.join(dir, "draft.md"), " \n\n"));
       const result = yield* Inbox.listItems(h.channelId).pipe(Effect.provide(h.layer));
-      expect(result.items[0]).toMatchObject({ state: "needs_reply", hasDraft: false });
+      expect(result.items[0]).toMatchObject({ hasDraft: false });
     }),
   );
 });
@@ -683,13 +730,12 @@ describe("sending", () => {
     { conversationId: "c", topicId: "t", messages: [{ id: "m1", minute: 1, author: THEM }] },
   ];
 
-  it.effect("keeps the draft and the mark when the adapter does not confirm a message id", () =>
+  it.effect("keeps the draft when the adapter does not confirm a message id", () =>
     Effect.gen(function* () {
       const h = yield* Effect.promise(() => harness(oneTopic, () => json(200, { ok: true })));
       const key = h.keyOf("c", "t");
       const dir = yield* linkThread(h, key, "thread-1", 1);
       yield* Effect.promise(() => NodeFSP.writeFile(NodePath.join(dir, "draft.md"), "reply\n"));
-      yield* Inbox.mark({ ...key, state: "done" }).pipe(Effect.provide(h.layer));
       const error = yield* Inbox.send({ ...key, text: "reply" }).pipe(
         Effect.provide(h.layer),
         Effect.flip,
@@ -698,7 +744,6 @@ describe("sending", () => {
       expect(
         yield* Effect.promise(() => NodeFSP.readFile(NodePath.join(dir, "draft.md"), "utf8")),
       ).toBe("reply\n");
-      expect(h.runtime.store.listMarks(h.channelId)).toHaveLength(1);
     }),
   );
 
@@ -748,10 +793,8 @@ describe("sending", () => {
         await NodeFSP.mkdir(h.runtime.itemsDir, { recursive: true });
         await NodeFSP.writeFile(NodePath.join(h.runtime.itemsDir, itemIdFor(key)), "");
       });
-      yield* Inbox.mark({ ...key, state: "done" }).pipe(Effect.provide(h.layer));
       const sent = yield* Inbox.send({ ...key, text: "reply" }).pipe(Effect.provide(h.layer));
       expect(sent).toEqual({ messageId: "sent-1", archived: false });
-      expect(h.runtime.store.listMarks(h.channelId)).toEqual([]);
     }),
   );
 });

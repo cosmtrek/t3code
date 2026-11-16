@@ -10,8 +10,8 @@ export function ForkSidebarItems({ onNavigate }: { readonly onNavigate: () => vo
   const navigate = useNavigate();
   const inboxes = useInboxOverviews();
   if (inboxes.length === 0) return null;
-  const pending = inboxes.reduce((sum, inbox) => sum + inbox.pendingCount, 0);
-  const label = pending > 0 ? `Inbox, ${pending} pending` : "Inbox";
+  const unread = inboxes.reduce((sum, inbox) => sum + inbox.unreadCount, 0);
+  const label = unread > 0 ? `Inbox, ${unread} unread` : "Inbox";
   return (
     <SidebarMenuItem className="relative shrink-0">
       <Tooltip>
@@ -31,12 +31,12 @@ export function ForkSidebarItems({ onNavigate }: { readonly onNavigate: () => vo
         />
         <TooltipPopup side="top">{label}</TooltipPopup>
       </Tooltip>
-      {pending > 0 ? (
+      {unread > 0 ? (
         <span
           aria-hidden
           className="pointer-events-none absolute -top-0.5 -right-0.5 min-w-4 rounded-full bg-primary px-1 text-center text-3xs leading-4 font-medium text-primary-foreground tabular-nums"
         >
-          {pending > 99 ? "99+" : pending}
+          {unread > 99 ? "99+" : unread}
         </span>
       ) : null}
     </SidebarMenuItem>

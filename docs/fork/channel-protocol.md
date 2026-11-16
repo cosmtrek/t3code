@@ -57,13 +57,17 @@ is "Sign-in needed" (reading works, sending does not); `online: false` is "Colle
 
 ### Topic summary fields
 
-T3 decides a topic's state from the topic alone, so the adapter computes two fields from all of
-the topic's messages:
+T3 decides a topic's state from the topic alone, so the adapter computes these fields from all
+of the topic's messages:
 
 - `lastOtherMessageAt`: `createdAt` of the newest message whose author is not me; `null` if I wrote
   every message.
 - `mentionsSelfSinceOwn`: whether any message after my newest one has `mentionsSelf: true`; if I
   never wrote in the topic, whether any message does.
+- `selfReadThroughAt` (optional): `createdAt` of the newest message not from me that the chat app
+  shows I have read. It is a message time, not the time I read it, so reading the latest message
+  makes it equal `lastOtherMessageAt`. T3 shows the topic as read up to it. Give `null`, or leave
+  it out, whenever the adapter is not sure: a wrong value hides a message the user never saw.
 
 ## Sending
 
@@ -86,6 +90,9 @@ lists again.
   `messageId`, but nothing requires them, and data T3 cannot parse still counts. With a
   `conversationId`, T3 reads again only the conversation list and that conversation; without
   one, everything.
+- `topic.updated`: a topic changed without a new message, such as its `selfReadThroughAt`. Its
+  data is read as `message.created`'s. Send it only when a value changed, and only once the
+  topics list answers with the new value.
 - `health.changed`: T3 checks `/health` again.
 
 Other event names are ignored. T3 reads everything again each time the stream (re)connects, so

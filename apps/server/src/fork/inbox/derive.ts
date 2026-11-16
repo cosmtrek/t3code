@@ -2,23 +2,9 @@
 import * as NodeCrypto from "node:crypto";
 
 import type { Conversation, Message, Topic } from "../channels/protocol.ts";
-import type { Mark, MarkState, TopicKey } from "./store.ts";
-
-export type ItemState =
-  | "needs_reply"
-  | "drafted"
-  | "investigating"
-  | "waiting"
-  | "open"
-  | MarkState;
+import type { Read, TopicKey } from "./store.ts";
 
 export type ItemCategory = "direct" | "participated" | "followed" | "other";
-
-export const PENDING_STATES: ReadonlySet<ItemState> = new Set([
-  "needs_reply",
-  "drafted",
-  "investigating",
-]);
 
 const WAITING_HIGHLIGHT_MS = 24 * 3_600_000;
 
@@ -32,28 +18,46 @@ export function itemIdFor(key: TopicKey): string {
 
 export interface TopicFacts {
   readonly conversation: Pick<Conversation, "kind" | "relevant" | "muted">;
-  readonly topic: Pick<Topic, "lastMessageAt" | "lastAuthor" | "participatedBySelf">;
+  readonly topic: Pick<Topic, "lastMessageAt" | "lastAuthor" | "participatedBySelf"> & {
+    readonly selfReadThroughAt?: string | null | undefined;
+  };
   /** A message after my last one mentions me. */
   readonly mentionsSelf: boolean;
   /** When someone else last wrote in the topic; null when nobody else has. */
   readonly lastOtherMessageAt: string | null;
-  readonly mark: Pick<Mark, "state" | "watermarkMessageAt"> | null;
-  readonly threadRunning: boolean;
-  readonly hasDraft: boolean;
+  readonly read: Pick<Read, "readAt" | "agentSeenAt" | "pinnedUnread"> | null;
+  /** The channel-wide mark: anything before it, message or agent result, counts as seen. */
+  readonly readAllBefore: string;
+  /** When the current thread's last run worth a look finished; null while none has. */
+  readonly runCompletedAt: string | null;
   readonly now: number;
 }
 
 export interface DerivedItem {
-  readonly state: ItemState;
   readonly category: ItemCategory;
-  /** Someone else wrote after the mark's watermark; the caller clears the mark. */
-  readonly reopened: boolean;
+  readonly unread: boolean;
+  /** The thread finished a run after the user last looked. */
+  readonly agentUnseen: boolean;
+  /** I wrote last: the topic waits on the others. */
+  readonly awaitingReply: boolean;
   readonly waitMs: number;
   readonly highlight: boolean;
 }
 
+const instant = (at: string | null | undefined) => (at ? Date.parse(at) : Number.NaN);
+
+/** Whether `at` is after every mark; a mark that is missing or unparsable does not count. */
+function after(at: string | null, ...marks: ReadonlyArray<string | null | undefined>): boolean {
+  const time = instant(at);
+  if (!Number.isFinite(time)) return false;
+  return marks.every((mark) => {
+    const markTime = instant(mark);
+    return !Number.isFinite(markTime) || time > markTime;
+  });
+}
+
 export function deriveItem(facts: TopicFacts): DerivedItem {
-  const { topic, conversation } = facts;
+  const { topic, conversation, read } = facts;
   const lastIsSelf = topic.lastAuthor.isSelf;
   const lastAt = Date.parse(topic.lastMessageAt);
   const waitMs = Number.isFinite(lastAt) ? Math.max(0, facts.now - lastAt) : 0;
@@ -65,32 +69,31 @@ export function deriveItem(facts: TopicFacts): DerivedItem {
       : conversation.relevant && !conversation.muted
         ? "followed"
         : "other";
-  const reopened =
-    facts.mark !== null &&
-    facts.lastOtherMessageAt !== null &&
-    Date.parse(facts.lastOtherMessageAt) > Date.parse(facts.mark.watermarkMessageAt);
-  const state: ItemState =
-    facts.mark !== null && !reopened
-      ? facts.mark.state
-      : facts.hasDraft
-        ? "drafted"
-        : facts.threadRunning
-          ? "investigating"
-          : lastIsSelf
-            ? "waiting"
-            : category === "direct" || category === "participated"
-              ? "needs_reply"
-              : "open";
+  const messageUnread =
+    !lastIsSelf &&
+    after(facts.lastOtherMessageAt, read?.readAt, topic.selfReadThroughAt, facts.readAllBefore);
+  const agentUnseen = after(facts.runCompletedAt, read?.agentSeenAt, facts.readAllBefore);
   return {
-    state,
     category,
-    reopened,
+    unread: (read?.pinnedUnread ?? false) || messageUnread || agentUnseen,
+    agentUnseen,
+    awaitingReply: lastIsSelf,
     waitMs,
-    highlight: state === "waiting" && waitMs > WAITING_HIGHLIGHT_MS,
+    highlight: lastIsSelf && waitMs > WAITING_HIGHLIGHT_MS,
   };
 }
 
-/** Newest first; each view already splits items by state. */
+/** What the sidebar badge counts: agent results, and unread topics I am part of. */
+export function countsTowardBadge(
+  item: Pick<DerivedItem, "unread" | "agentUnseen" | "category">,
+): boolean {
+  return (
+    item.agentUnseen ||
+    (item.unread && (item.category === "direct" || item.category === "participated"))
+  );
+}
+
+/** Newest first; each view already picks its items. */
 export function compareItems(
   left: { readonly lastMessageAt: string; readonly id: string },
   right: { readonly lastMessageAt: string; readonly id: string },

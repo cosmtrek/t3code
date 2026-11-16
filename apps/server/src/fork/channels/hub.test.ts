@@ -515,7 +515,7 @@ describe("ChannelHub events", () => {
     return { hub, asked, send: (event: ChannelEvent) => send(event) };
   }
 
-  it("reads again only the conversation a new message names", async () => {
+  it("reads again only the conversation an event names", async () => {
     const { hub, asked, send } = await streamingHub();
     const paths = [
       "/conversations?relevant=1",
@@ -531,7 +531,11 @@ describe("ChannelHub events", () => {
     await readAll();
     expect(asked).toEqual(paths.slice(0, 3));
     asked.length = 0;
-    send({ type: "message.created" });
+    send({ type: "topic.updated", conversationId: "c2" });
+    await readAll();
+    expect(asked).toEqual([paths[0], ...paths.slice(3)]);
+    asked.length = 0;
+    send({ type: "topic.updated" });
     await readAll();
     expect(asked).toEqual(paths);
     hub.stop();
@@ -838,6 +842,11 @@ describe("SSE parsing", () => {
     // A known event counts whatever its data; it only says that something changed.
     expect(parseChannelEvent("message.created", "{bad")).toEqual({ type: "message.created" });
     expect(parseChannelEvent("message.created", "")).toEqual({ type: "message.created" });
+    expect(parseChannelEvent("topic.updated", '{"conversationId":"c"}')).toEqual({
+      type: "topic.updated",
+      conversationId: "c",
+    });
+    expect(parseChannelEvent("topic.updated", "{}")).toEqual({ type: "topic.updated" });
     expect(parseChannelEvent("other", "{}")).toBeNull();
   });
 
@@ -919,13 +928,14 @@ describe("protocol fixtures", () => {
     expect(decodes(SendErrorCode, error.code)).toBe("Success");
   });
 
-  it("parses events.sse into both events", async () => {
+  it("parses every event in events.sse", async () => {
     const events: unknown[] = [];
     createSseParser((event, data) => events.push(parseChannelEvent(event, data)))(
       await fixture("events.sse"),
     );
     expect(events).toEqual([
       { type: "message.created", conversationId: "oc_platform", topicId: "omt_cache" },
+      { type: "topic.updated", conversationId: "oc_platform" },
       { type: "health.changed" },
     ]);
   });
