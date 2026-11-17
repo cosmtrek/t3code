@@ -38,19 +38,18 @@ describe("emptyViewTitle", () => {
 describe("inView", () => {
   const conversation = (unread: boolean, mentioned = false) =>
     ({ id: "c", kind: "group", unread, mentioned }) as InboxConversation;
-  const agent = (unseen: number) => ({ unseen, drafts: 0, live: 1 });
 
-  it("lists in Unread what has new messages, a mention, or an agent result", () => {
-    expect(inView("unread", "all", conversation(true), undefined)).toBe(true);
-    expect(inView("unread", "all", conversation(false, true), undefined)).toBe(true);
-    expect(inView("unread", "all", conversation(false), agent(1))).toBe(true);
-    expect(inView("unread", "all", conversation(false), agent(0))).toBe(false);
-    expect(inView("all", "all", conversation(false), undefined)).toBe(true);
+  it("lists in Unread what has new messages or a mention", () => {
+    expect(inView("unread", "all", conversation(true))).toBe(true);
+    expect(inView("unread", "all", conversation(false, true))).toBe(true);
+    expect(inView("unread", "all", conversation(false))).toBe(false);
+    expect(inView("all", "all", conversation(false))).toBe(true);
   });
 
-  it("keeps the open conversation in Unread after it is read, and only that one", () => {
-    expect(inView("unread", "all", conversation(false), undefined, "c")).toBe(true);
-    expect(inView("unread", "dm", conversation(false), undefined, "c")).toBe(false);
+  it("keeps the held conversation in Unread after it is read, and only that one", () => {
+    expect(inView("unread", "all", conversation(false), "c")).toBe(true);
+    expect(inView("unread", "all", conversation(false), "other")).toBe(false);
+    expect(inView("unread", "dm", conversation(false), "c")).toBe(false);
   });
 });
 

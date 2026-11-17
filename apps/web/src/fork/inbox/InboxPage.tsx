@@ -201,6 +201,8 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
   const [view, setView] = useState<InboxView>("agent");
   const [filter, setFilter] = useState<InboxFilter>("all");
   const [conversationId, setConversationId] = useState<string | null>(null);
+  // The conversation opened from Unread stays listed there until the view changes.
+  const [heldId, setHeldId] = useState<string | null>(null);
   const [delegationId, setDelegationId] = useState<string | null>(null);
   const [delegating, setDelegating] = useState<DelegateTarget | null>(null);
   const [replyRequest, setReplyRequest] = useState<ReplyRequest | null>(null);
@@ -235,9 +237,7 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
     refreshChannel,
   );
   const visibleConversations = conversations.filter(
-    (candidate) =>
-      view !== "agent" &&
-      inView(view, filter, candidate, agentSignals.get(candidate.id), conversationId),
+    (candidate) => view !== "agent" && inView(view, filter, candidate, heldId),
   );
   const visibleDelegations = delegations.filter((candidate) =>
     matchesFilter(filter, kindOf.get(candidate.conversationId)),
@@ -277,6 +277,7 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
   const selectConversation = (target: InboxConversation) => {
     setConversationId(target.id);
     setDelegationId(null);
+    setHeldId(view === "unread" ? target.id : null);
     readConversation(target);
   };
   const selectDelegation = (target: InboxDelegation) => {
@@ -346,13 +347,12 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
     );
   }
 
+  // Unread counts people, Agent counts results, so nothing is counted in both.
   const viewCount = (option: InboxView) =>
     option === "agent"
-      ? delegations.filter((candidate) => candidate.agentUnseen).length
+      ? visibleDelegations.filter((candidate) => candidate.agentUnseen).length
       : option === "unread"
-        ? conversations.filter((candidate) =>
-            inView("unread", filter, candidate, agentSignals.get(candidate.id)),
-          ).length
+        ? conversations.filter((candidate) => inView("unread", filter, candidate)).length
         : 0;
   const delegationOpen = delegation !== null;
   const conversationShown = conversation !== null;
@@ -416,7 +416,9 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
               value={[view]}
               onValueChange={(next) => {
                 const value = next[0] as InboxView | undefined;
-                if (value) setView(value);
+                if (!value) return;
+                setView(value);
+                setHeldId(null);
               }}
               aria-label="Inbox view"
             >
