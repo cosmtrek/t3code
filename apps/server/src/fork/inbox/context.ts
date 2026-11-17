@@ -253,8 +253,8 @@ export function buildContextMarkdown(input: {
       `### ${nameOrUnknown(message.author.name)}${message.author.isSelf ? " (me)" : ""} · ${message.createdAt}`,
     );
     lines.push("");
-    if (message.text.trim().length > 0) lines.push(message.text.trim(), "");
     if (message.richSummary) lines.push(`> Rich content: ${message.richSummary}`, "");
+    if (message.text.trim().length > 0) lines.push(message.text.trim(), "");
     for (const attachment of message.attachments) {
       const image = input.images.find(
         (candidate) => candidate.messageId === message.id && candidate.key === attachment.key,

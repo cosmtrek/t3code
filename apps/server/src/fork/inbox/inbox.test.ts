@@ -279,6 +279,7 @@ describe("delegation text", () => {
           author: { id: "u2", name: " ", isSelf: false },
           mentionsSelf: false,
           text: "hello",
+          richSummary: "Forwarded · 1 message",
           attachments: [],
           links: [],
         },
@@ -292,6 +293,8 @@ describe("delegation text", () => {
     });
     expect(markdown.split("\n").slice(0, 3)).toEqual(["# Unknown", "", `${missing} below.`]);
     expect(markdown).toContain(`### Unknown · ${hoursAgo(1)}`);
+    // A forward's title comes before the chat it carries.
+    expect(markdown).toContain("> Rich content: Forwarded · 1 message\n\nhello");
   });
 
   it("parses the last tagged conclusion and draft", () => {

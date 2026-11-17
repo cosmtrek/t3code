@@ -131,9 +131,12 @@ export function quoteOf(author: string | null, text: string): string {
   return author === null ? head : `${nameOrUnknown(author)}: ${head}`;
 }
 
-/** The message as a quote: who wrote it and how it starts. */
+/**
+ * The message as a quote: who wrote it and how it starts. A forward's text is the forwarded
+ * chat with its own speakers, so the rich summary names the message better.
+ */
 export const quoteOfMessage = (message: InboxMessage) =>
-  quoteOf(message.author.name, message.text || (message.richSummary ?? ""));
+  quoteOf(message.author.name, message.richSummary || message.text);
 
 export interface ConversationRow {
   readonly message: InboxMessage;
@@ -229,7 +232,7 @@ function attachmentLabel(message: InboxMessage): string {
 
 /** A reply as one line under a folded topic: who wrote it and what, whatever its length. */
 export function replyLine(message: InboxMessage): string {
-  const body = message.text.trim() || message.richSummary || attachmentLabel(message);
+  const body = message.richSummary || message.text.trim() || attachmentLabel(message);
   return `${nameOrUnknown(message.author.name)}: ${body.replace(/\s+/g, " ").trim()}`;
 }
 
@@ -378,8 +381,8 @@ export function messagesAsText(
   const lines = [`# ${nameOrUnknown(conversationName)}`, ""];
   for (const message of messages) {
     lines.push(`${nameOrUnknown(message.author.name)} · ${message.createdAt}`);
-    if (message.text.trim()) lines.push(message.text.trim());
     if (message.richSummary) lines.push(`[${message.richSummary}]`);
+    if (message.text.trim()) lines.push(message.text.trim());
     for (const attachment of message.attachments)
       lines.push(`[${attachment.kind}: ${attachment.name}]`);
     lines.push("");
