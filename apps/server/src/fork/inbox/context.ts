@@ -9,13 +9,16 @@ export const CONTEXT_FILE = "context.md";
 export const REQUEST_FILE = "request.json";
 export const MEDIA_DIR = "media";
 
-function writeBackInstructions(contextDir: string): string {
+const replyFormat = (markdown: boolean) =>
+  markdown ? "simple Markdown, no headings or tables" : "plain text";
+
+function writeBackInstructions(contextDir: string, markdown: boolean): string {
   return [
     "## Reporting back",
     "",
-    `- Write your findings to \`${contextDir}/${CONCLUSION_FILE}\` in Markdown, and keep it current as they change.`,
-    "- Do not write a reply for the chat until I ask for one.",
-    "- If you cannot write files in that folder, end your last message with `<conclusion>…</conclusion>` holding the same content instead.",
+    `- Keep your findings in \`${contextDir}/${CONCLUSION_FILE}\` (Markdown), current as they change.`,
+    `- Write \`${contextDir}/${DRAFT_FILE}\` only when a message of mine asks for the reply to the chat, such as "reply that…", "tell them…", or "make it shorter". Write the whole reply, ready to send in the conversation's language, as ${replyFormat(markdown)}. Questions and other tasks leave it alone.`,
+    "- If you cannot write files there, end your last message with `<conclusion>…</conclusion>` or `<draft>…</draft>` instead.",
   ].join("\n");
 }
 
@@ -44,6 +47,7 @@ export function firstMessage(input: {
   readonly note: string;
   readonly openUrl: string | null;
   readonly skippedMessages: number;
+  readonly markdown: boolean;
 }): string {
   const body = fillTemplate(input.template, input);
   const parts = [body.trim()];
@@ -53,49 +57,56 @@ export function firstMessage(input: {
   if (input.openUrl !== null && !body.includes(input.openUrl)) {
     parts.push(`Open in app: ${input.openUrl}`);
   }
-  if (!body.includes(CONCLUSION_FILE)) {
-    parts.push(writeBackInstructions(input.contextDir));
+  if (!body.includes(CONCLUSION_FILE) || !body.includes(DRAFT_FILE)) {
+    parts.push(writeBackInstructions(input.contextDir, input.markdown));
   }
   return parts.join("\n\n");
 }
 
-/** Sent after each question asked from the inbox, so the thread keeps its conclusion current. */
-function followUpNote(contextDir: string): string {
-  return [
-    `(If your findings change, update \`${contextDir}/${CONCLUSION_FILE}\`.`,
-    "If you cannot write files there, end your message with `<conclusion>…</conclusion>` instead.)",
-  ].join(" ");
-}
+/** Whether the thread got the reporting rules that say when to draft; older threads did not. */
+export const knowsDraftRule = (context: string | null) => context?.includes(DRAFT_FILE) ?? false;
 
-/** What questions carried while every run kept a draft; older threads still hold it. */
-function legacyFollowUpNote(contextDir: string): string {
+/** Carries the reporting rules on each message, for threads that never got them. */
+function askNote(contextDir: string, markdown: boolean): string {
   return [
-    `(If the reply I should send changes, update \`${contextDir}/${DRAFT_FILE}\`. If your findings change, update \`${contextDir}/${CONCLUSION_FILE}\`.`,
-    "If you cannot write files there, end your message with `<draft>…</draft>` and `<conclusion>…</conclusion>` instead.)",
-  ].join(" ");
-}
-
-/** Asks for the reply only when the user wants one, so a run never drafts ahead of its findings. */
-function draftNote(contextDir: string, markdown: boolean): string {
-  return [
-    `(Write the reply I should send in the chat to \`${contextDir}/${DRAFT_FILE}\`, from everything so far:`,
-    markdown
-      ? "in the language of the conversation, ready to send as is. The chat shows simple Markdown (bold, lists, quotes, links, code blocks) and no headings or tables."
-      : "plain text, in the language of the conversation, ready to send as is.",
-    "If you cannot write files there, end your message with `<draft>…</draft>` instead.)",
+    `(If this asks for the reply to the chat, write it to \`${contextDir}/${DRAFT_FILE}\` as ${replyFormat(markdown)}; otherwise leave it alone.`,
+    `If your findings change, update \`${contextDir}/${CONCLUSION_FILE}\`.`,
+    "If you cannot write files there, end with `<draft>…</draft>` or `<conclusion>…</conclusion>` instead.)",
   ].join(" ");
 }
 
 export function followUpMessage(
   text: string,
   contextDir: string,
-  kind: FollowUp["kind"] = "question",
-  /** Whether the channel sends Markdown, which decides how a draft may be written. */
-  options: { readonly markdown: boolean } = { markdown: false },
+  options: { readonly markdown: boolean; readonly knowsRule: boolean },
 ): string {
-  const note =
-    kind === "draft" ? draftNote(contextDir, options.markdown) : followUpNote(contextDir);
-  return text.length > 0 ? `${text}\n\n${note}` : note;
+  return options.knowsRule ? text : `${text}\n\n${askNote(contextDir, options.markdown)}`;
+}
+
+/** Notes earlier versions sent with each message, so history still shows what was typed. */
+function pastNotes(contextDir: string): ReadonlyArray<readonly [FollowUp["kind"], string]> {
+  const reply = (markdown: boolean) =>
+    [
+      `(Write the reply I should send in the chat to \`${contextDir}/${DRAFT_FILE}\`, from everything so far:`,
+      markdown
+        ? "in the language of the conversation, ready to send as is. The chat shows simple Markdown (bold, lists, quotes, links, code blocks) and no headings or tables."
+        : "plain text, in the language of the conversation, ready to send as is.",
+      "If you cannot write files there, end your message with `<draft>…</draft>` instead.)",
+    ].join(" ");
+  return [
+    ["draft", reply(false)],
+    ["draft", reply(true)],
+    [
+      "question",
+      `(If your findings change, update \`${contextDir}/${CONCLUSION_FILE}\`. If you cannot write files there, end your message with \`<conclusion>…</conclusion>\` instead.)`,
+    ],
+    [
+      "question",
+      `(If the reply I should send changes, update \`${contextDir}/${DRAFT_FILE}\`. If your findings change, update \`${contextDir}/${CONCLUSION_FILE}\`. If you cannot write files there, end your message with \`<draft>…</draft>\` and \`<conclusion>…</conclusion>\` instead.)`,
+    ],
+    ["question", askNote(contextDir, false)],
+    ["question", askNote(contextDir, true)],
+  ];
 }
 
 export interface FollowUp {
@@ -131,12 +142,7 @@ export function followUpsOf(
   const sorted = messages.toSorted((left, right) => Date.parse(left.at) - Date.parse(right.at));
   // The first user message is the delegation itself.
   const questions = sorted.filter((message) => message.role === "user").slice(1);
-  const notes = [
-    ["draft", draftNote(contextDir, false)],
-    ["draft", draftNote(contextDir, true)],
-    ["question", followUpNote(contextDir)],
-    ["question", legacyFollowUpNote(contextDir)],
-  ] as const;
+  const notes = pastNotes(contextDir);
   return questions.slice(-FOLLOW_UP_ROUNDS).flatMap((question) => {
     const answer =
       question.runId === null
@@ -228,6 +234,8 @@ export function buildContextMarkdown(input: {
   readonly skippedMessages: number;
   /** The reply thread's first message is gone from the adapter; only its replies are here. */
   readonly rootMissing?: boolean;
+  /** Whether the channel sends Markdown, which decides how a draft is written. */
+  readonly markdown: boolean;
 }): string {
   const conversationName = nameOrUnknown(input.conversation.name);
   const lines: string[] = [
@@ -280,7 +288,7 @@ export function buildContextMarkdown(input: {
     }
     lines.push("");
   }
-  lines.push(writeBackInstructions(input.contextDir), "");
+  lines.push(writeBackInstructions(input.contextDir, input.markdown), "");
   return lines.join("\n");
 }
 

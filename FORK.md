@@ -321,14 +321,14 @@ seam files. Then try the example channel end to end in a browser before releasin
 - The dialog chooses the thread's checkout: the project's, a new worktree, or an existing one.
   Delegating the same messages again defaults to the worktree its last thread worked in, read
   from that thread rather than stored.
-- A question asked from the delegation pane goes to the current thread with a note to keep its
-  conclusion current; the pane shows the latest five questions and answers without that note.
-- The thread writes `conclusion.md` into its folder on every run, and `draft.md` only when the
-  user asks for a reply ("Draft reply", sent like a question and queued behind a running turn).
-  Asking for the reply separately keeps a run from drafting before its findings and from
-  overwriting a reply the user is editing; templates should not ask for `draft.md` either. When
-  the thread cannot write there (a sandbox limited to the workspace), it ends its reply with
-  `<conclusion>` or `<draft>` tags; the inbox reads each finished run once and writes the files
+- What the user types in the delegation pane goes to the current thread as typed. The thread's
+  reporting rules (in `context.md`, and in the first message when the template lacks them) say to
+  keep `conclusion.md` current and to write `draft.md` only when a message asks for the reply, so a
+  run never drafts ahead of its findings. Threads delegated before those rules get them as a note
+  on each message; the pane hides that note. When a run ends with a new draft, the pane fills the
+  conversation's reply box with it. Templates may define the draft rule themselves by naming
+  `draft.md`. When the thread cannot write there (a sandbox limited to the workspace), it ends its
+  reply with `<conclusion>` or `<draft>` tags; the inbox reads each finished run once and writes the files
   (`.fallback.json` records the run and what it wrote). A later run's tags replace an earlier
   run's; a file the thread wrote itself always wins.
 - A reply sent from a delegation's draft is kept as `items/<delegationId>/sent.<time>.<hash>.md`: the text as sent, its message

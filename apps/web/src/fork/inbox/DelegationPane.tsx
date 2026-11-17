@@ -2,7 +2,7 @@ import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { ThreadId, type EnvironmentId } from "@t3tools/contracts";
 import { CHAT_USER_MARKDOWN_REMARK_PLUGINS } from "@t3tools/shared/markdownPipeline";
 import { ChevronDownIcon } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import ChatMarkdown from "../../components/ChatMarkdown";
 import { resolveThreadStatusPill } from "../../components/Sidebar.logic";
@@ -52,6 +52,24 @@ export function DelegationPane({
   const canAsk = live !== null && live.status !== "archived" && !detail.conclusionIsHistorical;
   const draft = detail.draft?.trim() ?? "";
   const formatTimestamp = useFormatTimestamp();
+  const draftCard = (
+    <div className="flex flex-col gap-2.5 rounded-lg border border-border/70 bg-muted/40 p-3">
+      <p className="text-sm whitespace-pre-wrap wrap-anywhere">{draft}</p>
+      <div className="flex gap-2">
+        <Button
+          size="xs"
+          variant="outline"
+          disabled={sendingOff || !detail.canSend}
+          onClick={() => onUseDraft(draft)}
+        >
+          Accept
+        </Button>
+        <Button size="xs" variant="ghost-muted" onClick={() => onDiscardDraft(draft)}>
+          Discard
+        </Button>
+      </div>
+    </div>
+  );
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto overscroll-contain px-4 py-3">
@@ -81,25 +99,8 @@ export function DelegationPane({
           )}
         </Section>
 
-        {draft.length > 0 ? (
-          <Section title="Draft reply">
-            <div className="flex flex-col gap-2.5 rounded-lg border border-border/70 bg-muted/40 p-3">
-              <p className="text-sm whitespace-pre-wrap wrap-anywhere">{draft}</p>
-              <div className="flex gap-2">
-                <Button
-                  size="xs"
-                  variant="outline"
-                  disabled={sendingOff || !detail.canSend}
-                  onClick={() => onUseDraft(draft)}
-                >
-                  Use in reply
-                </Button>
-                <Button size="xs" variant="ghost-muted" onClick={() => onDiscardDraft(draft)}>
-                  Discard
-                </Button>
-              </div>
-            </div>
-          </Section>
+        {draft.length > 0 && detail.followUps.length === 0 ? (
+          <Section title="Draft reply">{draftCard}</Section>
         ) : null}
 
         {detail.sent.length > 0 ? (
@@ -128,12 +129,19 @@ export function DelegationPane({
                   <FollowUpEntry entry={entry} cwd={cwd} />
                 </li>
               ))}
+              {draft.length > 0 ? <li className="flex min-w-0 flex-col">{draftCard}</li> : null}
             </ol>
           </Section>
         ) : null}
       </div>
       {canAsk ? (
-        <AgentComposer key={live.threadId} environmentId={environmentId} detail={detail} />
+        <AgentComposer
+          key={live.threadId}
+          environmentId={environmentId}
+          detail={detail}
+          draft={draft}
+          onDraftReady={sendingOff || !detail.canSend ? null : onUseDraft}
+        />
       ) : null}
     </div>
   );
@@ -272,9 +280,14 @@ function UserText({ text, cwd }: { readonly text: string; readonly cwd: string |
 function AgentComposer({
   environmentId,
   detail,
+  draft,
+  onDraftReady,
 }: {
   readonly environmentId: EnvironmentId;
   readonly detail: DelegationDetail;
+  readonly draft: string;
+  /** Takes a draft the thread wrote in answer to this box. */
+  readonly onDraftReady: ((text: string) => void) | null;
 }) {
   const [text, setText] = useState("");
   // The newest request the thread had recorded when this one was sent; waiting until it moves.
@@ -283,11 +296,21 @@ function AgentComposer({
   const lastAsked = detail.followUps.findLast((entry) => entry.role === "user")?.at ?? null;
   const waiting = sentAfter !== undefined && sentAfter === lastAsked;
   const working = waiting || detail.followUps.at(-1)?.role === "user";
+  // The draft when the last message went out; a different one after the run answers it.
+  const draftBefore = useRef<string | undefined>(undefined);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- hands the requested draft to the reply box, which lives outside this pane, once the run ends
+  useEffect(() => {
+    const before = draftBefore.current;
+    if (before === undefined || working) return;
+    draftBefore.current = undefined;
+    if (draft.length > 0 && draft !== before) onDraftReady?.(draft);
+  }, [working, draft, onDraftReady]);
 
-  const submit = async (kind: FollowUp["kind"]) => {
+  const submit = async () => {
     const value = text.trim();
-    if (kind === "question" && value.length === 0) return;
+    if (value.length === 0) return;
     setSentAfter(lastAsked);
+    draftBefore.current = draft;
     setError(null);
     setText("");
     const failure = await forkRequest(environmentId, "/inbox/ask", {
@@ -296,7 +319,6 @@ function AgentComposer({
         channelId: detail.delegation.channelId,
         delegationId: detail.delegation.id,
         text: value,
-        kind,
       },
     }).then(
       () => null,
@@ -304,6 +326,7 @@ function AgentComposer({
     );
     if (failure !== null) {
       setSentAfter(undefined);
+      draftBefore.current = undefined;
       setText(value);
       setError(failure);
     }
@@ -314,14 +337,14 @@ function AgentComposer({
       className="flex shrink-0 flex-col gap-2 border-t border-border/70 p-3"
       onSubmit={(event) => {
         event.preventDefault();
-        void submit("question");
+        void submit();
       }}
     >
       <Textarea
         aria-label="Message the agent"
         value={text}
         rows={2}
-        placeholder="Ask the agent, or say how to write the reply…"
+        placeholder="Ask the agent, or tell it what to reply…"
         onChange={(event) => setText(event.target.value)}
         onKeyDown={(event) => {
           if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
@@ -338,15 +361,6 @@ function AgentComposer({
             {working ? "Working…" : null}
           </p>
         )}
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          disabled={waiting}
-          onClick={() => void submit("draft")}
-        >
-          Draft reply
-        </Button>
         <Button type="submit" size="sm" disabled={waiting || text.trim().length === 0}>
           Ask
         </Button>
