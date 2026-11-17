@@ -17,6 +17,7 @@ export function MessageView({
   message,
   showAuthor,
   continued = false,
+  inThread = false,
   quote,
   children,
   toolbar,
@@ -28,6 +29,8 @@ export function MessageView({
   readonly showAuthor: boolean;
   /** Follows the same author's message closely, so it drops its header as the chat app does. */
   readonly continued?: boolean;
+  /** A reply under its root hangs off the thread line, so every author sits on its side. */
+  readonly inThread?: boolean;
   /** The message this one answers, shown above it as the chat app does. */
   readonly quote?: string | null;
   /** Shown under the message, such as the delegations that start there. */
@@ -41,6 +44,7 @@ export function MessageView({
   const access = useForkAccess(environmentId);
   const formatTimestamp = useFormatTimestamp();
   const self = message.author.isSelf;
+  const atEnd = self && !inThread;
   const hasText = message.text.trim().length > 0;
   // A link the text already shows is a link there, not a second line under the bubble.
   const extraLinks = message.links.filter((link) => !message.text.includes(link));
@@ -61,12 +65,12 @@ export function MessageView({
           : // Room beside the bubble for the toolbar, as the chat app leaves it.
             [
               toolbar ? "max-w-[min(85%,calc(100%-6rem))]" : "max-w-[85%]",
-              self ? "items-end self-end" : "items-start self-start",
+              atEnd ? "items-end self-end" : "items-start self-start",
             ],
       )}
     >
       {toolbar ? (
-        <div className={cn("absolute -top-1.5 z-10", self ? "end-full me-1" : "start-full ms-1")}>
+        <div className={cn("absolute -top-1.5 z-10", atEnd ? "end-full me-1" : "start-full ms-1")}>
           {toolbar}
         </div>
       ) : null}
@@ -76,7 +80,7 @@ export function MessageView({
           continued && !message.mentionsSelf && "sr-only",
         )}
       >
-        {showAuthor && (post || !self) ? (
+        {showAuthor && (post || !atEnd) ? (
           <span className="truncate font-medium text-foreground">
             {nameOrUnknown(message.author.name)}
           </span>
@@ -98,7 +102,10 @@ export function MessageView({
             post
               ? "max-w-full"
               : self
-                ? "rounded-2xl rounded-tr-sm bg-primary px-3 py-2 text-primary-foreground"
+                ? cn(
+                    "rounded-2xl bg-primary px-3 py-2 text-primary-foreground",
+                    atEnd ? "rounded-tr-sm" : "rounded-tl-sm",
+                  )
                 : "rounded-2xl rounded-tl-sm bg-muted px-3 py-2",
           )}
         >

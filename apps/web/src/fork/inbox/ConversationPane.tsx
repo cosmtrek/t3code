@@ -490,6 +490,7 @@ function ConversationMessages({
           message={row.message}
           showAuthor={!sameAuthor}
           continued={continued}
+          inThread={rootId !== null}
           // Under its root, a reply to the root itself needs no quote.
           quote={rootId !== null && row.message.replyTo?.id === rootId ? null : row.quote}
           toolbar={toolbarFor(row, later)}
