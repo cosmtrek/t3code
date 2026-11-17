@@ -265,6 +265,8 @@ The adapter protocol (v2) is defined by `apps/server/src/fork/channels/protocol.
 channel (`channels/example/exampleChannel.ts`) implements all of it with made-up data.
 [docs/fork/inbox-architecture.md](docs/fork/inbox-architecture.md) shows where the inbox sits in
 T3 Code and how a request moves through it.
+[docs/fork/inbox-design.md](docs/fork/inbox-design.md) is the design rule for inbox UI: chat-app
+behavior, T3 Code primitives and theme colors. Read it before changing a screen.
 
 ### Inbox seams
 

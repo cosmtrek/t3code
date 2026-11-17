@@ -198,7 +198,7 @@ function SourceMessages({
           className="flex min-w-0 items-center gap-2 text-left text-xs text-muted-foreground hover:text-foreground"
           onClick={() => setOpen(!open)}
         >
-          <ChevronDownIcon className={cn("size-3 shrink-0", !open && "-rotate-90")} />
+          <ChevronDownIcon className={cn("size-3.5 shrink-0", !open && "-rotate-90")} />
           <span className="shrink-0 font-medium">
             {count === 1 ? "1 message" : `${count} messages`}
           </span>

@@ -39,7 +39,7 @@ const KIND_ICONS: Readonly<
 
 function ConversationKindIcon({ kind }: { readonly kind: ConversationKind }) {
   const { icon: Icon, label } = KIND_ICONS[kind];
-  return <Icon className="size-3 shrink-0 text-muted-foreground" aria-label={label} />;
+  return <Icon className="size-3.5 shrink-0 text-muted-foreground" aria-label={label} />;
 }
 
 export interface ConversationHandlers {
@@ -120,7 +120,7 @@ export function AgentBadge({ signals }: { readonly signals: AgentSignals | undef
             : "text-muted-foreground",
       )}
     >
-      <BotIcon className="size-3" />
+      <BotIcon className="size-3.5" />
       {label}
     </span>
   );
@@ -236,7 +236,7 @@ function ConversationRow({
           <span className="flex min-w-0 items-center gap-2 text-xs">
             <span className="min-w-0 flex-1 truncate text-muted-foreground">
               {conversation.mentioned ? (
-                <span className="font-medium text-destructive-foreground">[@you] </span>
+                <span className="font-medium text-primary">[@you] </span>
               ) : null}
               {lastMessageLine(conversation)}
             </span>
@@ -256,7 +256,7 @@ function ConversationRow({
             ) : null}
             {conversation.muted ? (
               <BellOffIcon
-                className="size-3 shrink-0 text-muted-foreground/70"
+                className="size-3.5 shrink-0 text-muted-foreground/70"
                 aria-label="Muted"
               />
             ) : null}

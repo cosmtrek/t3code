@@ -2,7 +2,8 @@
 
 How the inbox and its channels sit in T3 Code, and how a request moves through them. The adapter
 API is in [channel-protocol.md](./channel-protocol.md); seams, sync steps, and delegation rules are
-in [FORK.md](../../FORK.md#inbox-and-channels).
+in [FORK.md](../../FORK.md#inbox-and-channels). How the UI should look and behave is in
+[inbox-design.md](./inbox-design.md).
 
 ## Where it sits
 

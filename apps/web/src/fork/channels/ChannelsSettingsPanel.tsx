@@ -121,7 +121,7 @@ function EnvironmentChannels({
             disabled={resource.data === null || adding}
             onClick={() => setAdding(true)}
           >
-            <PlusIcon className="size-3" />
+            <PlusIcon />
             Add channel
           </Button>
         ) : (
