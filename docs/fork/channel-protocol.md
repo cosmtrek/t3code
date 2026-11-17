@@ -8,7 +8,8 @@ step with the code. Adapters should check their real answers against the same fi
 
 The inbox mirrors the chat app: one row per conversation, its messages and their reply links, and
 whether they were read. It invents nothing the chat app does not have. What the user hands to an
-agent (a delegation) is T3 Code's own and never reaches the adapter. v2 replaced v1's topics,
+agent (a delegation) is T3 Code's own; the adapter only hears of it as the
+[acknowledgement](#acknowledgement) on the delegated message. v2 replaced v1's topics,
 which split conversations into units the chat app does not show; T3 Code speaks only v2.
 
 ## Transport
@@ -32,6 +33,7 @@ which split conversations into units the chat app does not show; T3 Code speaks 
 | `GET /media/{messageId}/{key}`                                | the file's bytes, with its `content-type`     |
 | `POST /messages`                                              | `{ "messageId" }` (`send-ok.json`)            |
 | `POST /uploads?name={fileName}`                               | `Upload` (`upload-ok.json`)                   |
+| `POST /reactions`                                             | any 2xx                                       |
 | `GET /events`                                                 | `text/event-stream` (`events.sse`)            |
 
 `/health` decides the channel's state, in this order: `protocol` must be `2`; `loggedIn: false`
@@ -48,6 +50,9 @@ for `draft.md` only when the user wants one.
 only when its capability is listed, and sends none of its keys otherwise. Names T3 does not know
 are ignored, and an adapter without the key implements none. Message fields such as `inThread`
 need no capability.
+
+`/config` may also name `ackReaction`, the reaction key T3 adds when the user delegates a message
+(see [Acknowledgement](#acknowledgement)). Without it T3 adds none.
 
 ## Lists
 
@@ -88,6 +93,10 @@ T3 decides a conversation's state from the conversation alone:
   makes it equal `lastOtherMessageAt`. Give `null`, or leave it out, whenever the adapter is not
   sure: a wrong value hides a message the user never saw.
 
+- `unreadCount` (optional): the chat app's unread badge for the conversation, or `null` when the
+  adapter is not sure. T3 shows it as the number on an unread conversation; whether the
+  conversation is unread still comes from the fields above.
+
 A conversation is unread when its last message is not mine and `lastOtherMessageAt` is after
 `selfReadThroughAt` and T3's own read marks. Reading only goes one way: reading in the chat app
 clears the conversation in T3, and reading in T3 leaves the chat app as it was.
@@ -105,6 +114,24 @@ clears the conversation in T3, and reading in T3 leaves the chat app as it was.
   `authorName` and `preview` as `null` when the adapter no longer has that message. When that
   message has no text, `preview` is a placeholder such as `[Image]` or `[File] report.pdf`, never
   an empty string.
+
+The rest are optional, and T3 falls back to what it showed before when one is missing:
+
+- `mentions`: who `text` names, as `[{ userId, name, isSelf }]`, one entry per person in order of
+  first appearance. `name` is exactly the text after `@` in `text`; T3 marks every `@name` that
+  matches an entry. A mention of everyone has `userId` `"all"`. Without it T3 guesses mentions
+  from `@` followed by a run of non-space characters.
+- `reactions`: `[{ key, emoji, count, users, includesSelf }]`. `key` is the chat app's own name for
+  the reaction, `emoji` its Unicode form or `null` when there is none (T3 then shows `key`),
+  `users` display names earliest first, possibly fewer than `count`. A change sends
+  `conversation.updated`.
+- `editedAt`: when the message was last edited; `null` or absent when it never was. `text` is the
+  edited text.
+- `replyCount`: for the root of a reply thread or topic, how many replies the chat app counts. A
+  page may hold only some of them.
+- `format`: `"markdown"` when `text` is Markdown converted from the chat app's rich text (bold,
+  lists, code blocks, links as `[text](url)`); `"text"` or absent for plain text. Mentions stay
+  `@name` in either.
 
 ## Sending
 
@@ -165,7 +192,8 @@ An adapter with the `"markdown"` capability takes `"format": "markdown"` (the de
 `"text"`) and sends `text` as the chat app's rich text: bold, italics, lists, quotes, links, and
 code blocks, and whatever else it can render. What it cannot render goes out as written. T3
 sends an agent's draft as Markdown and what the user typed as text, unless the user switches it.
-The message reads back as plain `text`, not as its Markdown source. A `@name` inside a code block
+The message reads back as the adapter renders received rich text: plain `text`, or Markdown with
+`"format": "markdown"`. A `@name` inside a code block
 is not a mention; an entry that occurs only there is reported in `unresolvedMentions`.
 
 ### Attachments
@@ -189,6 +217,18 @@ text first and then one message per file, all into the same reply thread. The an
 it; the rest are still sent, and T3 tells the user which did not go out. When the first message
 fails nothing was sent and the answer is a refusal as above. An `uploadId` the adapter no longer
 has is `rejected` with a 400 and nothing is sent: the user attaches the file again.
+
+### Acknowledgement
+
+When the user delegates, T3 tells the sender it was taken: it posts `/config`'s `ackReaction` to
+the first message of the delegated range or reply thread that is not the user's own.
+
+`POST /reactions` with `{ "conversationId", "messageId", "key" }`. `key` is the chat app's own
+name for the reaction, the same `key` a `Message`'s `reactions` report, such as `"OK"`. Any 2xx
+answer is success, and its body is ignored. Add the reaction as the signed-in account; adding it
+again must not remove it. A refusal is logged and never fails the delegation, and T3 does not
+retry. T3 posts nothing when the message's `reactions` already hold that key with
+`includesSelf`, nor when the user starts another thread for the same delegation.
 
 ## Events
 

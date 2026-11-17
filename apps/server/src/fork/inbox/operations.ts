@@ -430,6 +430,7 @@ export interface InboxConversation extends ConversationState {
   readonly lastMessage: ConversationType["lastMessage"];
   /** Notifications are off for it in the chat app. */
   readonly muted: boolean;
+  readonly unreadCount: number | null;
 }
 
 export interface InboxDelegation {
@@ -561,6 +562,7 @@ const computeChannel = Effect.fn("ForkInbox.computeChannel")(function* (channelI
           lastActivityAt: conversation.lastActivityAt,
           lastMessage: conversation.lastMessage,
           muted: conversation.muted,
+          unreadCount: conversation.unreadCount ?? null,
         }) satisfies InboxConversation,
     )
     .toSorted(compareConversations);
@@ -1270,6 +1272,30 @@ const readNewScope = Effect.fn("ForkInbox.readNewScope")(function* (
   };
 });
 
+/** Shows the sender the request was taken; a failure is logged and never fails the delegation. */
+const acknowledge = Effect.fn("ForkInbox.acknowledge")(function* (
+  channelId: string,
+  conversationId: string,
+  message: MessageType | undefined,
+  config: ChannelView["config"],
+) {
+  const key = config?.ackReaction;
+  if (!key || message === undefined) return;
+  // Some chat apps toggle a reaction: adding the user's own again would take it away.
+  if (message.reactions?.some((reaction) => reaction.key === key && reaction.includesSelf)) return;
+  const { hub } = yield* InboxRuntime;
+  yield* attempt(() =>
+    hub.postJson(channelId, "/reactions", { conversationId, messageId: message.id, key }),
+  ).pipe(
+    Effect.catch((error: ForkHttpError) =>
+      Effect.logWarning("The adapter did not add the delegation's reaction.", {
+        channelId,
+        code: error.code,
+      }),
+    ),
+  );
+});
+
 export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown) {
   const input = yield* decodeDelegateInput(body).pipe(
     Effect.mapError(() => badRequest("The delegation is missing fields.")),
@@ -1356,9 +1382,8 @@ export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown
     const images = yield* downloadImages(input.channelId, contextDir, scoped.messages);
     const anchor = scoped.messages.find((message) => message.id === input.anchorMessageId);
     const preview = clipPreview(anchor ?? scoped.messages[0]);
-    const sender =
-      scoped.messages.find((message) => !message.author.isSelf)?.author ??
-      scoped.messages[0]!.author;
+    const request = scoped.messages.find((message) => !message.author.isSelf);
+    const sender = request?.author ?? scoped.messages[0]!.author;
     const since = Date.now() - SENDER_HISTORY_MS;
     const senderHistory = listing.conversations
       .filter(
@@ -1461,6 +1486,8 @@ export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown
     });
     if (replacing !== null) {
       runtime.store.detachLink(delegationId, replacing.threadId, "replaced", at);
+    } else {
+      yield* acknowledge(input.channelId, input.conversationId, request, channel.config);
     }
     return { threadId: result.threadId, projectId: project.id };
   });

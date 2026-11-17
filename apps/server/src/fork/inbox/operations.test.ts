@@ -50,6 +50,7 @@ interface FakeMessage {
   readonly image?: { readonly key: string; readonly name: string };
   /** The message this one answers. */
   readonly replyTo?: string;
+  readonly reactions?: ReadonlyArray<unknown>;
 }
 
 interface FakeConversation {
@@ -64,7 +65,7 @@ interface FakeConversation {
 function fakeAdapter(
   conversations: () => ReadonlyArray<FakeConversation>,
   sendAnswer: () => AdapterResponse,
-  capabilities: ReadonlyArray<string>,
+  config: Record<string, unknown>,
 ) {
   const paged = (items: ReadonlyArray<unknown>, url: URL) => {
     const index = Number(url.searchParams.get("cursor") ?? "0");
@@ -92,6 +93,7 @@ function fakeAdapter(
       text: `text of ${message.id}`,
       attachments: message.image ? [{ ...message.image, kind: "image" }] : [],
       links: [],
+      reactions: message.reactions ?? null,
     };
   };
   const timeOf = (message: FakeMessage | undefined) => (message ? at(message.minute) : null);
@@ -138,7 +140,7 @@ function fakeAdapter(
         defaultProjectPaths: ["~/code/somewhere"],
         delegateTemplates: [{ id: "t", name: "T", prompt: "{contextDir}" }],
         relevanceSummary: "All",
-        capabilities,
+        ...config,
       });
     }
     const all = conversations();
@@ -190,12 +192,12 @@ interface Harness {
 async function harness(
   conversations: () => ReadonlyArray<FakeConversation>,
   sendAnswer: () => AdapterResponse = () => json(200, { messageId: "sent-1" }),
-  capabilities: ReadonlyArray<string> = [],
+  config: Record<string, unknown> = {},
 ): Promise<Harness> {
   const dir = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-inbox-"));
   const tokenFile = NodePath.join(dir, "token");
   await NodeFSP.writeFile(tokenFile, `${TOKEN}\n`, { mode: 0o600 });
-  const handle = fakeAdapter(conversations, sendAnswer, capabilities);
+  const handle = fakeAdapter(conversations, sendAnswer, config);
   const requests: string[] = [];
   const posted: unknown[] = [];
   const uploaded: number[] = [];
@@ -666,17 +668,26 @@ describe("delegating", () => {
   it.effect("gives the thread the reply thread, or the range asked for, and nothing else", () =>
     Effect.gen(function* () {
       const h = yield* Effect.promise(() =>
-        harness(() => [
-          {
-            id: "c",
-            messages: [
-              { id: "root", minute: 1, author: THEM },
-              { id: "aside", minute: 2, author: THEM },
-              { id: "reply", minute: 3, author: ME, replyTo: "root" },
-              { id: "late", minute: 4, author: THEM },
-            ],
-          },
-        ]),
+        harness(
+          () => [
+            {
+              id: "c",
+              messages: [
+                { id: "root", minute: 1, author: THEM },
+                {
+                  id: "aside",
+                  minute: 2,
+                  author: THEM,
+                  reactions: [{ key: "OK", emoji: null, count: 1, users: [], includesSelf: true }],
+                },
+                { id: "reply", minute: 3, author: ME, replyTo: "root" },
+                { id: "late", minute: 4, author: THEM },
+              ],
+            },
+          ],
+          undefined,
+          { ackReaction: "OK" },
+        ),
       );
       const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
       const delegate = (input: Record<string, unknown>) =>
@@ -725,6 +736,13 @@ describe("delegating", () => {
         modelSelection,
       }).pipe(Effect.flip);
       expect(backwards).toMatchObject({ status: 400, field: "untilMessageId" });
+
+      yield* delegate({ anchorMessageId: "reply", scope: "range", modelSelection });
+      // The sender's first message gets the reaction, unless it already has mine.
+      expect(h.posted).toEqual([
+        { conversationId: "c", messageId: "root", key: "OK" },
+        { conversationId: "c", messageId: "late", key: "OK" },
+      ]);
     }),
   );
 
@@ -981,7 +999,7 @@ describe("sending", () => {
         harness(
           oneConversation,
           () => json(200, { messageId: "sent-1", unresolvedMentions: ["u3"] }),
-          ["mentions"],
+          { capabilities: ["mentions"] },
         ),
       );
       const sent = yield* Inbox.send({ ...h.keyOf("c"), text, mentions }).pipe(
@@ -1007,7 +1025,7 @@ describe("sending", () => {
         harness(
           oneConversation,
           () => json(200, { ...upload, messageId: "sent-1", failedAttachments: ["up-2"] }),
-          ["markdown", "attachments"],
+          { capabilities: ["markdown", "attachments"] },
         ),
       );
       const file = new URLSearchParams({ channelId: h.channelId, name: "my chart.png" });

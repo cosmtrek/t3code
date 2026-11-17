@@ -201,6 +201,11 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
   const [view, setView] = useState<InboxView>("agent");
   const [filter, setFilter] = useState<InboxFilter>("all");
   const [conversationId, setConversationId] = useState<string | null>(null);
+  // Opening reads the conversation, so where its new messages start is taken before that.
+  const [opened, setOpened] = useState<{ readonly id: string; readonly newSince: string | null }>({
+    id: "",
+    newSince: null,
+  });
   // The conversation opened from Unread stays listed there until the view changes.
   const [heldId, setHeldId] = useState<string | null>(null);
   const [delegationId, setDelegationId] = useState<string | null>(null);
@@ -276,6 +281,7 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
   };
   const selectConversation = (target: InboxConversation) => {
     setConversationId(target.id);
+    setOpened({ id: target.id, newSince: target.unread ? target.readThroughAt : null });
     setDelegationId(null);
     setHeldId(view === "unread" ? target.id : null);
     readConversation(target);
@@ -489,6 +495,7 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
             selectedDelegationId={delegationId}
             onCloseDelegation={() => setDelegationId(null)}
             focusMessageId={delegation?.anchorMessageId ?? null}
+            newSince={opened.id === conversation.id ? opened.newSince : null}
             readOnly={readOnly}
             capabilities={channel.capabilities}
             replyRequest={replyRequest}
