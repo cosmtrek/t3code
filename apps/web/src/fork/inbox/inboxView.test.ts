@@ -7,6 +7,7 @@ import {
   authorsSummary,
   conversationRows,
   delegationPreview,
+  draftReplyMode,
   emptyViewTitle,
   inView,
   lastMessageLine,
@@ -20,6 +21,7 @@ import {
   quoteOf,
   quoteOfMessage,
   replyLine,
+  replyModes,
   shortLink,
   topicsOf,
 } from "./inboxView";
@@ -269,6 +271,26 @@ describe("mentions", () => {
     expect(names("ping @Zhang Sanfeng")).toBeUndefined();
     expect(names("a@b\nzh")).toBeUndefined();
     expect(mentionSuggestions("ping @zh", 8, people)?.start).toBe(5);
+  });
+});
+
+describe("replyModes", () => {
+  const timeline = { id: "m1", inThread: false } as InboxMessage;
+  const inThread = { id: "m2", inThread: true, rootId: "m1" } as InboxMessage;
+
+  it("offers a quote, a thread, or both, as the chat app does", () => {
+    expect(replyModes("group", timeline, false)).toBeNull();
+    expect(replyModes("dm", timeline, true)).toEqual(["quote"]);
+    expect(replyModes("topic_group", timeline, true)).toEqual(["thread"]);
+    expect(replyModes("group", inThread, true)).toEqual(["thread"]);
+    expect(replyModes("group", timeline, true)).toEqual(["quote", "thread"]);
+  });
+
+  it("answers a draft in the thread its message already has, and quotes it otherwise", () => {
+    const both = ["quote", "thread"] as const;
+    expect(draftReplyMode(both, timeline, [timeline])).toBe("quote");
+    expect(draftReplyMode(both, timeline, [timeline, inThread])).toBe("thread");
+    expect(draftReplyMode(["thread"], timeline, [timeline])).toBe("thread");
   });
 });
 

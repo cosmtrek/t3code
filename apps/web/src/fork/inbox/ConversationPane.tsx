@@ -5,6 +5,7 @@ import {
   BellOffIcon,
   BotIcon,
   ExternalLinkIcon,
+  MessageSquareReplyIcon,
   MessageSquareTextIcon,
   PaperclipIcon,
   ReplyIcon,
@@ -22,6 +23,7 @@ import { observeResize } from "../../lib/observeResize";
 import { cn } from "../../lib/utils";
 import { ForkApiError, forkRequest } from "../forkApiAccess";
 import type {
+  ConversationKind,
   ConversationResponse,
   InboxConversation,
   InboxDelegation,
@@ -46,9 +48,12 @@ import {
   nameOrUnknown,
   quoteOfMessage,
   replyLine,
+  replyModes,
   skippedNotice,
   topicsOf,
+  withMention,
   type ConversationRow,
+  type ReplyMode,
   type Topic,
   type OlderPages,
 } from "./inboxView";
@@ -79,6 +84,30 @@ export interface ReplyRequest {
 export interface ReplyTarget {
   readonly messageId: string;
   readonly quote: string;
+  /** Null for an adapter that places a reply itself. */
+  readonly inThread: boolean | null;
+  /** The chat app takes either a quote or a thread reply here. */
+  readonly canSwitch: boolean;
+  /** Whom a quote reply names, as the chat app does. */
+  readonly mention: Mention | null;
+}
+
+export function replyTargetOf(
+  kind: ConversationKind,
+  message: InboxMessage,
+  modes: ReadonlyArray<ReplyMode> | null,
+  mode: ReplyMode | null,
+): ReplyTarget {
+  return {
+    messageId: message.id,
+    quote: quoteOfMessage(message),
+    inThread: modes === null || mode === null ? null : mode === "thread",
+    canSwitch: modes !== null && modes.length > 1,
+    mention:
+      kind === "dm" || message.author.isSelf
+        ? null
+        : { userId: message.author.id, name: message.author.name },
+  };
 }
 
 /** A file picked for the reply; `uploadId` is null while it is on its way to the adapter. */
@@ -152,11 +181,13 @@ export function ConversationPane({
     localRequest !== null && (replyRequest === null || localRequest.nonce > replyRequest.nonce)
       ? localRequest
       : replyRequest;
-  const replyTo = (message: InboxMessage) =>
+  const modesOf = (message: InboxMessage) =>
+    replyModes(conversation.kind, message, capabilities.includes("quotes"));
+  const replyTo = (message: InboxMessage, mode: ReplyMode | null) =>
     setLocalRequest({
       nonce: nextReplyNonce(),
       conversationId: conversation.id,
-      replyTo: { messageId: message.id, quote: quoteOfMessage(message) },
+      replyTo: replyTargetOf(conversation.kind, message, modesOf(message), mode),
       draft: null,
     });
   return (
@@ -206,6 +237,7 @@ export function ConversationPane({
           newSince={newSince}
           readOnly={readOnly}
           handlers={handlers}
+          replyModesOf={modesOf}
           onReply={replyTo}
           refreshOn={refreshOn}
         />
@@ -319,6 +351,7 @@ function ConversationMessages({
   newSince,
   readOnly,
   handlers,
+  replyModesOf,
   onReply,
   refreshOn,
 }: {
@@ -329,7 +362,8 @@ function ConversationMessages({
   readonly newSince: string | null;
   readonly readOnly: boolean;
   readonly handlers: ConversationPaneHandlers;
-  readonly onReply: (message: InboxMessage) => void;
+  readonly replyModesOf: (message: InboxMessage) => ReadonlyArray<ReplyMode> | null;
+  readonly onReply: (message: InboxMessage, mode: ReplyMode | null) => void;
   readonly refreshOn: ForkRefreshFilter;
 }) {
   const path = `/inbox/conversation?${new URLSearchParams({
@@ -456,7 +490,8 @@ function ConversationMessages({
     <MessageToolbar
       message={row.message}
       readOnly={readOnly}
-      onReply={() => onReply(row.message)}
+      replyModes={replyModesOf(row.message)}
+      onReply={(mode) => onReply(row.message, mode)}
       onDelegate={() =>
         handlers.onDelegate(
           row.message,
@@ -800,19 +835,31 @@ function DelegationChip({
 function MessageToolbar({
   message,
   readOnly,
+  replyModes,
   onReply,
   onDelegate,
 }: {
   readonly message: InboxMessage;
   readonly readOnly: boolean;
-  readonly onReply: () => void;
+  readonly replyModes: ReadonlyArray<ReplyMode> | null;
+  readonly onReply: (mode: ReplyMode | null) => void;
   readonly onDelegate: () => void;
 }) {
+  const both = replyModes !== null && replyModes.length > 1;
   return (
     <div className="hidden gap-0.5 rounded-md border bg-popover p-0.5 shadow-sm group-focus-within/message:flex group-hover/message:flex">
-      <IconAction label="Reply" disabled={readOnly} onClick={onReply}>
+      <IconAction
+        label="Reply"
+        disabled={readOnly}
+        onClick={() => onReply(both ? "quote" : (replyModes?.[0] ?? null))}
+      >
         <ReplyIcon />
       </IconAction>
+      {both ? (
+        <IconAction label="Reply in thread" disabled={readOnly} onClick={() => onReply("thread")}>
+          <MessageSquareReplyIcon />
+        </IconAction>
+      ) : null}
       <IconAction label="Delegate" disabled={readOnly} onClick={onDelegate}>
         <BotIcon />
       </IconAction>
@@ -868,19 +915,33 @@ function Composer({
   const [activeSuggestion, setActiveSuggestion] = useState(0);
   const [dismissedAt, setDismissedAt] = useState<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  /** A quote reply names whom it answers, as the chat app does; a draft keeps its badge. */
+  const named = (target: ReplyTarget | null, base: string) =>
+    canMention && target?.inThread === false && target.mention !== null
+      ? withMention(base, target.mention.name)
+      : base;
   if (request !== null && request.conversationId === conversation.id && request.nonce !== applied) {
     setApplied(request.nonce);
     setReplyTo(request.replyTo);
     if (request.draft !== null) {
-      setDraft(request.draft);
-      setText(request.draft.text);
+      const next = named(request.replyTo, request.draft.text);
+      setDraft({ ...request.draft, text: next });
+      setText(next);
+      setCaret(next.length);
       setMarkdown(true);
+    } else {
+      const next = named(request.replyTo, text);
+      setText(next);
+      setCaret(next.length);
     }
   }
   const fromDraft = draft !== null && text === draft.text;
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- moves DOM focus into the reply box when the user picks a message or draft to answer
   useEffect(() => {
-    if (applied !== null) textareaRef.current?.focus();
+    const textarea = textareaRef.current;
+    if (applied === null || textarea === null) return;
+    textarea.focus();
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
   }, [applied]);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- mirrors the reply into browser storage
   useEffect(() => {
@@ -936,7 +997,10 @@ function Composer({
     }
   };
   const uploading = files.some((entry) => entry.uploadId === null);
-  const mentions = mentionsIn(text, people ?? []);
+  // Whom a quote reply names may be older than the messages read for people.
+  const withReplied = (known: ReadonlyArray<Mention>) =>
+    replyTo?.mention ? [...known, replyTo.mention] : known;
+  const mentions = mentionsIn(text, withReplied(people ?? []));
   const found = mentionSuggestions(text, caret, people ?? []);
   const suggestions = found !== null && found.start !== dismissedAt ? found : null;
   const active =
@@ -957,13 +1021,14 @@ function Composer({
     setSending(true);
     setError(null);
     // Read again at send, so someone who wrote a moment ago can be mentioned.
-    const mentioned = text.includes("@") ? mentionsIn(text, await readPeople()) : [];
+    const mentioned = text.includes("@") ? mentionsIn(text, withReplied(await readPeople())) : [];
     const result = await forkRequest<SendResult>(environmentId, "/inbox/send", {
       method: "POST",
       body: {
         channelId: conversation.channelId,
         conversationId: conversation.id,
         ...(replyTo ? { replyToId: replyTo.messageId } : {}),
+        ...(replyTo?.inThread != null ? { inThread: replyTo.inThread } : {}),
         // An edited draft still answers for its delegation; the copy records the edit.
         ...(draft ? { delegationId: draft.delegationId } : {}),
         text,
@@ -1028,8 +1093,26 @@ function Composer({
           {replyTo !== null ? (
             <>
               <p className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
-                Replying to {replyTo.quote}
+                {replyTo.inThread === true ? "Replying in thread to" : "Replying to"}{" "}
+                {replyTo.quote}
               </p>
+              {replyTo.canSwitch ? (
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="ghost-muted"
+                  onClick={() => {
+                    const next = { ...replyTo, inThread: replyTo.inThread !== true };
+                    const nextText = named(next, text);
+                    setReplyTo(next);
+                    if (draft !== null && fromDraft) setDraft({ ...draft, text: nextText });
+                    setText(nextText);
+                    setCaret(nextText.length);
+                  }}
+                >
+                  {replyTo.inThread === true ? "Quote instead" : "Reply in thread"}
+                </Button>
+              ) : null}
               <Button
                 type="button"
                 size="icon-xs"

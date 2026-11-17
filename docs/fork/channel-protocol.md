@@ -46,7 +46,7 @@ template asks for findings in `{contextDir}/conclusion.md` and not for a reply: 
 for `draft.md` only when the user wants one.
 
 `/config` may also list `capabilities`: the optional parts of this page the adapter implements,
-`"mentions"`, `"markdown"`, and `"attachments"` (see [Sending](#sending)). T3 offers a feature
+`"mentions"`, `"markdown"`, `"attachments"`, and `"quotes"` (see [Sending](#sending)). T3 offers a feature
 only when its capability is listed, and sends none of its keys otherwise. Names T3 does not know
 are ignored, and an adapter without the key implements none. Message fields such as `inThread`
 need no capability.
@@ -144,6 +144,11 @@ of `not_logged_in`, `rate_limited`, `rejected`, `unknown`.
 
 With a `replyToId`, the message goes into that message's reply thread or topic. It need not quote
 that very message: a chat app that only replies to a thread's root sends it to the root.
+
+An adapter that lists `"quotes"` also takes `inThread` with every `replyToId`. `true` is the reply
+above. `false` puts the message on the conversation's timeline, quoting that very message, as a
+chat app's plain reply does. T3 sends `false` only where the chat app has such a reply: in a DM,
+and in a group for a message on the timeline, never in a topic group or inside a thread.
 
 ### Mentions
 
