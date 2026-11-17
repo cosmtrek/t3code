@@ -138,6 +138,10 @@ function seed(now: number): ExampleConversation[] {
           SELF,
           "I do. I'll send a proposal for the new limits by Friday.",
         ),
+        message("m-22", "m-20", 6.5, SAM, "@Alex Rivera same drop here, chart below.", {
+          mentionsSelf: true,
+          attachments: [{ key: "chart", kind: "image", name: "cache-hit-rate.svg" }],
+        }),
         message("m-30", null, 8, SAM, "Reminder: on-call handover is at 10am tomorrow."),
         message(
           "m-31",
