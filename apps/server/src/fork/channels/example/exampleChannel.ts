@@ -39,6 +39,12 @@ interface ExampleMessage {
   readonly richSummary?: string;
   readonly attachments: ReadonlyArray<{ key: string; kind: "image" | "file"; name: string }>;
   readonly links: ReadonlyArray<string>;
+  readonly reactions?: ReadonlyArray<{
+    key: string;
+    emoji: string | null;
+    users: ReadonlyArray<Person>;
+  }>;
+  readonly editedAt?: string;
 }
 
 interface ExampleConversation {
@@ -55,6 +61,9 @@ const JORDAN: Person = { id: "u-jordan", name: "Jordan Lee" };
 const PRIYA: Person = { id: "u-priya", name: "Priya Shah" };
 const SAM: Person = { id: "u-sam", name: "Sam Okafor" };
 const BOT: Person = { id: "u-bot", name: "Deploy Bot" };
+const PEOPLE = [SELF, JORDAN, PRIYA, SAM, BOT];
+
+const REACTION_EMOJI: Readonly<Record<string, string>> = { OK: "👌", THUMBSUP: "👍" };
 
 const EXAMPLE_REPLY_DELAY_MS = 30_000;
 /** Small pages, so the inbox's paging runs against the example too. */
@@ -138,11 +147,24 @@ function seed(now: number): ExampleConversation[] {
           SELF,
           "I do. I'll send a proposal for the new limits by Friday.",
         ),
-        message("m-22", "m-20", 6.5, SAM, "@Alex Rivera same drop here, chart below.", {
-          mentionsSelf: true,
-          attachments: [{ key: "chart", kind: "image", name: "cache-hit-rate.svg" }],
+        message(
+          "m-22",
+          "m-20",
+          6.5,
+          SAM,
+          "@Alex Rivera same drop here, chart below. cc @Priya Shah",
+          {
+            mentionsSelf: true,
+            attachments: [{ key: "chart", kind: "image", name: "cache-hit-rate.svg" }],
+          },
+        ),
+        message("m-30", null, 8, SAM, "Reminder: on-call handover is at 10am tomorrow.", {
+          reactions: [
+            { key: "THUMBSUP", emoji: "👍", users: [PRIYA, JORDAN, SELF] },
+            { key: "OK", emoji: "👌", users: [JORDAN] },
+          ],
+          editedAt: hoursAgo(now, 7.9),
         }),
-        message("m-30", null, 8, SAM, "Reminder: on-call handover is at 10am tomorrow."),
         message(
           "m-31",
           null,
@@ -261,6 +283,9 @@ export function createExampleChannel(
   const toWire = (conversation: ExampleConversation, item: ExampleMessage) => {
     const parent = conversation.messages.find((candidate) => candidate.id === item.replyToId);
     const root = rootOf(conversation, item);
+    const replyCount = conversation.messages.filter(
+      (candidate) => candidate.id !== item.id && rootOf(conversation, candidate).id === item.id,
+    ).length;
     return {
       id: item.id,
       createdAt: item.createdAt,
@@ -281,6 +306,20 @@ export function createExampleChannel(
       attachments: item.attachments,
       links: item.links,
       openUrl: `${OPEN_URL_BASE}/${conversation.id}/${item.id}`,
+      mentions: PEOPLE.filter((person) => item.text.includes(`@${person.name}`)).map((person) => ({
+        userId: person.id,
+        name: person.name,
+        isSelf: isSelf(person),
+      })),
+      reactions: (item.reactions ?? []).map((reaction) => ({
+        key: reaction.key,
+        emoji: reaction.emoji,
+        count: reaction.users.length,
+        users: reaction.users.map((person) => person.name),
+        includesSelf: reaction.users.some(isSelf),
+      })),
+      editedAt: item.editedAt ?? null,
+      replyCount: replyCount > 0 ? replyCount : null,
     };
   };
 
@@ -306,6 +345,7 @@ export function createExampleChannel(
       lastSelfMessageAt: messages.findLast((item) => isSelf(item.author))?.createdAt ?? null,
       lastMentionAt: messages.findLast((item) => item.mentionsSelf)?.createdAt ?? null,
       selfReadThroughAt: null,
+      unreadCount: messages.length - 1 - messages.findLastIndex((item) => isSelf(item.author)),
     };
   };
 
@@ -397,6 +437,31 @@ export function createExampleChannel(
     return json(200, { messageId, messageIds, unresolvedMentions });
   };
 
+  const react = (body: unknown): AdapterResponse => {
+    const input = body as { conversationId?: unknown; messageId?: unknown; key?: unknown } | null;
+    const conversation = conversations.find((item) => item.id === input?.conversationId);
+    const index = conversation?.messages.findIndex((item) => item.id === input?.messageId) ?? -1;
+    const key = typeof input?.key === "string" ? input.key : "";
+    if (!conversation || index === -1 || key.length === 0) {
+      return json(400, { error: { code: "rejected", message: "Unknown message or reaction." } });
+    }
+    const target = conversation.messages[index]!;
+    const reactions = target.reactions ?? [];
+    const existing = reactions.find((reaction) => reaction.key === key);
+    conversation.messages[index] = {
+      ...target,
+      reactions: existing
+        ? reactions.map((reaction) =>
+            reaction === existing && !reaction.users.some(isSelf)
+              ? { ...reaction, users: [...reaction.users, SELF] }
+              : reaction,
+          )
+        : [...reactions, { key, emoji: REACTION_EMOJI[key] ?? null, users: [SELF] }],
+    };
+    emit({ type: "conversation.updated", conversationId: conversation.id });
+    return json(200, {});
+  };
+
   const IMAGE_TYPES: Readonly<Record<string, string>> = {
     png: "image/png",
     jpg: "image/jpeg",
@@ -428,6 +493,7 @@ export function createExampleChannel(
     if (request.method === "POST") {
       if (segments.length === 1 && segments[0] === "messages") return send(request.body);
       if (segments.length === 1 && segments[0] === "uploads") return upload(url, request.bytes);
+      if (segments.length === 1 && segments[0] === "reactions") return react(request.body);
       return json(404, { error: { code: "unknown", message: "Not found" } });
     }
     const [head, id, tail] = segments;
@@ -470,6 +536,7 @@ export function createExampleChannel(
         relevanceSummary:
           "Direct messages, mentions of you, and threads you took part in. Conversations you follow show their new threads too. Muted conversations are left out.",
         capabilities: ["mentions", "markdown", "attachments"],
+        ackReaction: "OK",
       });
     }
     if (head === "conversations" && segments.length === 1) {

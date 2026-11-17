@@ -9,5 +9,6 @@
     }
   ],
   "relevanceSummary": "Direct messages, mentions of you, and threads you took part in.",
-  "capabilities": ["mentions", "markdown", "attachments"]
+  "capabilities": ["mentions", "markdown", "attachments"],
+  "ackReaction": "OK"
 }

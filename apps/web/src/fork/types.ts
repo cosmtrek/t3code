@@ -139,8 +139,12 @@ export interface InboxConversation {
   readonly unread: boolean;
   /** A mention I have not read or answered since. */
   readonly mentioned: boolean;
+  /** The latest read mark; messages after it are new to the reader. */
+  readonly readThroughAt: string | null;
   /** Notifications are off for it in the chat app. */
   readonly muted: boolean;
+  /** The chat app's unread badge; null or absent when the adapter does not know it. */
+  readonly unreadCount?: number | null;
 }
 
 export type DelegationScope = "chain" | "range";
@@ -189,6 +193,23 @@ export interface InboxMessage {
   }>;
   readonly links: ReadonlyArray<string>;
   readonly openUrl?: string | null;
+  readonly format?: "text" | "markdown" | null;
+  /** Who `text` names as `@name`; absent from adapters that only write the name. */
+  readonly mentions?: ReadonlyArray<{
+    readonly userId: string;
+    readonly name: string;
+    readonly isSelf: boolean;
+  }> | null;
+  readonly reactions?: ReadonlyArray<{
+    readonly key: string;
+    readonly emoji: string | null;
+    readonly count: number;
+    readonly users: ReadonlyArray<string>;
+    readonly includesSelf: boolean;
+  }> | null;
+  readonly editedAt?: string | null;
+  /** Replies in the thread this message roots, which a page may hold only some of. */
+  readonly replyCount?: number | null;
 }
 
 export interface InboxResponse {

@@ -50,6 +50,8 @@ export const AdapterConfig = Schema.Struct({
   relevanceSummary: Schema.String,
   /** Optional parts of the protocol the adapter implements; names T3 does not know are ignored. */
   capabilities: Schema.optional(Schema.Array(Schema.String)),
+  /** The reaction key T3 adds to a message the user delegates; none is added when absent. */
+  ackReaction: Schema.optional(Schema.NullOr(Schema.String)),
 });
 export type AdapterConfig = typeof AdapterConfig.Type;
 
@@ -77,6 +79,8 @@ export const Conversation = Schema.Struct({
   lastMentionAt: OptionalTimestamp,
   /** The newest message not from me that the chat app shows as read; null when unknown. */
   selfReadThroughAt: Schema.optional(OptionalTimestamp),
+  /** The chat app's unread badge, shown as is; null when unknown. */
+  unreadCount: Schema.optional(Schema.NullOr(Schema.Number)),
 });
 export type Conversation = typeof Conversation.Type;
 
@@ -97,6 +101,22 @@ export const Attachment = Schema.Struct({
   key: Schema.String,
   kind: LenientAttachmentKind,
   name: Schema.String,
+});
+
+/** Who the text names as `@name`; `name` is the text after `@`, exactly as `text` holds it. */
+export const MessageMention = Schema.Struct({
+  userId: Schema.String,
+  name: Schema.String,
+  isSelf: Schema.Boolean,
+});
+
+export const Reaction = Schema.Struct({
+  key: Schema.String,
+  emoji: Schema.NullOr(Schema.String),
+  count: Schema.Number,
+  /** Display names, earliest first; may hold fewer than `count`. */
+  users: Schema.Array(Schema.String),
+  includesSelf: Schema.Boolean,
 });
 
 export const Message = Schema.Struct({
@@ -123,6 +143,12 @@ export const Message = Schema.Struct({
   attachments: Schema.Array(Attachment),
   links: Schema.Array(Schema.String),
   openUrl: OptionalText,
+  format: Schema.optional(Schema.NullOr(Schema.Literals(["text", "markdown"]))),
+  mentions: Schema.optional(Schema.NullOr(Schema.Array(MessageMention))),
+  reactions: Schema.optional(Schema.NullOr(Schema.Array(Reaction))),
+  editedAt: Schema.optional(OptionalTimestamp),
+  /** Replies in the thread this message roots, counted by the chat app. */
+  replyCount: Schema.optional(Schema.NullOr(Schema.Number)),
 });
 export type Message = typeof Message.Type;
 

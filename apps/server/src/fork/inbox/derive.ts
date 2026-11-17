@@ -31,11 +31,23 @@ function after(at: string | null, ...marks: ReadonlyArray<string | null | undefi
   });
 }
 
+function latest(...marks: ReadonlyArray<string | null | undefined>): string | null {
+  let found: string | null = null;
+  for (const mark of marks) {
+    if (Number.isFinite(instant(mark)) && (found === null || instant(mark) > instant(found))) {
+      found = mark ?? null;
+    }
+  }
+  return found;
+}
+
 export interface ConversationState {
   /** Someone else wrote after every read mark, or the user pinned it unread. */
   readonly unread: boolean;
   /** A mention I have not read or answered since. */
   readonly mentioned: boolean;
+  /** The latest read mark, my own last message included; what came after it is new. */
+  readonly readThroughAt: string | null;
 }
 
 /**
@@ -59,6 +71,7 @@ export function deriveConversation(input: {
       (read?.pinnedUnread ?? false) ||
       (!lastIsSelf && after(conversation.lastOtherMessageAt, ...marks)),
     mentioned: after(conversation.lastMentionAt, ...marks, conversation.lastSelfMessageAt),
+    readThroughAt: latest(...marks, conversation.lastSelfMessageAt),
   };
 }
 
@@ -77,7 +90,7 @@ export function agentUnseen(input: {
  */
 export function conversationCountsTowardBadge(
   kind: Conversation["kind"],
-  state: ConversationState,
+  state: Pick<ConversationState, "unread" | "mentioned">,
 ): boolean {
   return kind === "dm" ? state.unread : state.mentioned;
 }

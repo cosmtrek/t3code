@@ -3,6 +3,7 @@ import type { DeviceHubAccess } from "@t3tools/client-runtime/state/deviceHubAcc
 import { DownloadIcon, ExternalLinkIcon, LinkIcon } from "lucide-react";
 import { useId, useState, type ReactNode } from "react";
 
+import ChatMarkdown from "../../components/ChatMarkdown";
 import { ExpandedImageDialog } from "../../components/chat/ExpandedImageDialog";
 import { InlineButton } from "../../components/ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../../components/ui/tooltip";
@@ -10,7 +11,9 @@ import { cn } from "../../lib/utils";
 import { forkUrl, renewForkAccess, renewStaleForkAccess, useForkAccess } from "../forkApiAccess";
 import { useFormatTimestamp } from "../presentation";
 import type { InboxMessage } from "../types";
-import { nameOrUnknown, shortLink } from "./inboxView";
+import { mentionParts, nameOrUnknown, shortLink } from "./inboxView";
+
+type Mentions = InboxMessage["mentions"];
 
 export function MessageView({
   environmentId,
@@ -55,16 +58,19 @@ export function MessageView({
     message.attachments.length === 0 &&
     message.links.length === 0;
   // Bare media keeps no frame, as the chat app shows a lone image; a topic post's text has none.
-  const frame: "primary" | "muted" | "dashed" | "none" = message.richSummary
+  const frame: "self" | "muted" | "dashed" | "none" = message.richSummary
     ? "muted"
     : unsupported
       ? "dashed"
       : post || (!hasText && !quote)
         ? "none"
         : self
-          ? "primary"
+          ? "self"
           : "muted";
-  const onPrimary = frame === "primary";
+  const markdown = message.format === "markdown";
+  const reactions = message.reactions ?? [];
+  // The adapter's list marks my mention in the text itself; without it the header says so.
+  const selfMarked = message.mentions?.some((mention) => mention.isSelf) ?? false;
   const media = (
     <>
       {message.attachments.map((attachment) => {
@@ -72,12 +78,7 @@ export function MessageView({
           return (
             <span
               key={attachment.key}
-              className={cn(
-                "rounded-xl border px-3 py-1.5 text-xs",
-                onPrimary
-                  ? "border-primary-foreground/30 text-primary-foreground/80"
-                  : "border-border/60 text-muted-foreground",
-              )}
+              className="rounded-xl border border-border/60 px-3 py-1.5 text-xs text-muted-foreground"
             >
               {attachment.kind === "image" ? "Image" : "File"}: {attachment.name}
             </span>
@@ -105,7 +106,6 @@ export function MessageView({
               access={access}
               name={attachment.name}
               path={path}
-              onPrimary={onPrimary}
             />
           </div>
         );
@@ -118,12 +118,7 @@ export function MessageView({
                 <TooltipTrigger
                   render={
                     <a
-                      className={cn(
-                        "inline-flex max-w-full min-w-0 items-center gap-1 rounded-md border px-1.5 py-0.5",
-                        onPrimary
-                          ? "border-primary-foreground/30 text-primary-foreground/80 hover:bg-primary-foreground/10"
-                          : "border-border/60 text-muted-foreground hover:bg-accent hover:text-foreground",
-                      )}
+                      className="inline-flex max-w-full min-w-0 items-center gap-1 rounded-md border border-border/60 px-1.5 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
                       href={link}
                       target="_blank"
                       rel="noreferrer noopener"
@@ -150,13 +145,23 @@ export function MessageView({
           title={message.richSummary}
           text={message.text}
           links={message.links}
+          mentions={message.mentions}
           openUrl={message.openUrl ?? null}
+        />
+      ) : hasText && markdown ? (
+        <ChatMarkdown
+          text={message.text}
+          cwd={undefined}
+          headingLevelOffset={3}
+          className="text-sm"
         />
       ) : hasText ? (
         <p className="max-w-full text-sm whitespace-pre-wrap wrap-anywhere">
-          <LinkedText text={message.text} links={message.links} />
+          <LinkedText text={message.text} links={message.links} mentions={message.mentions} />
+          {message.editedAt ? <EditedMark /> : null}
         </p>
       ) : null}
+      {message.editedAt && (markdown || !hasText || message.richSummary) ? <EditedMark /> : null}
       {media}
       {unsupported ? (
         <p className="text-xs text-muted-foreground">
@@ -176,6 +181,7 @@ export function MessageView({
           ) : null}
         </p>
       ) : null}
+      {reactions.length > 0 ? <Reactions reactions={reactions} /> : null}
     </>
   );
   if (isSystemNotice(message)) {
@@ -207,18 +213,28 @@ export function MessageView({
       <header
         className={cn(
           "flex min-w-0 items-baseline gap-2 text-xs text-muted-foreground",
-          continued && !message.mentionsSelf && "sr-only",
+          // As the chat app: a run of one speaker, and my own side, carry no header.
+          (continued || (atEnd && !post)) && !(message.mentionsSelf && !selfMarked) && "sr-only",
         )}
       >
         {showAuthor && (post || !atEnd) ? (
-          <span className="truncate font-medium text-foreground">
+          <span className={cn("truncate", post && "font-medium text-foreground")}>
             {nameOrUnknown(message.author.name)}
           </span>
         ) : null}
-        <time className="shrink-0" dateTime={message.createdAt}>
+        <time
+          className={cn(
+            "shrink-0",
+            !post &&
+              "opacity-0 group-hover/message:opacity-100 group-focus-within/message:opacity-100",
+          )}
+          dateTime={message.createdAt}
+        >
           {formatTimestamp(message.createdAt)}
         </time>
-        {message.mentionsSelf ? <span className="shrink-0 text-warning">@you</span> : null}
+        {message.mentionsSelf && !selfMarked ? (
+          <span className="shrink-0 font-medium text-info-foreground">@you</span>
+        ) : null}
       </header>
       {frame === "none" ? (
         <>
@@ -231,17 +247,16 @@ export function MessageView({
           className={cn(
             "flex max-w-full min-w-0 flex-col items-start gap-1.5 text-sm",
             frame === "dashed"
-              ? "rounded-xl border border-dashed border-border/70 px-3 py-1.5"
+              ? "rounded-lg border border-dashed border-border/70 px-3 py-1.5"
               : [
-                  "rounded-2xl px-3 py-2",
-                  frame === "primary"
-                    ? "bg-primary text-primary-foreground"
+                  "rounded-lg px-3 py-2",
+                  frame === "self"
+                    ? "bg-primary/12 text-foreground"
                     : "bg-message text-message-foreground",
-                  !post && !message.richSummary && (atEnd ? "rounded-tr-sm" : "rounded-tl-sm"),
                 ],
           )}
         >
-          {quote ? <QuoteLine text={quote} onPrimary={onPrimary} /> : null}
+          {quote ? <QuoteLine text={quote} /> : null}
           {body}
         </div>
       )}
@@ -250,24 +265,43 @@ export function MessageView({
   );
 }
 
-function QuoteLine({
-  text,
-  onPrimary = false,
-}: {
-  readonly text: string;
-  readonly onPrimary?: boolean;
-}) {
+function QuoteLine({ text }: { readonly text: string }) {
   return (
-    <p
-      className={cn(
-        "max-w-full truncate border-s-2 ps-2 text-xs",
-        onPrimary
-          ? "border-primary-foreground/40 text-primary-foreground/75"
-          : "border-border text-muted-foreground",
-      )}
-    >
+    <p className="max-w-full truncate border-s-2 border-muted-foreground/40 ps-2 text-xs text-muted-foreground">
       {text}
     </p>
+  );
+}
+
+function EditedMark() {
+  return <span className="ms-1 text-xs text-muted-foreground">(edited)</span>;
+}
+
+/** Each reaction as the chat app draws it: the emoji, then who reacted. */
+function Reactions({ reactions }: { readonly reactions: NonNullable<InboxMessage["reactions"]> }) {
+  return (
+    <ul className="flex max-w-full flex-wrap gap-1">
+      {reactions.map((reaction) => {
+        const names = reaction.users.slice(0, 3).join(", ");
+        const more = reaction.count - Math.min(reaction.users.length, 3);
+        return (
+          <li
+            key={reaction.key}
+            className={cn(
+              "inline-flex max-w-full min-w-0 items-center gap-1.5 rounded-full border bg-background/70 px-2 py-0.5 text-xs",
+              reaction.includesSelf ? "border-primary/40" : "border-transparent",
+            )}
+          >
+            <span className="shrink-0">{reaction.emoji ?? reaction.key}</span>
+            <span className="h-3 w-px shrink-0 bg-border" aria-hidden />
+            <span className="truncate text-muted-foreground">
+              {names || reaction.count}
+              {names && more > 0 ? ` +${more}` : ""}
+            </span>
+          </li>
+        );
+      })}
+    </ul>
   );
 }
 
@@ -279,11 +313,13 @@ function RichCard({
   title,
   text,
   links,
+  mentions,
   openUrl,
 }: {
   readonly title: string;
   readonly text: string;
   readonly links: ReadonlyArray<string>;
+  readonly mentions: Mentions;
   readonly openUrl: string | null;
 }) {
   const bodyId = useId();
@@ -303,7 +339,7 @@ function RichCard({
             canExpand && !expanded && "line-clamp-3",
           )}
         >
-          <LinkedText text={body} links={links} />
+          <LinkedText text={body} links={links} mentions={mentions} />
         </p>
       ) : null}
       {canExpand || openUrl ? (
@@ -337,12 +373,14 @@ function RichCard({
 function LinkedText({
   text,
   links,
+  mentions,
 }: {
   readonly text: string;
   readonly links: ReadonlyArray<string>;
+  readonly mentions: Mentions;
 }) {
   const known = links.filter((link) => link.length > 0 && text.includes(link));
-  if (known.length === 0) return text;
+  if (known.length === 0) return <MentionedText text={text} mentions={mentions} />;
   // Longest first, so a link that contains another is matched whole.
   const pattern = new RegExp(
     `(${known
@@ -355,7 +393,7 @@ function LinkedText({
       <a
         // oxlint-disable-next-line react/no-array-index-key -- parts are positional and never reorder
         key={index}
-        className="underline underline-offset-2"
+        className="text-info-foreground underline-offset-2 hover:underline"
         href={part}
         target="_blank"
         rel="noreferrer noopener"
@@ -363,7 +401,26 @@ function LinkedText({
         {part}
       </a>
     ) : (
-      part
+      // oxlint-disable-next-line react/no-array-index-key -- parts are positional and never reorder
+      <MentionedText key={index} text={part} mentions={mentions} />
+    ),
+  );
+}
+
+function MentionedText({ text, mentions }: { readonly text: string; readonly mentions: Mentions }) {
+  return mentionParts(text, mentions).map((part, index) =>
+    part.mention ? (
+      <span
+        // oxlint-disable-next-line react/no-array-index-key -- parts are positional and never reorder
+        key={index}
+        className={
+          part.mention.self ? "rounded bg-primary px-1 text-primary-foreground" : "text-primary"
+        }
+      >
+        {part.text}
+      </span>
+    ) : (
+      part.text
     ),
   );
 }
@@ -389,21 +446,16 @@ function MediaLink({
   access,
   name,
   path,
-  onPrimary,
 }: {
   readonly environmentId: EnvironmentId;
   readonly access: DeviceHubAccess;
   readonly name: string;
   readonly path: string;
-  readonly onPrimary: boolean;
 }) {
   const renew = () => renewStaleForkAccess(environmentId, access);
   return (
     <a
-      className={cn(
-        "inline-flex max-w-full min-w-0 items-center gap-1.5 self-start rounded-xl border px-3 py-1.5 text-xs underline-offset-2 hover:underline",
-        onPrimary ? "border-primary-foreground/30" : "border-border/60 text-foreground",
-      )}
+      className="inline-flex max-w-full min-w-0 items-center gap-1.5 self-start rounded-xl border border-border/60 px-3 py-1.5 text-xs text-foreground underline-offset-2 hover:underline"
       href={forkUrl(access, `${path}&${new URLSearchParams({ name }).toString()}`)}
       download={name}
       target="_blank"

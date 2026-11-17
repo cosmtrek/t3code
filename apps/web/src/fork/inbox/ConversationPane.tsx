@@ -1,10 +1,11 @@
 import type { EnvironmentId } from "@t3tools/contracts";
 import {
+  ArrowDownIcon,
   ArrowLeftIcon,
   BellOffIcon,
   BotIcon,
-  ChevronRightIcon,
   ExternalLinkIcon,
+  MessageSquareTextIcon,
   PaperclipIcon,
   ReplyIcon,
   XIcon,
@@ -32,6 +33,7 @@ import type {
 import { useForkResource, type ForkRefreshFilter } from "../useForkResource";
 import { ThreadStatus } from "./DelegationPane";
 import { IconAction } from "./IconAction";
+import { useFormatTimestamp } from "../presentation";
 import { AgentBadge, ConversationMenu, DelegationOutcome } from "./InboxList";
 import {
   agentSignalsFor,
@@ -102,6 +104,10 @@ const AT_BOTTOM_PX = 24;
 const FIND_FOCUS_PAGES = 5;
 /** A same-author message this soon after the last one reads as its continuation. */
 const CONTINUED_WITHIN_MS = 5 * 60_000;
+/** A quiet spell this long gets a time line between messages, as the chat app draws it. */
+const TIME_BREAK_MS = 60 * 60_000;
+/** The jump to the newest message shows once the reader is this far above it. */
+const JUMP_AFTER_PX = 400;
 
 const isAtBottom = (container: HTMLElement) =>
   container.scrollHeight - container.scrollTop - container.clientHeight < AT_BOTTOM_PX;
@@ -114,6 +120,7 @@ export function ConversationPane({
   selectedDelegationId,
   onCloseDelegation,
   focusMessageId,
+  newSince,
   readOnly,
   capabilities,
   replyRequest,
@@ -128,6 +135,8 @@ export function ConversationPane({
   readonly onCloseDelegation: () => void;
   /** The selected delegation's first message, scrolled to and marked. */
   readonly focusMessageId: string | null;
+  /** The read mark when the reader opened the conversation; what came after it is new. */
+  readonly newSince: string | null;
   readonly readOnly: boolean;
   /** The optional parts of the protocol the channel's adapter implements. */
   readonly capabilities: ReadonlyArray<string>;
@@ -194,6 +203,7 @@ export function ConversationPane({
           conversation={conversation}
           delegations={delegations}
           focusMessageId={focusMessageId}
+          newSince={newSince}
           readOnly={readOnly}
           handlers={handlers}
           onReply={replyTo}
@@ -306,6 +316,7 @@ function ConversationMessages({
   conversation,
   delegations,
   focusMessageId,
+  newSince,
   readOnly,
   handlers,
   onReply,
@@ -315,6 +326,7 @@ function ConversationMessages({
   readonly conversation: InboxConversation;
   readonly delegations: ReadonlyArray<InboxDelegation>;
   readonly focusMessageId: string | null;
+  readonly newSince: string | null;
   readonly readOnly: boolean;
   readonly handlers: ConversationPaneHandlers;
   readonly onReply: (message: InboxMessage) => void;
@@ -325,6 +337,7 @@ function ConversationMessages({
     conversationId: conversation.id,
   }).toString()}`;
   const newest = useForkResource<ConversationResponse>(environmentId, path, refreshOn);
+  const formatTimestamp = useFormatTimestamp();
   const [older, setOlder] = useState<OlderPages | null>(null);
   const [olderStatus, setOlderStatus] = useState<{
     readonly loading: boolean;
@@ -337,10 +350,25 @@ function ConversationMessages({
   const atBottom = useRef(true);
   /** Threads the reader opened, or closed after one opened by itself. */
   const [toggledThreads, setToggledThreads] = useState<ReadonlySet<string>>(new Set());
+  const newLine = useRef<HTMLLIElement>(null);
+  /** Scrolled away from the newest message, and whether the new ones are still below. */
+  const [away, setAway] = useState<{ readonly far: boolean; readonly newBelow: boolean }>({
+    far: false,
+    newBelow: false,
+  });
 
   const merged = newest.data ? mergeConversationPages(newest.data, older) : null;
   const rows = merged ? conversationRows(merged.messages, delegations) : [];
   const loaded = merged !== null;
+  const firstNew =
+    newSince === null
+      ? -1
+      : rows.findIndex(
+          (row) =>
+            !row.message.author.isSelf && Date.parse(row.message.createdAt) > Date.parse(newSince),
+        );
+  const newCount =
+    firstNew === -1 ? 0 : rows.slice(firstNew).filter((row) => !row.message.author.isSelf).length;
 
   const loadOlder = async () => {
     const cursor = merged?.nextCursor ?? null;
@@ -418,6 +446,8 @@ function ConversationMessages({
         ? container.querySelector(`[data-message-id="${CSS.escape(focusMessageId)}"]`)
         : null;
     if (target) target.scrollIntoView({ block: "nearest" });
+    // Opens where the reader left off, as the chat app does.
+    else if (focusMessageId === null && newLine.current) newLine.current.scrollIntoView();
     else container.scrollTop = container.scrollHeight;
     atBottom.current = isAtBottom(container);
   }, [focusMessageId, loaded, focusShown]);
@@ -478,9 +508,9 @@ function ConversationMessages({
         key={row.message.id}
         data-message-id={row.message.id}
         className={cn(
-          "group/message relative flex min-w-0 scroll-mt-4 flex-col rounded-lg px-1 py-1",
+          "group/message relative flex min-w-0 scroll-mt-4 flex-col rounded-lg px-1 py-0.5",
           // Speakers part with a gap; one speaker's run stays tight.
-          previous === undefined ? null : sameAuthor ? "mt-0.5" : "mt-4",
+          previous === undefined ? null : sameAuthor ? "mt-0.5" : "mt-3",
           focusRing(row),
         )}
       >
@@ -534,7 +564,8 @@ function ConversationMessages({
   const topic = ({ id, post, heading, replies }: Topic) => {
     const open = isOpen(id, replies);
     const folded = replies.slice(-FOLDED_REPLIES);
-    const earlier = replies.length - folded.length;
+    // The adapter's count includes replies older than the pages read.
+    const earlier = Math.max(post?.message.replyCount ?? 0, replies.length) - folded.length;
     return (
       <li key={id} className="flex min-w-0 flex-col gap-2 rounded-lg border border-border/60 p-3">
         {post ? (
@@ -608,74 +639,129 @@ function ConversationMessages({
   }
 
   return (
-    <div
-      ref={scrollRef}
-      className="scrollbar-gutter-both min-h-0 flex-1 overflow-y-auto overscroll-contain"
-      onScroll={(event) => {
-        const container = event.currentTarget;
-        atBottom.current = isAtBottom(container);
-        if (container.scrollTop < LOAD_OLDER_PX && !olderStatus.error) void loadOlder();
-      }}
-    >
-      {merged.nextCursor !== null ? (
-        <div className="flex justify-center pt-3">
-          <Button
-            size="xs"
-            variant="ghost-muted"
-            disabled={olderStatus.loading}
-            onClick={() => void loadOlder()}
-          >
-            {olderStatus.loading
-              ? "Loading…"
-              : olderStatus.error
-                ? "Could not load earlier messages; retry"
-                : "Load earlier messages"}
-          </Button>
-        </div>
-      ) : null}
-      {newest.data && skippedNotice(newest.data.skipped) ? (
-        <p className="px-4 pt-3 text-xs text-warning">{skippedNotice(newest.data.skipped)}</p>
-      ) : null}
-      {conversation.kind === "topic_group" ? (
-        <ol className="flex flex-col gap-3 px-3 py-3">{topicsOf(rows).map(topic)}</ol>
-      ) : (
-        <ol className="flex flex-col px-3 py-3">
-          {rows.map((row, index) => {
-            const open = isOpen(row.message.id, row.thread);
-            const replies = row.thread.length;
-            return (
-              <Fragment key={row.message.id}>
-                {item(row, rows[index - 1], rows.slice(index + 1))}
-                {replies > 0 ? (
-                  <li className="mt-1 flex min-w-0 flex-col gap-2 ps-1">
-                    <span>
-                      <Button
-                        size="xs"
-                        variant="ghost-muted"
+    <div className="relative flex min-h-0 flex-1 flex-col">
+      <div
+        ref={scrollRef}
+        className="scrollbar-gutter-both min-h-0 flex-1 overflow-y-auto overscroll-contain"
+        onScroll={(event) => {
+          const container = event.currentTarget;
+          atBottom.current = isAtBottom(container);
+          const viewBottom = container.scrollTop + container.clientHeight;
+          setAway({
+            far: container.scrollHeight - viewBottom > JUMP_AFTER_PX,
+            newBelow: newLine.current !== null && newLine.current.offsetTop > viewBottom,
+          });
+          if (container.scrollTop < LOAD_OLDER_PX && !olderStatus.error) void loadOlder();
+        }}
+      >
+        {merged.nextCursor !== null ? (
+          <div className="flex justify-center pt-3">
+            <Button
+              size="xs"
+              variant="ghost-muted"
+              disabled={olderStatus.loading}
+              onClick={() => void loadOlder()}
+            >
+              {olderStatus.loading
+                ? "Loading…"
+                : olderStatus.error
+                  ? "Could not load earlier messages; retry"
+                  : "Load earlier messages"}
+            </Button>
+          </div>
+        ) : null}
+        {newest.data && skippedNotice(newest.data.skipped) ? (
+          <p className="px-4 pt-3 text-xs text-warning">{skippedNotice(newest.data.skipped)}</p>
+        ) : null}
+        {conversation.kind === "topic_group" ? (
+          <ol className="flex flex-col gap-3 px-3 py-3">{topicsOf(rows).map(topic)}</ol>
+        ) : (
+          <ol className="flex flex-col px-3 py-3">
+            {rows.map((row, index) => {
+              const open = isOpen(row.message.id, row.thread);
+              const replies = Math.max(row.message.replyCount ?? 0, row.thread.length);
+              const previous = rows[index - 1];
+              const timeBreak =
+                previous !== undefined &&
+                Date.parse(row.message.createdAt) - Date.parse(previous.message.createdAt) >=
+                  TIME_BREAK_MS;
+              return (
+                <Fragment key={row.message.id}>
+                  {timeBreak ? (
+                    <li role="separator" className="mt-4 self-center text-xs text-muted-foreground">
+                      {formatTimestamp(row.message.createdAt)}
+                    </li>
+                  ) : null}
+                  {index === firstNew ? (
+                    <li
+                      ref={newLine}
+                      role="separator"
+                      className="mt-4 flex items-center gap-3 text-xs text-primary"
+                    >
+                      <span className="h-px flex-1 bg-primary/40" />
+                      New messages
+                      <span className="h-px flex-1 bg-primary/40" />
+                    </li>
+                  ) : null}
+                  {item(
+                    row,
+                    timeBreak || index === firstNew ? undefined : previous,
+                    rows.slice(index + 1),
+                  )}
+                  {row.thread.length > 0 ? (
+                    <li className="mt-0.5 flex min-w-0 flex-col gap-2 ps-1">
+                      <button
+                        type="button"
+                        className="inline-flex items-center gap-1 self-start rounded-sm px-1 text-xs text-info-foreground hover:underline"
                         aria-expanded={open}
                         onClick={() => toggle(row.message.id)}
                       >
-                        <ChevronRightIcon className={cn(open && "rotate-90")} />
-                        {replies} {replies === 1 ? "reply" : "replies"} in thread
-                        {row.thread.some((reply) => reply.message.mentionsSelf)
-                          ? " · mentions you"
-                          : ""}
-                      </Button>
-                    </span>
-                    {open ? (
-                      <ol className="ms-2 flex flex-col border-s border-border/70 ps-2">
-                        {row.thread.map((reply, at) =>
-                          item(reply, row.thread[at - 1], row.thread.slice(at + 1), row.message.id),
-                        )}
-                      </ol>
-                    ) : null}
-                  </li>
-                ) : null}
-              </Fragment>
-            );
-          })}
-        </ol>
-      )}
+                        <MessageSquareTextIcon className="size-3.5" />
+                        {open
+                          ? "Hide replies"
+                          : `${replies} ${replies === 1 ? "reply" : "replies"}`}
+                        {!open && row.thread.some((reply) => reply.message.mentionsSelf) ? (
+                          <span className="font-medium"> · mentions you</span>
+                        ) : null}
+                      </button>
+                      {open ? (
+                        <ol className="ms-2 flex flex-col border-s border-border/70 ps-2">
+                          {row.thread.map((reply, at) =>
+                            item(
+                              reply,
+                              row.thread[at - 1],
+                              row.thread.slice(at + 1),
+                              row.message.id,
+                            ),
+                          )}
+                        </ol>
+                      ) : null}
+                    </li>
+                  ) : null}
+                </Fragment>
+              );
+            })}
+          </ol>
+        )}
+      </div>
+      {away.far ? (
+        <div className="absolute end-4 bottom-3">
+          <Button
+            size="sm"
+            variant="glass"
+            onClick={() => {
+              const container = scrollRef.current;
+              if (container === null) return;
+              container.scrollTop = container.scrollHeight;
+            }}
+          >
+            <ArrowDownIcon />
+            {away.newBelow && newCount > 0
+              ? `${newCount} new ${newCount === 1 ? "message" : "messages"}`
+              : "Latest"}
+          </Button>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -778,6 +864,9 @@ function Composer({
   // Null until the reply first holds an `@`.
   const [people, setPeople] = useState<ReadonlyArray<Mention> | null>(null);
   const [caret, setCaret] = useState(0);
+  /** The highlighted suggestion, and the `@` whose suggestions Escape closed. */
+  const [activeSuggestion, setActiveSuggestion] = useState(0);
+  const [dismissedAt, setDismissedAt] = useState<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   if (request !== null && request.conversationId === conversation.id && request.nonce !== applied) {
     setApplied(request.nonce);
@@ -848,7 +937,10 @@ function Composer({
   };
   const uploading = files.some((entry) => entry.uploadId === null);
   const mentions = mentionsIn(text, people ?? []);
-  const suggestions = mentionSuggestions(text, caret, people ?? []);
+  const found = mentionSuggestions(text, caret, people ?? []);
+  const suggestions = found !== null && found.start !== dismissedAt ? found : null;
+  const active =
+    suggestions === null ? 0 : Math.min(activeSuggestion, suggestions.people.length - 1);
   const complete = (person: Mention) => {
     if (suggestions === null) return;
     const head = `${text.slice(0, suggestions.start)}@${person.name} `;
@@ -921,7 +1013,7 @@ function Composer({
 
   return (
     <form
-      className="flex shrink-0 flex-col gap-2 border-t border-border/70 p-3"
+      className="relative flex shrink-0 flex-col gap-2 border-t border-border/70 p-3"
       onFocus={() => {
         onEngage();
         wantPeople(text);
@@ -964,6 +1056,7 @@ function Composer({
         onChange={(event) => {
           setText(event.target.value);
           setCaret(event.target.selectionStart);
+          setActiveSuggestion(0);
           wantPeople(event.target.value);
         }}
         onSelect={(event) => setCaret(event.currentTarget.selectionStart)}
@@ -974,27 +1067,56 @@ function Composer({
           attach([...event.clipboardData.files]);
         }}
         onKeyDown={(event) => {
+          if (suggestions !== null && !event.metaKey && !event.ctrlKey) {
+            const count = suggestions.people.length;
+            const pick = suggestions.people[active];
+            if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+              event.preventDefault();
+              setActiveSuggestion((active + (event.key === "ArrowDown" ? 1 : count - 1)) % count);
+              return;
+            }
+            if ((event.key === "Enter" || event.key === "Tab") && !event.shiftKey && pick) {
+              event.preventDefault();
+              complete(pick);
+              return;
+            }
+            if (event.key === "Escape") {
+              event.preventDefault();
+              setDismissedAt(suggestions.start);
+              return;
+            }
+          }
           if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
             event.preventDefault();
             event.currentTarget.form?.requestSubmit();
-          } else if (event.key === "Tab" && !event.shiftKey && suggestions !== null) {
-            event.preventDefault();
-            complete(suggestions.people[0]!);
           }
         }}
       />
       {suggestions !== null ? (
-        <div className="flex flex-wrap gap-1" aria-label="People to mention">
-          {suggestions.people.map((person) => (
-            <Button
+        // Above the reply box over the messages, as the chat app opens its picker.
+        <div
+          role="listbox"
+          aria-label="People to mention"
+          className="absolute inset-x-3 bottom-full z-20 mb-1 flex flex-col rounded-lg border border-border/70 bg-popover p-1 text-popover-foreground shadow-lg"
+        >
+          <p className="px-2 py-1 text-xs text-muted-foreground">People in this chat</p>
+          {suggestions.people.map((person, index) => (
+            <button
               key={person.userId}
               type="button"
-              size="xs"
-              variant="outline"
+              role="option"
+              aria-selected={index === active}
+              className={cn(
+                "rounded-md px-2 py-1.5 text-left text-sm",
+                index === active ? "bg-accent" : "hover:bg-accent/50",
+              )}
+              // Keeps the caret in the textarea, where `complete` reads it.
+              onMouseDown={(event) => event.preventDefault()}
+              onMouseEnter={() => setActiveSuggestion(index)}
               onClick={() => complete(person)}
             >
-              @{person.name}
-            </Button>
+              {person.name}
+            </button>
           ))}
         </div>
       ) : null}

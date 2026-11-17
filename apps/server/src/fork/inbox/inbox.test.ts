@@ -115,6 +115,14 @@ describe("deriveConversation", () => {
       }),
       { mentioned: false },
     ],
+    [
+      "new messages start after the latest mark, my own last message included",
+      facts({
+        read: seen(hoursAgo(3)),
+        conversation: conversation({ lastSelfMessageAt: hoursAgo(2), selfReadThroughAt: "bad" }),
+      }),
+      { unread: true, readThroughAt: hoursAgo(2) },
+    ],
   ] as const)("%s", (_name, input, expected) => {
     expect(deriveConversation(input)).toMatchObject(expected);
   });

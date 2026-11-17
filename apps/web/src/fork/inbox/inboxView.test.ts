@@ -11,6 +11,7 @@ import {
   inView,
   lastMessageLine,
   mentionablePeople,
+  mentionParts,
   mentionSuggestions,
   mentionsIn,
   mergeConversationPages,
@@ -326,5 +327,34 @@ describe("authorsSummary", () => {
         msg("5", "Priya"),
       ]),
     ).toBe("Priya, Sam, Jordan +1");
+  });
+});
+
+describe("mentionParts", () => {
+  const marked = (text: string, mentions?: ReadonlyArray<{ name: string; isSelf: boolean }>) =>
+    mentionParts(text, mentions)
+      .map((part) =>
+        part.mention === null ? part.text : part.mention.self ? `{${part.text}}` : `[${part.text}]`,
+      )
+      .join("");
+  it.each([
+    ["@肖凡 解答下呢", "[@肖凡] 解答下呢"],
+    ["应该没理解错吧@周帅 前端大佬", "应该没理解错吧[@周帅] 前端大佬"],
+    ["@Sam, @Priya: look", "[@Sam], [@Priya]: look"],
+    ["mail sam@example.com", "mail sam@example.com"],
+    ["just @", "just @"],
+  ])("guesses %s", (text, expected) => {
+    expect(marked(text)).toBe(expected);
+  });
+
+  it("marks the adapter's names exactly, longest first, and only those", () => {
+    const mentions = [
+      { name: "Zhang San", isSelf: false },
+      { name: "Zhang Sanfeng", isSelf: true },
+    ];
+    expect(marked("@Zhang Sanfeng and @Zhang San, not @Li", mentions)).toBe(
+      "{@Zhang Sanfeng} and [@Zhang San], not @Li",
+    );
+    expect(marked("@Li here", [])).toBe("@Li here");
   });
 });

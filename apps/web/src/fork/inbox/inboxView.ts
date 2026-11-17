@@ -326,6 +326,50 @@ export function channelBanner(
   }
 }
 
+// Without the adapter's mentions, a name runs to the next space or punctuation, as the chat app ends it.
+const GUESSED_MENTION = /(?<![A-Za-z0-9_.+-])@[^\s@,，.。:：;；!！?？()（）[\]【】"“”'‘’]+/gu;
+
+export interface TextPart {
+  readonly text: string;
+  /** Set on an `@name`: whether it names the signed-in account. */
+  readonly mention: { readonly self: boolean } | null;
+}
+
+/** Splits text into plain runs and `@name` mentions, by the adapter's list when it sent one. */
+export function mentionParts(
+  text: string,
+  mentions?: ReadonlyArray<{ readonly name: string; readonly isSelf: boolean }> | null,
+): ReadonlyArray<TextPart> {
+  const known = (mentions ?? []).filter((mention) => mention.name.length > 0);
+  const self = new Set(
+    known.filter((mention) => mention.isSelf).map((mention) => `@${mention.name}`),
+  );
+  const pattern =
+    mentions == null
+      ? GUESSED_MENTION
+      : known.length === 0
+        ? null
+        : new RegExp(
+            // Longest first, so `@Zhang Sanfeng` is not taken by `@Zhang San`.
+            known
+              .map((mention) => `@${mention.name}`)
+              .toSorted((left, right) => right.length - left.length)
+              .map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+              .join("|"),
+            "gu",
+          );
+  if (pattern === null) return [{ text, mention: null }];
+  const parts: Array<TextPart> = [];
+  let last = 0;
+  for (const match of text.matchAll(pattern)) {
+    if (match.index > last) parts.push({ text: text.slice(last, match.index), mention: null });
+    parts.push({ text: match[0], mention: { self: self.has(match[0]) } });
+    last = match.index + match[0].length;
+  }
+  if (last < text.length) parts.push({ text: text.slice(last), mention: null });
+  return parts;
+}
+
 /** Who a reply can mention: everyone else who wrote, except a name two people share. */
 export function mentionablePeople(messages: ReadonlyArray<InboxMessage>): ReadonlyArray<Mention> {
   const names = new Map<string, string>();

@@ -145,6 +145,8 @@ function ConversationRow({
     null,
   );
   const swiped = offset !== 0;
+  // Reading in T3 does not reach the chat app, so its badge counts only while T3 shows unread.
+  const badge = conversation.unread ? (conversation.unreadCount ?? 0) : 0;
   const onPointerDown = (event: PointerEvent) => {
     if (event.pointerType !== "touch") return;
     drag.current = { x: event.clientX, y: event.clientY, base: offset, horizontal: null };
@@ -233,10 +235,25 @@ function ConversationRow({
           </span>
           <span className="flex min-w-0 items-center gap-2 text-xs">
             <span className="min-w-0 flex-1 truncate text-muted-foreground">
-              {conversation.mentioned ? <span className="text-warning">@you </span> : null}
+              {conversation.mentioned ? (
+                <span className="font-medium text-destructive-foreground">[@you] </span>
+              ) : null}
               {lastMessageLine(conversation)}
             </span>
             <AgentBadge signals={agent} />
+            {badge > 0 ? (
+              <span
+                className={cn(
+                  "shrink-0 rounded-full px-1.5 text-3xs leading-4 font-medium tabular-nums",
+                  conversation.muted
+                    ? "bg-muted-foreground/20 text-muted-foreground"
+                    : "bg-primary text-primary-foreground",
+                )}
+                aria-label={`${badge} unread`}
+              >
+                {badge > 99 ? "99+" : badge}
+              </span>
+            ) : null}
             {conversation.muted ? (
               <BellOffIcon
                 className="size-3 shrink-0 text-muted-foreground/70"
