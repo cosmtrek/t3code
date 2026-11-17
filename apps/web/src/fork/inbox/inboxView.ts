@@ -12,9 +12,9 @@ export type InboxView = "unread" | "all" | "agent";
 export type InboxFilter = "all" | "dm" | "groups" | "topics";
 
 export const INBOX_VIEWS: ReadonlyArray<{ readonly id: InboxView; readonly label: string }> = [
+  { id: "agent", label: "Agent" },
   { id: "unread", label: "Unread" },
   { id: "all", label: "All" },
-  { id: "agent", label: "Agent" },
 ];
 
 export const INBOX_FILTERS: ReadonlyArray<{ readonly id: InboxFilter; readonly label: string }> = [
