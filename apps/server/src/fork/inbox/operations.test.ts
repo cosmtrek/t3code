@@ -1015,6 +1015,34 @@ describe("sending", () => {
     }),
   );
 
+  it.effect("says whether a reply goes into the thread, only to an adapter that takes quotes", () =>
+    Effect.gen(function* () {
+      const h = yield* Effect.promise(() =>
+        harness(oneConversation, undefined, { capabilities: ["quotes"] }),
+      );
+      for (const inThread of [false, true]) {
+        yield* Inbox.send({ ...h.keyOf("c"), replyToId: "m1", inThread, text: "hi" }).pipe(
+          Effect.provide(h.layer),
+        );
+      }
+      // Without a message to answer there is no thread to choose.
+      yield* Inbox.send({ ...h.keyOf("c"), inThread: false, text: "hi" }).pipe(
+        Effect.provide(h.layer),
+      );
+      expect(h.posted).toEqual([
+        { conversationId: "c", replyToId: "m1", inThread: false, text: "hi" },
+        { conversationId: "c", replyToId: "m1", inThread: true, text: "hi" },
+        { conversationId: "c", text: "hi" },
+      ]);
+
+      const plain = yield* Effect.promise(() => harness(oneConversation));
+      yield* Inbox.send({ ...plain.keyOf("c"), replyToId: "m1", inThread: false, text: "hi" }).pipe(
+        Effect.provide(plain.layer),
+      );
+      expect(plain.posted).toEqual([{ conversationId: "c", replyToId: "m1", text: "hi" }]);
+    }),
+  );
+
   it.effect("sends Markdown and uploaded files, and only to an adapter that takes them", () =>
     Effect.gen(function* () {
       const attachments = [

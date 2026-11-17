@@ -47,7 +47,12 @@ import { cn } from "../../lib/utils";
 import { ChannelStatusDot, formatSince } from "../presentation";
 import type { DelegationDetail, InboxConversation, InboxDelegation, InboxResponse } from "../types";
 import { useForkResource } from "../useForkResource";
-import { ConversationPane, nextReplyNonce, type ReplyRequest } from "./ConversationPane";
+import {
+  ConversationPane,
+  nextReplyNonce,
+  replyTargetOf,
+  type ReplyRequest,
+} from "./ConversationPane";
 import { DelegateDialog, type DelegateTarget } from "./DelegateDialog";
 import { DelegationPane } from "./DelegationPane";
 import { IconAction } from "./IconAction";
@@ -57,10 +62,11 @@ import {
   INBOX_VIEWS,
   agentSignalsByConversation,
   channelBanner,
+  draftReplyMode,
   emptyViewTitle,
   inView,
   matchesFilter,
-  quoteOfMessage,
+  replyModes,
   skippedNotice,
   type InboxFilter,
   type InboxView,
@@ -633,14 +639,23 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
                   const anchor = data.messages.find(
                     (message) => message.id === delegation.anchorMessageId,
                   );
-                  // A reply thread's draft answers in that thread; a range's is a new message.
-                  const inThread =
-                    data.conversation.kind !== "dm" && delegation.scope !== "range" && anchor;
+                  // A message's draft answers that message; a range's or a DM's is a new message.
+                  const kind = data.conversation.kind;
+                  const answers =
+                    kind !== "dm" && delegation.scope !== "range" ? anchor : undefined;
+                  const modes = answers
+                    ? replyModes(kind, answers, channel.capabilities.includes("quotes"))
+                    : null;
                   setReplyRequest({
                     nonce: nextReplyNonce(),
                     conversationId: delegation.conversationId,
-                    replyTo: inThread
-                      ? { messageId: anchor.id, quote: quoteOfMessage(anchor) }
+                    replyTo: answers
+                      ? replyTargetOf(
+                          kind,
+                          answers,
+                          modes,
+                          modes === null ? null : draftReplyMode(modes, answers, data.messages),
+                        )
                       : null,
                     draft: { text, delegationId: delegation.id },
                   });

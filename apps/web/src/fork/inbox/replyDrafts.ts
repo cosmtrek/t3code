@@ -1,3 +1,4 @@
+import type { Mention } from "../types";
 import type { ReplyTarget } from "./ConversationPane";
 
 /** What the reply box held, kept per conversation in this browser so switching away loses nothing. */
@@ -12,6 +13,12 @@ export const replyDraftKey = (environmentId: string, channelId: string, conversa
 
 const isString = (value: unknown): value is string => typeof value === "string";
 
+function mentionOf(value: unknown): Mention | null {
+  if (typeof value !== "object" || value === null) return null;
+  const { userId, name } = value as Record<string, unknown>;
+  return isString(userId) && isString(name) ? { userId, name } : null;
+}
+
 function parse(raw: string): SavedReply | null {
   const value: unknown = JSON.parse(raw);
   if (typeof value !== "object" || value === null) return null;
@@ -25,7 +32,13 @@ function parse(raw: string): SavedReply | null {
     text,
     replyTo:
       target && isString(target.messageId) && isString(target.quote)
-        ? { messageId: target.messageId, quote: target.quote }
+        ? {
+            messageId: target.messageId,
+            quote: target.quote,
+            inThread: typeof target.inThread === "boolean" ? target.inThread : null,
+            canSwitch: target.canSwitch === true,
+            mention: mentionOf(target.mention),
+          }
         : null,
     draft:
       from && isString(from.text) && isString(from.delegationId)

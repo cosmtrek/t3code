@@ -1510,6 +1510,8 @@ const SendInput = Schema.Struct({
   conversationId: Schema.String,
   /** The adapter sends it into this message's reply thread. */
   replyToId: Schema.optional(Schema.String),
+  /** With `replyToId`: false quotes it on the timeline instead, for an adapter that takes quotes. */
+  inThread: Schema.optional(Schema.Boolean),
   /** The delegation whose draft this is; a copy of what was sent goes into its folder. */
   delegationId: Schema.optional(Schema.String),
   text: Schema.String,
@@ -1533,7 +1535,7 @@ const MAX_ATTACHMENTS = 9;
 /** The adapter's own limit; a larger file is refused before it is read. */
 export const UPLOAD_MAX_BYTES = 100 * 1024 * 1024;
 
-type Capability = "mentions" | "markdown" | "attachments";
+type Capability = "mentions" | "markdown" | "attachments" | "quotes";
 const supports = (channel: ChannelView, capability: Capability) =>
   channel.config?.capabilities?.includes(capability) ?? false;
 
@@ -1592,6 +1594,11 @@ export const send = Effect.fn("ForkInbox.send")(function* (body: unknown) {
     runtime.hub.postJson(input.channelId, "/messages", {
       conversationId: input.conversationId,
       ...(input.replyToId === undefined ? {} : { replyToId: input.replyToId }),
+      ...(input.replyToId !== undefined &&
+      input.inThread !== undefined &&
+      supports(channel, "quotes")
+        ? { inThread: input.inThread }
+        : {}),
       text,
       ...(mentions.length === 0 ? {} : { mentions }),
       ...(markdown ? { format: "markdown" } : {}),

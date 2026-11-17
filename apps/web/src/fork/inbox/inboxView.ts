@@ -133,6 +133,40 @@ export function quoteOf(author: string | null, text: string): string {
 export const quoteOfMessage = (message: InboxMessage) =>
   quoteOf(message.author.name, message.richSummary || message.text);
 
+export type ReplyMode = "quote" | "thread";
+
+/**
+ * How the chat app lets a message be answered: quoted on the timeline, inside its reply thread, or
+ * either. Null when the adapter cannot be told, so it places the reply itself.
+ */
+export function replyModes(
+  kind: ConversationKind,
+  message: InboxMessage,
+  canChoose: boolean,
+): ReadonlyArray<ReplyMode> | null {
+  if (!canChoose) return null;
+  if (kind === "dm") return ["quote"];
+  if (kind === "topic_group" || message.inThread === true) return ["thread"];
+  return ["quote", "thread"];
+}
+
+/** A draft answers back in the thread its message already has, and otherwise quotes it. */
+export function draftReplyMode(
+  modes: ReadonlyArray<ReplyMode>,
+  anchor: InboxMessage,
+  messages: ReadonlyArray<InboxMessage>,
+): ReplyMode {
+  if (modes.length === 1) return modes[0]!;
+  const threaded = messages.some(
+    (message) => message.inThread === true && message.rootId === anchor.id,
+  );
+  return threaded ? "thread" : "quote";
+}
+
+/** The text with `@name` in front, unless it already mentions them. */
+export const withMention = (text: string, name: string) =>
+  text.includes(`@${name}`) ? text : `@${name} ${text}`;
+
 export interface ConversationRow {
   readonly message: InboxMessage;
   /** What the message answers, as the chat app shows it above the message. */

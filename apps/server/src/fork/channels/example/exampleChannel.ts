@@ -283,8 +283,12 @@ export function createExampleChannel(
   const toWire = (conversation: ExampleConversation, item: ExampleMessage) => {
     const parent = conversation.messages.find((candidate) => candidate.id === item.replyToId);
     const root = rootOf(conversation, item);
+    // A quote reply stays on the timeline; only what sits in the thread counts.
     const replyCount = conversation.messages.filter(
-      (candidate) => candidate.id !== item.id && rootOf(conversation, candidate).id === item.id,
+      (candidate) =>
+        candidate.id !== item.id &&
+        candidate.inThread === true &&
+        rootOf(conversation, candidate).id === item.id,
     ).length;
     return {
       id: item.id,
@@ -358,6 +362,7 @@ export function createExampleChannel(
     const input = body as {
       conversationId?: unknown;
       replyToId?: unknown;
+      inThread?: unknown;
       text?: unknown;
       mentions?: ReadonlyArray<{ userId?: unknown }>;
       attachments?: ReadonlyArray<{ uploadId?: unknown }>;
@@ -377,13 +382,17 @@ export function createExampleChannel(
         error: { code: "rejected", message: "An attachment expired; attach it again." },
       });
     }
-    // Like Feishu, a reply lands under its thread's root, whichever message it answered.
     const target = conversation.messages.find((item) => item.id === input?.replyToId);
-    const replyToId = target ? rootOf(conversation, target).id : null;
-    // A reply stays in the thread where the chat app keeps threads off the timeline.
+    // A quote stays on the timeline and answers exactly the message it quotes.
+    const quoted = target !== undefined && input?.inThread === false;
+    // Like Feishu, a thread reply lands under its thread's root, whichever message it answered.
+    const replyToId = target ? (quoted ? target.id : rootOf(conversation, target).id) : null;
+    // Without a choice, a reply stays in the thread where the chat app keeps threads off the timeline.
     const inThread =
       replyToId !== null &&
-      (conversation.kind === "topic_group" ||
+      !quoted &&
+      (input?.inThread === true ||
+        conversation.kind === "topic_group" ||
         conversation.messages.some(
           (item) => item.inThread === true && rootOf(conversation, item).id === replyToId,
         ));
@@ -535,7 +544,7 @@ export function createExampleChannel(
         ],
         relevanceSummary:
           "Direct messages, mentions of you, and threads you took part in. Conversations you follow show their new threads too. Muted conversations are left out.",
-        capabilities: ["mentions", "markdown", "attachments"],
+        capabilities: ["mentions", "markdown", "attachments", "quotes"],
         ackReaction: "OK",
       });
     }
