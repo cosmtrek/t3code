@@ -49,6 +49,135 @@ export function MessageView({
   const hasText = message.text.trim().length > 0;
   // A link the text already shows is a link there, not a second line under the bubble.
   const extraLinks = message.links.filter((link) => !message.text.includes(link));
+  const unsupported =
+    !hasText &&
+    !message.richSummary &&
+    message.attachments.length === 0 &&
+    message.links.length === 0;
+  // Bare media keeps no frame, as the chat app shows a lone image; a topic post's text has none.
+  const frame: "primary" | "muted" | "dashed" | "none" = message.richSummary
+    ? "muted"
+    : unsupported
+      ? "dashed"
+      : post || (!hasText && !quote)
+        ? "none"
+        : self
+          ? "primary"
+          : "muted";
+  const onPrimary = frame === "primary";
+  const media = (
+    <>
+      {message.attachments.map((attachment) => {
+        if (access === null) {
+          return (
+            <span
+              key={attachment.key}
+              className={cn(
+                "rounded-xl border px-3 py-1.5 text-xs",
+                onPrimary
+                  ? "border-primary-foreground/30 text-primary-foreground/80"
+                  : "border-border/60 text-muted-foreground",
+              )}
+            >
+              {attachment.kind === "image" ? "Image" : "File"}: {attachment.name}
+            </span>
+          );
+        }
+        const path = `/inbox/media?${new URLSearchParams({ channelId, messageId: message.id, key: attachment.key }).toString()}`;
+        if (attachment.kind === "image") {
+          return (
+            <MediaImage
+              key={attachment.key}
+              environmentId={environmentId}
+              access={access}
+              alt={attachment.name}
+              path={path}
+            />
+          );
+        }
+        return (
+          <div key={attachment.key} className="flex max-w-full min-w-0 flex-col gap-1">
+            {VIDEO_NAME.test(attachment.name) ? (
+              <MediaVideo environmentId={environmentId} access={access} path={path} />
+            ) : null}
+            <MediaLink
+              environmentId={environmentId}
+              access={access}
+              name={attachment.name}
+              path={path}
+              onPrimary={onPrimary}
+            />
+          </div>
+        );
+      })}
+      {extraLinks.length > 0 ? (
+        <ul className="flex max-w-full min-w-0 flex-wrap gap-1 text-xs">
+          {extraLinks.map((link) => (
+            <li key={link} className="min-w-0">
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <a
+                      className={cn(
+                        "inline-flex max-w-full min-w-0 items-center gap-1 rounded-md border px-1.5 py-0.5",
+                        onPrimary
+                          ? "border-primary-foreground/30 text-primary-foreground/80 hover:bg-primary-foreground/10"
+                          : "border-border/60 text-muted-foreground hover:bg-accent hover:text-foreground",
+                      )}
+                      href={link}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                    />
+                  }
+                >
+                  <LinkIcon className="size-3 shrink-0" />
+                  <span className="truncate">{shortLink(link)}</span>
+                </TooltipTrigger>
+                <TooltipPopup side="top" className="max-w-md break-all">
+                  {link}
+                </TooltipPopup>
+              </Tooltip>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </>
+  );
+  const body = (
+    <>
+      {message.richSummary ? (
+        <RichCard
+          title={message.richSummary}
+          text={message.text}
+          links={message.links}
+          openUrl={message.openUrl ?? null}
+        />
+      ) : hasText ? (
+        <p className="max-w-full text-sm whitespace-pre-wrap wrap-anywhere">
+          <LinkedText text={message.text} links={message.links} />
+        </p>
+      ) : null}
+      {media}
+      {unsupported ? (
+        <p className="text-xs text-muted-foreground">
+          Unsupported message
+          {message.openUrl ? (
+            <>
+              {" · "}
+              <a
+                className="text-foreground underline-offset-2 hover:underline"
+                href={message.openUrl}
+                target="_blank"
+                rel="noreferrer noopener"
+              >
+                Open in app
+              </a>
+            </>
+          ) : null}
+        </p>
+      ) : null}
+    </>
+  );
   if (isSystemNotice(message)) {
     return (
       <p className="self-center px-3 text-center text-xs text-muted-foreground">
@@ -91,122 +220,54 @@ export function MessageView({
         </time>
         {message.mentionsSelf ? <span className="shrink-0 text-warning">@you</span> : null}
       </header>
-      {quote ? (
-        <p className="max-w-full truncate border-s-2 border-border ps-2 text-xs text-muted-foreground">
-          {quote}
-        </p>
-      ) : null}
-      {hasText && !message.richSummary ? (
-        <p
+      {frame === "none" ? (
+        <>
+          {quote ? <QuoteLine text={quote} /> : null}
+          {body}
+        </>
+      ) : (
+        // Quote, content, and media are one message, so they share one frame as the chat app draws it.
+        <div
           className={cn(
-            "text-sm whitespace-pre-wrap wrap-anywhere",
-            post
-              ? "max-w-full"
-              : self
-                ? cn(
-                    "rounded-2xl bg-primary px-3 py-2 text-primary-foreground",
-                    atEnd ? "rounded-tr-sm" : "rounded-tl-sm",
-                  )
-                : "rounded-2xl rounded-tl-sm bg-muted px-3 py-2",
+            "flex max-w-full min-w-0 flex-col items-start gap-1.5 text-sm",
+            frame === "dashed"
+              ? "rounded-xl border border-dashed border-border/70 px-3 py-1.5"
+              : [
+                  "rounded-2xl px-3 py-2",
+                  frame === "primary"
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-message text-message-foreground",
+                  !post && !message.richSummary && (atEnd ? "rounded-tr-sm" : "rounded-tl-sm"),
+                ],
           )}
         >
-          <LinkedText text={message.text} links={message.links} />
-        </p>
-      ) : null}
-      {message.richSummary ? (
-        <RichCard
-          title={message.richSummary}
-          text={message.text}
-          links={message.links}
-          openUrl={message.openUrl ?? null}
-        />
-      ) : null}
-      {message.attachments.map((attachment) => {
-        if (access === null) {
-          return (
-            <span
-              key={attachment.key}
-              className="rounded-xl border border-border/60 px-3 py-1.5 text-xs text-muted-foreground"
-            >
-              {attachment.kind === "image" ? "Image" : "File"}: {attachment.name}
-            </span>
-          );
-        }
-        const path = `/inbox/media?${new URLSearchParams({ channelId, messageId: message.id, key: attachment.key }).toString()}`;
-        if (attachment.kind === "image") {
-          return (
-            <MediaImage
-              key={attachment.key}
-              environmentId={environmentId}
-              access={access}
-              alt={attachment.name}
-              path={path}
-            />
-          );
-        }
-        return (
-          <div key={attachment.key} className="flex max-w-full min-w-0 flex-col gap-1">
-            {VIDEO_NAME.test(attachment.name) ? (
-              <MediaVideo environmentId={environmentId} access={access} path={path} />
-            ) : null}
-            <MediaLink
-              environmentId={environmentId}
-              access={access}
-              name={attachment.name}
-              path={path}
-            />
-          </div>
-        );
-      })}
-      {extraLinks.length > 0 ? (
-        <ul className="flex max-w-full min-w-0 flex-wrap gap-1 text-xs">
-          {extraLinks.map((link) => (
-            <li key={link} className="min-w-0">
-              <Tooltip>
-                <TooltipTrigger
-                  render={
-                    <a
-                      className="inline-flex max-w-full min-w-0 items-center gap-1 rounded-md border border-border/60 px-1.5 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
-                      href={link}
-                      target="_blank"
-                      rel="noreferrer noopener"
-                    />
-                  }
-                >
-                  <LinkIcon className="size-3 shrink-0" />
-                  <span className="truncate">{shortLink(link)}</span>
-                </TooltipTrigger>
-                <TooltipPopup side="top" className="max-w-md break-all">
-                  {link}
-                </TooltipPopup>
-              </Tooltip>
-            </li>
-          ))}
-        </ul>
-      ) : null}
-      {!hasText &&
-      !message.richSummary &&
-      message.attachments.length === 0 &&
-      message.links.length === 0 ? (
-        <p className="rounded-xl border border-dashed border-border/70 px-3 py-1.5 text-xs text-muted-foreground">
-          Unsupported message
-          {message.openUrl ? (
-            <>
-              {" · "}
-              <a
-                className="text-foreground underline-offset-2 hover:underline"
-                href={message.openUrl}
-                target="_blank"
-                rel="noreferrer noopener"
-              >
-                Open in app
-              </a>
-            </>
-          ) : null}
-        </p>
-      ) : null}
+          {quote ? <QuoteLine text={quote} onPrimary={onPrimary} /> : null}
+          {body}
+        </div>
+      )}
       {children}
     </article>
+  );
+}
+
+function QuoteLine({
+  text,
+  onPrimary = false,
+}: {
+  readonly text: string;
+  readonly onPrimary?: boolean;
+}) {
+  return (
+    <p
+      className={cn(
+        "max-w-full truncate border-s-2 ps-2 text-xs",
+        onPrimary
+          ? "border-primary-foreground/40 text-primary-foreground/75"
+          : "border-border text-muted-foreground",
+      )}
+    >
+      {text}
+    </p>
   );
 }
 
@@ -230,7 +291,7 @@ function RichCard({
   const body = text.trim();
   const canExpand = body.length > 160 || body.split("\n").length > 3;
   return (
-    <div className="flex max-w-full min-w-0 flex-col gap-1 rounded-xl bg-muted px-3 py-2 text-sm">
+    <div className="flex max-w-full min-w-0 flex-col gap-1">
       <p className="border-s-2 border-warning ps-2 font-medium leading-tight whitespace-pre-wrap wrap-anywhere">
         {title}
       </p>
@@ -328,16 +389,21 @@ function MediaLink({
   access,
   name,
   path,
+  onPrimary,
 }: {
   readonly environmentId: EnvironmentId;
   readonly access: DeviceHubAccess;
   readonly name: string;
   readonly path: string;
+  readonly onPrimary: boolean;
 }) {
   const renew = () => renewStaleForkAccess(environmentId, access);
   return (
     <a
-      className="inline-flex max-w-full min-w-0 items-center gap-1.5 self-start rounded-xl border border-border/60 px-3 py-1.5 text-xs text-foreground underline-offset-2 hover:underline"
+      className={cn(
+        "inline-flex max-w-full min-w-0 items-center gap-1.5 self-start rounded-xl border px-3 py-1.5 text-xs underline-offset-2 hover:underline",
+        onPrimary ? "border-primary-foreground/30" : "border-border/60 text-foreground",
+      )}
       href={forkUrl(access, `${path}&${new URLSearchParams({ name }).toString()}`)}
       download={name}
       target="_blank"
