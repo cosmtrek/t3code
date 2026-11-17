@@ -1,9 +1,10 @@
 import type { EnvironmentId } from "@t3tools/contracts";
 import type { DeviceHubAccess } from "@t3tools/client-runtime/state/deviceHubAccess";
 import { DownloadIcon, ExternalLinkIcon, LinkIcon } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useId, useState, type ReactNode } from "react";
 
 import { ExpandedImageDialog } from "../../components/chat/ExpandedImageDialog";
+import { InlineButton } from "../../components/ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../../components/ui/tooltip";
 import { cn } from "../../lib/utils";
 import { forkUrl, renewForkAccess, renewStaleForkAccess, useForkAccess } from "../forkApiAccess";
@@ -95,7 +96,7 @@ export function MessageView({
           {quote}
         </p>
       ) : null}
-      {hasText ? (
+      {hasText && !message.richSummary ? (
         <p
           className={cn(
             "text-sm whitespace-pre-wrap wrap-anywhere",
@@ -113,19 +114,12 @@ export function MessageView({
         </p>
       ) : null}
       {message.richSummary ? (
-        <div className="rounded-xl border border-border/60 bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-          <p className="whitespace-pre-wrap wrap-anywhere">{message.richSummary}</p>
-          {message.openUrl ? (
-            <a
-              className="mt-1 inline-flex items-center gap-1 text-foreground underline-offset-2 hover:underline"
-              href={message.openUrl}
-              target="_blank"
-              rel="noreferrer noopener"
-            >
-              Open in app <ExternalLinkIcon className="size-3" />
-            </a>
-          ) : null}
-        </div>
+        <RichCard
+          title={message.richSummary}
+          text={message.text}
+          links={message.links}
+          openUrl={message.openUrl ?? null}
+        />
       ) : null}
       {message.attachments.map((attachment) => {
         if (access === null) {
@@ -213,6 +207,69 @@ export function MessageView({
       ) : null}
       {children}
     </article>
+  );
+}
+
+/**
+ * Forwards and cards: the adapter flattens the body into `text`, so it reads as the card's
+ * content under its title, clamped as the chat app's preview is.
+ */
+function RichCard({
+  title,
+  text,
+  links,
+  openUrl,
+}: {
+  readonly title: string;
+  readonly text: string;
+  readonly links: ReadonlyArray<string>;
+  readonly openUrl: string | null;
+}) {
+  const bodyId = useId();
+  const [expanded, setExpanded] = useState(false);
+  const body = text.trim();
+  const canExpand = body.length > 160 || body.split("\n").length > 3;
+  return (
+    <div className="flex max-w-full min-w-0 flex-col gap-1 rounded-xl bg-muted px-3 py-2 text-sm">
+      <p className="border-s-2 border-warning ps-2 font-medium leading-tight whitespace-pre-wrap wrap-anywhere">
+        {title}
+      </p>
+      {body ? (
+        <p
+          id={bodyId}
+          className={cn(
+            "ps-2.5 text-muted-foreground whitespace-pre-wrap wrap-anywhere",
+            canExpand && !expanded && "line-clamp-3",
+          )}
+        >
+          <LinkedText text={body} links={links} />
+        </p>
+      ) : null}
+      {canExpand || openUrl ? (
+        <div className="flex items-center gap-3 ps-2.5 text-xs">
+          {canExpand ? (
+            <InlineButton
+              aria-expanded={expanded}
+              aria-controls={bodyId}
+              tone="muted"
+              onClick={() => setExpanded((value) => !value)}
+            >
+              {expanded ? "Show less" : "Show more"}
+            </InlineButton>
+          ) : null}
+          {openUrl ? (
+            <a
+              className="inline-flex items-center gap-1 text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+              href={openUrl}
+              target="_blank"
+              rel="noreferrer noopener"
+            >
+              Open in app <ExternalLinkIcon className="size-3" />
+            </a>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
   );
 }
 

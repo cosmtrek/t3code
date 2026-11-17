@@ -139,6 +139,14 @@ function seed(now: number): ExampleConversation[] {
           "I do. I'll send a proposal for the new limits by Friday.",
         ),
         message("m-30", null, 8, SAM, "Reminder: on-call handover is at 10am tomorrow."),
+        message(
+          "m-31",
+          null,
+          7,
+          SAM,
+          "Jordan: [Image] The export job retries are exhausted before the upstream recovers, so every nightly run after an incident fails the same way. We either raise the retry budget or move the job after the upstream maintenance window, and I don't think we have a full picture of the upstream schedule yet.\nPriya: I'll ask the upstream team for their maintenance calendar.",
+          { richSummary: "Forwarded · Chat between Jordan and Priya · 2 messages" },
+        ),
       ],
     },
     {
