@@ -25,6 +25,7 @@ import { ChannelHub } from "../channels/hub.ts";
 import type { AdapterRequest, AdapterResponse } from "../channels/transport.ts";
 import { threadContextDir } from "./artifacts.ts";
 import { delegationIdFor } from "./derive.ts";
+import { buildContextMarkdown } from "./context.ts";
 import { InboxRuntime } from "./InboxRuntime.ts";
 import { followLinkedThreads } from "./linkedThreads.ts";
 import * as Inbox from "./operations.ts";
@@ -1088,42 +1089,50 @@ describe("asking a delegation's thread", () => {
     Effect.gen(function* () {
       const h = yield* Effect.promise(() => harness(oneConversation));
       const delegationId = saveDelegation(h, "c", "m1");
-      const ask = Inbox.ask({ channelId: h.channelId, delegationId, text: " Why? " }).pipe(
-        Effect.provide(askLayer(h)),
-      );
-      expect(yield* Effect.flip(ask)).toMatchObject({ status: 400 });
+      const ask = (text: string) =>
+        Inbox.ask({ channelId: h.channelId, delegationId, text }).pipe(Effect.provide(askLayer(h)));
+      expect(yield* Effect.flip(ask(" Why? "))).toMatchObject({ status: 400 });
       expect(h.sent).toEqual([]);
 
       const { dir } = yield* linkThread(h, "c", "m1", "thread-1", 1);
-      yield* ask;
+      expect(yield* Effect.flip(ask(" "))).toMatchObject({ status: 400 });
+      // A thread whose context predates the draft rule gets it with each message.
+      yield* ask(" Why? ");
       expect(h.sent).toHaveLength(1);
       expect(h.sent[0]).toMatchObject({ threadId: "thread-1", projectId: "p", mode: "queue" });
-      expect(h.sent[0]!.text).toMatch(/^Why\?\n\n\(If your findings/);
+      expect(h.sent[0]!.text).toMatch(/^Why\?\n\n\(If this asks for the reply/);
+      expect(h.sent[0]!.text).toContain(`${dir}/draft.md`);
       expect(h.sent[0]!.text).toContain(`${dir}/conclusion.md`);
-      expect(h.sent[0]!.text).not.toContain("draft.md");
 
-      // Only a draft request may be empty; it alone asks for the reply.
-      yield* Inbox.ask({ channelId: h.channelId, delegationId, text: " ", kind: "draft" }).pipe(
-        Effect.provide(askLayer(h)),
+      yield* Effect.promise(() =>
+        NodeFSP.writeFile(
+          NodePath.join(dir, "context.md"),
+          buildContextMarkdown({
+            channelName: "Chat",
+            conversation: { name: "c", kind: "dm" },
+            messages: [],
+            images: [],
+            senderName: "",
+            senderHistory: [],
+            contextDir: dir,
+            openUrl: null,
+            skippedMessages: 0,
+            markdown: false,
+          }),
+        ),
       );
-      expect(h.sent[1]!.text).toMatch(/^\(Write the reply/);
-      expect(h.sent[1]!.text).toContain(`${dir}/draft.md`);
+      yield* ask(" Tell them it is fixed ");
+      expect(h.sent[1]!.text).toBe("Tell them it is fixed");
     }),
   );
 
   it.effect("shows the questions asked after the delegation without the note sent with them", () =>
     Effect.gen(function* () {
       const h = yield* Effect.promise(() => harness(oneConversation));
-      const { delegationId } = yield* linkThread(h, "c", "m1", "thread-1", 1);
+      const { delegationId, dir } = yield* linkThread(h, "c", "m1", "thread-1", 1);
       yield* Inbox.ask({ channelId: h.channelId, delegationId, text: "Why?" }).pipe(
         Effect.provide(askLayer(h)),
       );
-      yield* Inbox.ask({
-        channelId: h.channelId,
-        delegationId,
-        text: "Keep it short",
-        kind: "draft",
-      }).pipe(Effect.provide(askLayer(h)));
       const message = (role: string, text: string, runId: string | null, minute: number) => ({
         role,
         text,
@@ -1131,6 +1140,11 @@ describe("asking a delegation's thread", () => {
         streaming: false,
         createdAt: DateTime.makeUnsafe(at(minute)),
       });
+      const earlierDraftRequest = [
+        "Keep it short",
+        "",
+        `(Write the reply I should send in the chat to \`${dir}/draft.md\`, from everything so far: plain text, in the language of the conversation, ready to send as is. If you cannot write files there, end your message with \`<draft>…</draft>\` instead.)`,
+      ].join("\n");
       h.threadMessages.set("thread-1", [
         message("user", "Delegated", "run-1", 1),
         message("assistant", "Looked into it", "run-1", 2),
@@ -1138,7 +1152,7 @@ describe("asking a delegation's thread", () => {
         message("assistant", "Thinking", "run-2", 4),
         message("assistant", "Because of the cache", "run-2", 5),
         message("user", "And then?", null, 6),
-        message("user", h.sent[1]!.text, null, 7),
+        message("user", earlierDraftRequest, null, 7),
       ]);
       const detail = yield* Inbox.readDelegation(delegationQuery(h, delegationId)).pipe(
         Effect.provide(h.layer),

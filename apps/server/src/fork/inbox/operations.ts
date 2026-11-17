@@ -67,6 +67,7 @@ import {
   firstMessage,
   followUpMessage,
   followUpsOf,
+  knowsDraftRule,
   mediaFileName,
   nameOrUnknown,
   parseFallbackReply,
@@ -1414,6 +1415,7 @@ export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown
       openUrl,
       skippedMessages: scoped.skipped,
       rootMissing: scoped.rootMissing,
+      markdown: supports(channel, "markdown"),
     });
     const text = firstMessage({
       template: template.prompt,
@@ -1421,6 +1423,7 @@ export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown
       note: input.note ?? "",
       openUrl,
       skippedMessages: scoped.skipped,
+      markdown: supports(channel, "markdown"),
     });
     yield* Effect.promise(() =>
       Promise.all([
@@ -1714,19 +1717,16 @@ const AskInput = Schema.Struct({
   channelId: Schema.String,
   delegationId: Schema.String,
   text: Schema.String,
-  /** `draft` asks for the reply to send, with `text` as an optional instruction for it. */
-  kind: Schema.optional(Schema.Literals(["question", "draft"])),
 });
 const decodeAskInput = Schema.decodeUnknownEffect(AskInput);
 
-/** A question, or a request for the reply, for the delegation's thread. It never reaches the chat app. */
+/** A message for the delegation's thread; the thread drafts the reply when it asks for one. It never reaches the chat app. */
 export const ask = Effect.fn("ForkInbox.ask")(function* (body: unknown) {
   const input = yield* decodeAskInput(body).pipe(
     Effect.mapError(() => badRequest("The question is missing fields.")),
   );
-  const kind = input.kind ?? "question";
   const text = input.text.trim();
-  if ((kind === "question" && text.length === 0) || text.length > 20_000) {
+  if (text.length === 0 || text.length > 20_000) {
     return yield* badRequest("Write a question of up to 20,000 characters.", "text");
   }
   const runtime = yield* InboxRuntime;
@@ -1740,18 +1740,20 @@ export const ask = Effect.fn("ForkInbox.ask")(function* (body: unknown) {
         : "This delegation has no thread; delegate again.",
     );
   }
+  const contextDir = threadContextDir(runtime.itemsDir, delegationId, active.threadId);
+  const context = yield* Effect.promise(() =>
+    NodeFSP.readFile(NodePath.join(contextDir, CONTEXT_FILE), "utf8").catch(() => null),
+  );
   const commandId = CommandId.make(`fork-inbox-ask:${NodeCrypto.randomUUID()}`);
   yield* ThreadMessageIntake.sendToThread({
     projectId: ProjectId.make(active.projectId),
     commandId,
     threadId: ThreadId.make(active.threadId),
     messageId: MessageId.make(commandId),
-    text: followUpMessage(
-      text,
-      threadContextDir(runtime.itemsDir, delegationId, active.threadId),
-      kind,
-      { markdown: supports(yield* channelOrMissing(input.channelId), "markdown") },
-    ),
+    text: followUpMessage(text, contextDir, {
+      markdown: supports(yield* channelOrMissing(input.channelId), "markdown"),
+      knowsRule: knowsDraftRule(context),
+    }),
     attachments: [],
     // A running thread takes the question after its current run.
     mode: "queue",

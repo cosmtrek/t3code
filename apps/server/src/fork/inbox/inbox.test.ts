@@ -250,20 +250,21 @@ describe("delegation text", () => {
       note: "",
       openUrl: "https://chat.example.com/t/1",
       skippedMessages: 0,
+      markdown: false,
     });
     expect(text).toContain("Open in app: https://chat.example.com/t/1");
     expect(text).toContain("/ctx/conclusion.md");
     expect(text).toContain("<conclusion>");
-    // The reply is asked for later, only when the user wants one.
-    expect(text).not.toContain("draft");
+    expect(text).toContain("/ctx/draft.md` only when");
     const complete = firstMessage({
-      template: "{openUrl} {contextDir}/conclusion.md",
+      template: "{openUrl} {contextDir}/conclusion.md {contextDir}/draft.md",
       contextDir: "/ctx",
       note: "",
       openUrl: "https://chat.example.com/t/1",
       skippedMessages: 0,
+      markdown: false,
     });
-    expect(complete).toBe("https://chat.example.com/t/1 /ctx/conclusion.md");
+    expect(complete).toBe("https://chat.example.com/t/1 /ctx/conclusion.md /ctx/draft.md");
   });
 
   it("tells the thread about messages it is not given, and names nameless authors", () => {
@@ -275,6 +276,7 @@ describe("delegation text", () => {
         note: "",
         openUrl: null,
         skippedMessages: 2,
+        markdown: false,
       }),
     ).toContain(`${missing} from context.md.`);
     const markdown = buildContextMarkdown({
@@ -298,6 +300,7 @@ describe("delegation text", () => {
       contextDir: "/ctx",
       openUrl: null,
       skippedMessages: 2,
+      markdown: false,
     });
     expect(markdown.split("\n").slice(0, 3)).toEqual(["# Unknown", "", `${missing} below.`]);
     expect(markdown).toContain(`### Unknown · ${hoursAgo(1)}`);
@@ -517,6 +520,7 @@ describe("context media", () => {
       contextDir: "/ctx",
       openUrl: null,
       skippedMessages: 0,
+      markdown: false,
     });
     expect(markdown.indexOf("/ctx/media/first.png")).toBeLessThan(
       markdown.indexOf("/ctx/media/second.png"),
