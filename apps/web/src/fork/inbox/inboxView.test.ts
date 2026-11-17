@@ -17,6 +17,7 @@ import {
   minuteToMs,
   matchesFilter,
   quoteOf,
+  quoteOfMessage,
   replyLine,
   shortLink,
   topicsOf,
@@ -194,6 +195,13 @@ describe("conversationRows", () => {
         attachments: [{ key: "k", kind: "image", name: "x.png" }],
       }),
     ).toBe("Sam: [Image]");
+    const forward = {
+      ...message("c"),
+      text: "Jordan 12:20: the export failed",
+      richSummary: "Forwarded · 2 messages",
+    };
+    expect(replyLine(forward)).toBe("Sam: Forwarded · 2 messages");
+    expect(quoteOfMessage(forward)).toBe("Sam: Forwarded · 2 messages");
   });
 
   it("cuts a quote at 40 characters", () => {

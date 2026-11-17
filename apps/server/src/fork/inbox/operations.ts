@@ -1216,7 +1216,7 @@ export function delegateExclusively<E1, R1, E2, R2>(input: {
 
 const clipPreview = (message: MessageType | undefined) =>
   Array.from(
-    (message?.text.trim() || message?.richSummary || message?.attachments[0]?.name || "")
+    (message?.richSummary || message?.text.trim() || message?.attachments[0]?.name || "")
       .replace(/\s+/g, " ")
       .trim(),
   )
