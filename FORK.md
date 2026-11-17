@@ -236,7 +236,6 @@ Review this list after every sync, and upstream whatever upstream would take.
 | agy CLI state stays in the instance profile            | `antigravityAuthSupport.ts`, driver      | Yes                            |
 | Antigravity subagent continuation                      | `AntigravityTurnOutcome.ts`, adapter     | Upstream PR #30083             |
 | agy 1.5.5 subagents and transcripts                    | `AntigravityChildWork.ts`, protocol      | Yes                            |
-| System prompt append from agy's advertised capability  | `AntigravityAcpSupport.ts`               | Yes                            |
 | Quota from agy's own sign-in                           | `antigravityUsageLimits.ts`              | Yes                            |
 | agy full access and accept-edits modes                 | Antigravity support, ACP adapter         | Yes                            |
 | agy Auto mode with its own review                      | Antigravity provider, support, adapter   | Yes                            |
