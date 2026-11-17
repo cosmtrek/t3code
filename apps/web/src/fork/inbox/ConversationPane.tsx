@@ -100,6 +100,8 @@ const LOAD_OLDER_PX = 200;
 const AT_BOTTOM_PX = 24;
 /** How many older pages to read looking for a delegation's first message before giving up. */
 const FIND_FOCUS_PAGES = 5;
+/** A same-author message this soon after the last one reads as its continuation. */
+const CONTINUED_WITHIN_MS = 5 * 60_000;
 
 const isAtBottom = (container: HTMLElement) =>
   container.scrollHeight - container.scrollTop - container.clientHeight < AT_BOTTOM_PX;
@@ -465,28 +467,38 @@ function ConversationMessages({
     previous: ConversationRow | undefined,
     later: ReadonlyArray<ConversationRow>,
     rootId: string | null = null,
-  ) => (
-    <li
-      key={row.message.id}
-      data-message-id={row.message.id}
-      className={cn(
-        "group/message relative flex min-w-0 scroll-mt-4 flex-col rounded-lg px-1 py-1",
-        focusRing(row),
-      )}
-    >
-      <MessageView
-        environmentId={environmentId}
-        channelId={conversation.channelId}
-        message={row.message}
-        showAuthor={previous?.message.author.id !== row.message.author.id}
-        // Under its root, a reply to the root itself needs no quote.
-        quote={rootId !== null && row.message.replyTo?.id === rootId ? null : row.quote}
-        toolbar={toolbarFor(row, later)}
+  ) => {
+    const sameAuthor = previous?.message.author.id === row.message.author.id;
+    const continued =
+      sameAuthor &&
+      Date.parse(row.message.createdAt) - Date.parse(previous!.message.createdAt) <
+        CONTINUED_WITHIN_MS;
+    return (
+      <li
+        key={row.message.id}
+        data-message-id={row.message.id}
+        className={cn(
+          "group/message relative flex min-w-0 scroll-mt-4 flex-col rounded-lg px-1 py-1",
+          // Speakers part with a gap; one speaker's run stays tight.
+          previous === undefined ? null : sameAuthor ? "mt-0.5" : "mt-4",
+          focusRing(row),
+        )}
       >
-        {chipsFor(row)}
-      </MessageView>
-    </li>
-  );
+        <MessageView
+          environmentId={environmentId}
+          channelId={conversation.channelId}
+          message={row.message}
+          showAuthor={!sameAuthor}
+          continued={continued}
+          // Under its root, a reply to the root itself needs no quote.
+          quote={rootId !== null && row.message.replyTo?.id === rootId ? null : row.quote}
+          toolbar={toolbarFor(row, later)}
+        >
+          {chipsFor(row)}
+        </MessageView>
+      </li>
+    );
+  };
 
   /** A topic group's message: the post, or a reply inside it, with its actions at its corner. */
   const postBlock = (
@@ -626,7 +638,7 @@ function ConversationMessages({
       {conversation.kind === "topic_group" ? (
         <ol className="flex flex-col gap-3 px-3 py-3">{topicsOf(rows).map(topic)}</ol>
       ) : (
-        <ol className="flex flex-col gap-3 px-3 py-3">
+        <ol className="flex flex-col px-3 py-3">
           {rows.map((row, index) => {
             const open = isOpen(row.message.id, row.thread);
             const replies = row.thread.length;
@@ -634,7 +646,7 @@ function ConversationMessages({
               <Fragment key={row.message.id}>
                 {item(row, rows[index - 1], rows.slice(index + 1))}
                 {replies > 0 ? (
-                  <li className="flex min-w-0 flex-col gap-2 ps-1">
+                  <li className="mt-1 flex min-w-0 flex-col gap-2 ps-1">
                     <span>
                       <Button
                         size="xs"
@@ -650,7 +662,7 @@ function ConversationMessages({
                       </Button>
                     </span>
                     {open ? (
-                      <ol className="ms-2 flex flex-col gap-3 border-s border-border/70 ps-2">
+                      <ol className="ms-2 flex flex-col border-s border-border/70 ps-2">
                         {row.thread.map((reply, at) =>
                           item(reply, row.thread[at - 1], row.thread.slice(at + 1), row.message.id),
                         )}

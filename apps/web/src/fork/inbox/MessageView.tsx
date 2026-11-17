@@ -3,6 +3,7 @@ import type { DeviceHubAccess } from "@t3tools/client-runtime/state/deviceHubAcc
 import { DownloadIcon, ExternalLinkIcon, LinkIcon } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
+import { ExpandedImageDialog } from "../../components/chat/ExpandedImageDialog";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../../components/ui/tooltip";
 import { cn } from "../../lib/utils";
 import { forkUrl, renewForkAccess, renewStaleForkAccess, useForkAccess } from "../forkApiAccess";
@@ -15,6 +16,7 @@ export function MessageView({
   channelId,
   message,
   showAuthor,
+  continued = false,
   quote,
   children,
   toolbar,
@@ -24,6 +26,8 @@ export function MessageView({
   readonly channelId: string;
   readonly message: InboxMessage;
   readonly showAuthor: boolean;
+  /** Follows the same author's message closely, so it drops its header as the chat app does. */
+  readonly continued?: boolean;
   /** The message this one answers, shown above it as the chat app does. */
   readonly quote?: string | null;
   /** Shown under the message, such as the delegations that start there. */
@@ -66,7 +70,12 @@ export function MessageView({
           {toolbar}
         </div>
       ) : null}
-      <header className="flex min-w-0 items-baseline gap-2 text-xs text-muted-foreground">
+      <header
+        className={cn(
+          "flex min-w-0 items-baseline gap-2 text-xs text-muted-foreground",
+          continued && !message.mentionsSelf && "sr-only",
+        )}
+      >
         {showAuthor && (post || !self) ? (
           <span className="truncate font-medium text-foreground">
             {nameOrUnknown(message.author.name)}
@@ -323,22 +332,39 @@ function MediaImage({
 }) {
   const [renewed, setRenewed] = useState(false);
   const [failed, setFailed] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   if (failed)
     return <span className="text-xs text-muted-foreground">Image: {alt} (not loaded)</span>;
+  const src = forkUrl(access, path);
   return (
-    <img
-      alt={alt}
-      loading="lazy"
-      className="max-h-72 max-w-full rounded-xl border border-border/60 object-contain"
-      src={forkUrl(access, path)}
-      onError={() => {
-        if (renewed) {
-          setFailed(true);
-          return;
-        }
-        setRenewed(true);
-        renewForkAccess(environmentId);
-      }}
-    />
+    <>
+      <button
+        type="button"
+        aria-label={`Expand ${alt}`}
+        className="max-w-full cursor-zoom-in rounded-xl"
+        onClick={() => setExpanded(true)}
+      >
+        <img
+          alt={alt}
+          loading="lazy"
+          className="max-h-72 max-w-full rounded-xl border border-border/60 object-contain"
+          src={src}
+          onError={() => {
+            if (renewed) {
+              setFailed(true);
+              return;
+            }
+            setRenewed(true);
+            renewForkAccess(environmentId);
+          }}
+        />
+      </button>
+      {expanded ? (
+        <ExpandedImageDialog
+          preview={{ images: [{ src, name: alt }], index: 0 }}
+          onClose={() => setExpanded(false)}
+        />
+      ) : null}
+    </>
   );
 }

@@ -198,7 +198,7 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
     inbox.channels.find((candidate) => candidate.id === channelId) ??
     inbox.channels.find((candidate) => candidate.access.read) ??
     inbox.channels[0]!;
-  const [view, setView] = useState<InboxView>("unread");
+  const [view, setView] = useState<InboxView>("agent");
   const [filter, setFilter] = useState<InboxFilter>("all");
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [delegationId, setDelegationId] = useState<string | null>(null);
