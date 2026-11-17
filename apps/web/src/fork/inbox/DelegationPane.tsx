@@ -1,5 +1,6 @@
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { ThreadId, type EnvironmentId } from "@t3tools/contracts";
+import { CHAT_USER_MARKDOWN_REMARK_PLUGINS } from "@t3tools/shared/markdownPipeline";
 import { ChevronDownIcon } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
@@ -237,15 +238,30 @@ function FollowUpEntry({
         entry.text.length > 0 ? (
           <>
             <span className="text-2xs font-medium text-muted-foreground">Draft reply</span>
-            <p className="text-sm whitespace-pre-wrap wrap-anywhere">{entry.text}</p>
+            <UserText text={entry.text} cwd={cwd} />
           </>
         ) : (
           <p className="text-sm text-muted-foreground">Draft a reply</p>
         )
       ) : (
-        <p className="text-sm whitespace-pre-wrap wrap-anywhere">{entry.text}</p>
+        <UserText text={entry.text} cwd={cwd} />
       )}
     </div>
+  );
+}
+
+/** What the user asked, rendered like their messages in chat so quotes show as cards. */
+function UserText({ text, cwd }: { readonly text: string; readonly cwd: string | undefined }) {
+  return (
+    <ChatMarkdown
+      text={text}
+      cwd={cwd}
+      className="text-sm wrap-anywhere"
+      lineBreaks
+      parseRawHtml={false}
+      extraRemarkPlugins={CHAT_USER_MARKDOWN_REMARK_PLUGINS}
+      headingLevelOffset={3}
+    />
   );
 }
 
