@@ -94,6 +94,32 @@ function storeEnvironment(environmentId: string) {
   }
 }
 
+interface RememberedView {
+  readonly channelId: string | null;
+  readonly view: InboxView;
+  readonly filter: InboxFilter;
+  readonly conversationId: string | null;
+  readonly opened: { readonly id: string; readonly newSince: string | null };
+  readonly heldId: string | null;
+  readonly delegationId: string | null;
+}
+
+// Leaving the page unmounts it; coming back opens it where it was left, per environment.
+const rememberedViews = new Map<string, Partial<RememberedView>>();
+
+function useRemembered(environmentId: string) {
+  const [state, setState] = useState(() => rememberedViews.get(environmentId) ?? {});
+  return <K extends keyof RememberedView>(key: K, initial: RememberedView[K]) =>
+    [
+      (key in state ? state[key] : initial) as RememberedView[K],
+      (value: RememberedView[K]) => {
+        const next = { ...rememberedViews.get(environmentId), [key]: value };
+        rememberedViews.set(environmentId, next);
+        setState(next);
+      },
+    ] as const;
+}
+
 export function InboxPage() {
   const inboxes = useInboxOverviews({ followSync: true });
   const [chosenEnvironment, setChosenEnvironment] = useState<string | null>(readStoredEnvironment);
@@ -193,22 +219,20 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
     maxWidth: 720,
     edge: "left",
   });
-  const [channelId, setChannelId] = useState<string | null>(null);
+  const remember = useRemembered(environmentId);
+  const [channelId, setChannelId] = remember("channelId", null);
   const channel =
     inbox.channels.find((candidate) => candidate.id === channelId) ??
     inbox.channels.find((candidate) => candidate.access.read) ??
     inbox.channels[0]!;
-  const [view, setView] = useState<InboxView>("agent");
-  const [filter, setFilter] = useState<InboxFilter>("all");
-  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [view, setView] = remember("view", "agent");
+  const [filter, setFilter] = remember("filter", "all");
+  const [conversationId, setConversationId] = remember("conversationId", null);
   // Opening reads the conversation, so where its new messages start is taken before that.
-  const [opened, setOpened] = useState<{ readonly id: string; readonly newSince: string | null }>({
-    id: "",
-    newSince: null,
-  });
+  const [opened, setOpened] = remember("opened", { id: "", newSince: null });
   // The conversation opened from Unread stays listed there until the view changes.
-  const [heldId, setHeldId] = useState<string | null>(null);
-  const [delegationId, setDelegationId] = useState<string | null>(null);
+  const [heldId, setHeldId] = remember("heldId", null);
+  const [delegationId, setDelegationId] = remember("delegationId", null);
   const [delegating, setDelegating] = useState<DelegateTarget | null>(null);
   const [replyRequest, setReplyRequest] = useState<ReplyRequest | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
