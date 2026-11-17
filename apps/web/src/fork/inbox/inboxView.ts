@@ -101,24 +101,19 @@ export function agentSignalsByConversation(
 }
 
 /**
- * Whether the conversation belongs in Unread or All. The selected one stays in Unread once
- * opened, so reading it does not pull it out from under the pointer.
+ * Whether the conversation belongs in Unread or All. Unread is people's messages; agent results
+ * live in the Agent view. The held one, opened from Unread, stays there once read, so reading it
+ * does not pull it out from under the pointer.
  */
 export function inView(
   view: Exclude<InboxView, "agent">,
   filter: InboxFilter,
   conversation: Pick<InboxConversation, "id" | "kind" | "unread" | "mentioned">,
-  agent: AgentSignals | undefined,
-  selectedId: string | null = null,
+  heldId: string | null = null,
 ): boolean {
   if (!matchesFilter(filter, conversation.kind)) return false;
   if (view === "all") return true;
-  return (
-    conversation.unread ||
-    conversation.mentioned ||
-    (agent?.unseen ?? 0) > 0 ||
-    conversation.id === selectedId
-  );
+  return conversation.unread || conversation.mentioned || conversation.id === heldId;
 }
 
 const QUOTE_CHARS = 40;
