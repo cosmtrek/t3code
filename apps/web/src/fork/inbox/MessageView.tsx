@@ -125,7 +125,7 @@ export function MessageView({
                     />
                   }
                 >
-                  <LinkIcon className="size-3 shrink-0" />
+                  <LinkIcon className="size-3.5 shrink-0" />
                   <span className="truncate">{shortLink(link)}</span>
                 </TooltipTrigger>
                 <TooltipPopup side="top" className="max-w-md break-all">
@@ -233,7 +233,7 @@ export function MessageView({
           {formatTimestamp(message.createdAt)}
         </time>
         {message.mentionsSelf && !selfMarked ? (
-          <span className="shrink-0 font-medium text-info-foreground">@you</span>
+          <span className="shrink-0 font-medium text-primary">@you</span>
         ) : null}
       </header>
       {frame === "none" ? (
@@ -328,7 +328,7 @@ function RichCard({
   const canExpand = body.length > 160 || body.split("\n").length > 3;
   return (
     <div className="flex max-w-full min-w-0 flex-col gap-1">
-      <p className="border-s-2 border-warning ps-2 font-medium leading-tight whitespace-pre-wrap wrap-anywhere">
+      <p className="border-s-2 border-border ps-2 font-medium leading-tight whitespace-pre-wrap wrap-anywhere">
         {title}
       </p>
       {body ? (
@@ -361,7 +361,7 @@ function RichCard({
               target="_blank"
               rel="noreferrer noopener"
             >
-              Open in app <ExternalLinkIcon className="size-3" />
+              Open in app <ExternalLinkIcon className="size-3.5" />
             </a>
           ) : null}
         </div>

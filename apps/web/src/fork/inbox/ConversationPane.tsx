@@ -4,9 +4,10 @@ import {
   ArrowLeftIcon,
   BellOffIcon,
   BotIcon,
+  ChevronDownIcon,
   ExternalLinkIcon,
   MessageSquareReplyIcon,
-  MessageSquareTextIcon,
+  MessageSquareIcon,
   PaperclipIcon,
   ReplyIcon,
   XIcon,
@@ -209,7 +210,10 @@ export function ConversationPane({
         <div className="flex min-w-0 flex-1 items-center gap-1.5 px-1">
           <h2 className="truncate text-xs font-medium">{nameOrUnknown(conversation.name)}</h2>
           {conversation.muted ? (
-            <BellOffIcon className="size-3 shrink-0 text-muted-foreground/70" aria-label="Muted" />
+            <BellOffIcon
+              className="size-3.5 shrink-0 text-muted-foreground/70"
+              aria-label="Muted"
+            />
           ) : null}
         </div>
         <ConversationDelegationsControl
@@ -276,26 +280,25 @@ function ConversationDelegationsControl({
   const raw = agentSignalsFor(delegations);
   const signals = raw.live > 0 ? raw : { ...raw, live: delegations.length };
   const active = delegations.some((delegation) => delegation.id === selectedDelegationId);
-  const triggerClassName = cn(
-    "inline-flex shrink-0 cursor-pointer items-center rounded-md px-2 py-1 text-xs hover:bg-accent",
-    active && "bg-accent",
-  );
   if (delegations.length === 1) {
     const only = delegations[0]!;
     return (
-      <button
-        type="button"
-        className={triggerClassName}
-        aria-pressed={selectedDelegationId === only.id}
-        onClick={() => (selectedDelegationId === only.id ? onClose() : onSelect(only))}
+      <Button
+        size="xs"
+        variant="ghost"
+        aria-pressed={active}
+        data-pressed={active ? "" : undefined}
+        onClick={() => (active ? onClose() : onSelect(only))}
       >
         <AgentBadge signals={signals} />
-      </button>
+      </Button>
     );
   }
   return (
     <Menu>
-      <MenuTrigger render={<button type="button" className={triggerClassName} />}>
+      <MenuTrigger
+        render={<Button size="xs" variant="ghost" data-pressed={active ? "" : undefined} />}
+      >
         <AgentBadge signals={signals} />
       </MenuTrigger>
       <MenuPopup align="end">
@@ -612,14 +615,17 @@ function ConversationMessages({
           <div className="flex min-w-0 flex-col gap-1 rounded-md bg-muted px-3 py-2">
             {open ? (
               <>
-                <button
-                  type="button"
+                <Button
+                  size="xs"
+                  variant="ghost-muted"
+                  className="self-start"
                   aria-expanded
-                  className="self-start text-xs text-muted-foreground hover:text-foreground"
                   onClick={() => toggle(id)}
                 >
+                  <MessageSquareIcon />
                   Hide replies
-                </button>
+                  <ChevronDownIcon className="rotate-180" />
+                </Button>
                 <div className="flex min-w-0 flex-col gap-3 pt-1">
                   {replies.map((reply, at) => postBlock(reply, replies.slice(at + 1), id))}
                 </div>
@@ -627,17 +633,20 @@ function ConversationMessages({
             ) : (
               <>
                 {earlier > 0 ? (
-                  <button
-                    type="button"
+                  <Button
+                    size="xs"
+                    variant="ghost-muted"
+                    className="self-start"
                     aria-expanded={false}
-                    className="self-start text-xs text-muted-foreground hover:text-foreground"
                     onClick={() => toggle(id)}
                   >
+                    <MessageSquareIcon />
                     {earlier} earlier {earlier === 1 ? "reply" : "replies"}
                     {replies.slice(0, earlier).some((reply) => reply.message.mentionsSelf) ? (
-                      <span className="text-warning"> · mentions you</span>
+                      <Badge size="sm">@you</Badge>
                     ) : null}
-                  </button>
+                    <ChevronDownIcon />
+                  </Button>
                 ) : null}
                 {folded.map((reply) => (
                   <button
@@ -645,7 +654,7 @@ function ConversationMessages({
                     type="button"
                     className={cn(
                       "min-w-0 truncate text-left text-sm text-foreground/90 hover:text-foreground",
-                      reply.message.mentionsSelf && "text-warning",
+                      reply.message.mentionsSelf && "text-primary",
                     )}
                     onClick={() => toggle(id)}
                   >
@@ -745,20 +754,22 @@ function ConversationMessages({
                   )}
                   {row.thread.length > 0 ? (
                     <li className="mt-0.5 flex min-w-0 flex-col gap-2 ps-1">
-                      <button
-                        type="button"
-                        className="inline-flex items-center gap-1 self-start rounded-sm px-1 text-xs text-info-foreground hover:underline"
+                      <Button
+                        size="xs"
+                        variant="ghost-muted"
+                        className="self-start"
                         aria-expanded={open}
                         onClick={() => toggle(row.message.id)}
                       >
-                        <MessageSquareTextIcon className="size-3.5" />
+                        <MessageSquareIcon />
                         {open
                           ? "Hide replies"
                           : `${replies} ${replies === 1 ? "reply" : "replies"}`}
                         {!open && row.thread.some((reply) => reply.message.mentionsSelf) ? (
-                          <span className="font-medium"> · mentions you</span>
+                          <Badge size="sm">@you</Badge>
                         ) : null}
-                      </button>
+                        <ChevronDownIcon className={cn(open && "rotate-180")} />
+                      </Button>
                       {open ? (
                         <ol className="ms-2 flex flex-col border-s border-border/70 ps-2">
                           {row.thread.map((reply, at) =>
@@ -813,12 +824,8 @@ function DelegationChip({
   const live =
     delegation.thread !== null && delegation.thread.detachedAt === null ? delegation.thread : null;
   return (
-    <button
-      type="button"
-      className="inline-flex items-center gap-1.5 rounded-md border border-border/70 px-1.5 py-0.5 hover:bg-accent"
-      onClick={() => onSelect(delegation)}
-    >
-      <BotIcon className={cn("size-3", delegation.agentUnseen && "text-primary")} />
+    <Button size="xs" variant="outline" onClick={() => onSelect(delegation)}>
+      <BotIcon className={cn(delegation.agentUnseen && "text-primary")} />
       {live ? (
         <ThreadStatus
           environmentId={environmentId}
@@ -828,7 +835,7 @@ function DelegationChip({
       ) : (
         <DelegationOutcome delegation={delegation} idle="Delegated" />
       )}
-    </button>
+    </Button>
   );
 }
 
@@ -1126,7 +1133,7 @@ function Composer({
           ) : (
             <span className="flex-1" />
           )}
-          {fromDraft ? <Badge variant="info">Draft</Badge> : null}
+          {fromDraft ? <Badge variant="success">Draft</Badge> : null}
         </div>
       ) : null}
       <Textarea

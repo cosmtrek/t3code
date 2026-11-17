@@ -8,8 +8,8 @@ import {
   ExternalLinkIcon,
   InboxIcon,
   ListFilterIcon,
+  MessageSquareIcon,
   MessagesSquareIcon,
-  PlugZapIcon,
   XIcon,
 } from "lucide-react";
 import { useRef, useState, type CSSProperties, type ReactNode } from "react";
@@ -166,7 +166,7 @@ export function InboxPage() {
           <EnvironmentInboxView key={inbox.environmentId} inbox={inbox} />
         ) : (
           <InboxEmpty
-            icon={<PlugZapIcon />}
+            icon={<MessagesSquareIcon />}
             title="No channels"
             description="Enable a channel on a connected environment."
             settingsLink
@@ -338,7 +338,7 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
 
   let list: ReactNode;
   if (!channel.access.read) {
-    list = <InboxEmpty icon={<PlugZapIcon />} title="Channel unavailable" settingsLink />;
+    list = <InboxEmpty icon={<MessagesSquareIcon />} title="Channel unavailable" settingsLink />;
   } else if (listing.data === null && listing.error) {
     list = <ReadError message={listing.error.message} onRetry={() => void listing.refresh()} />;
   } else if (listing.data === null) {
@@ -556,7 +556,7 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
           />
         ) : delegationOpen ? null : (
           <section className="hidden min-h-0 min-w-0 flex-1 flex-col @2xl/inbox:flex">
-            <InboxEmpty icon={<MessagesSquareIcon />} title="No conversation selected" />
+            <InboxEmpty icon={<MessageSquareIcon />} title="No conversation selected" />
           </section>
         )}
 
