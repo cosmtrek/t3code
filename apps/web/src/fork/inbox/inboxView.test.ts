@@ -24,6 +24,7 @@ import {
   replyModes,
   shortLink,
   topicsOf,
+  unreadMessageCount,
 } from "./inboxView";
 
 describe("emptyViewTitle", () => {
@@ -39,8 +40,8 @@ describe("emptyViewTitle", () => {
 });
 
 describe("inView", () => {
-  const conversation = (unread: boolean, mentioned = false) =>
-    ({ id: "c", kind: "group", unread, mentioned }) as InboxConversation;
+  const conversation = (unread: boolean, mentioned = false, muted = false) =>
+    ({ id: "c", kind: "group", unread, mentioned, muted }) as InboxConversation;
 
   it("lists in Unread what has new messages or a mention", () => {
     expect(inView("unread", "all", conversation(true))).toBe(true);
@@ -49,10 +50,42 @@ describe("inView", () => {
     expect(inView("all", "all", conversation(false))).toBe(true);
   });
 
+  it("lists a muted conversation in Unread only when it mentions you", () => {
+    expect(inView("unread", "all", conversation(true, false, true))).toBe(false);
+    expect(inView("unread", "all", conversation(true, true, true))).toBe(true);
+    expect(inView("all", "all", conversation(true, false, true))).toBe(true);
+  });
+
   it("keeps the held conversation in Unread after it is read, and only that one", () => {
     expect(inView("unread", "all", conversation(false), "c")).toBe(true);
     expect(inView("unread", "all", conversation(false), "other")).toBe(false);
     expect(inView("unread", "dm", conversation(false), "c")).toBe(false);
+  });
+});
+
+describe("unreadMessageCount", () => {
+  it("counts unread messages, 1 without a count, and only the mention when muted", () => {
+    const conversation = (extra: Partial<InboxConversation>) =>
+      ({
+        id: "c",
+        kind: "group",
+        unread: true,
+        mentioned: false,
+        muted: false,
+        ...extra,
+      }) as InboxConversation;
+    expect(
+      unreadMessageCount("all", [
+        conversation({ unreadCount: 12 }),
+        conversation({ unreadCount: null }),
+        conversation({ unreadCount: 0 }),
+        conversation({ unreadCount: 30, muted: true }),
+        conversation({ unreadCount: 30, muted: true, mentioned: true }),
+        conversation({ unread: false, unreadCount: 0 }),
+        conversation({ kind: "dm", unreadCount: 5 }),
+      ]),
+    ).toBe(12 + 1 + 1 + 1 + 5);
+    expect(unreadMessageCount("dm", [conversation({ kind: "dm", unreadCount: 5 })])).toBe(5);
   });
 });
 

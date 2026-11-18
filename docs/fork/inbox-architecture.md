@@ -156,4 +156,8 @@ last looked. Each mark moves forward only and compares with one kind of time:
 The client reports reads; fetching never does, since polls and background tabs fetch too. A
 message that arrives while a conversation is open stays unread until the user acts on it again.
 The sidebar badge counts unread DMs, groups with an unread mention, and unseen agent results;
-groups with only new messages show in Unread but are not counted.
+groups with only new messages show in Unread but are not counted. It means "waiting on me".
+
+The Unread view follows the chat app instead: a muted conversation shows there only when it
+mentions me, and the tab counts unread messages, using the adapter's `unreadCount` and 1 when it
+has none. A muted conversation counts only its mention. All lists muted conversations as usual.

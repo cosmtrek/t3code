@@ -102,18 +102,41 @@ export function agentSignalsByConversation(
 
 /**
  * Whether the conversation belongs in Unread or All. Unread is people's messages; agent results
- * live in the Agent view. The held one, opened from Unread, stays there once read, so reading it
- * does not pull it out from under the pointer.
+ * live in the Agent view. A muted conversation shows there only when it mentions you, as in the
+ * chat app. The held one, opened from Unread, stays there once read, so reading it does not pull
+ * it out from under the pointer.
  */
 export function inView(
   view: Exclude<InboxView, "agent">,
   filter: InboxFilter,
-  conversation: Pick<InboxConversation, "id" | "kind" | "unread" | "mentioned">,
+  conversation: Pick<InboxConversation, "id" | "kind" | "unread" | "mentioned" | "muted">,
   heldId: string | null = null,
 ): boolean {
   if (!matchesFilter(filter, conversation.kind)) return false;
   if (view === "all") return true;
-  return conversation.unread || conversation.mentioned || conversation.id === heldId;
+  return (
+    (conversation.unread && !conversation.muted) ||
+    conversation.mentioned ||
+    conversation.id === heldId
+  );
+}
+
+/**
+ * The Unread tab's number: unread messages, as the chat app counts them. A conversation without a
+ * count counts 1, a muted one counts only its mention, and the held one is already read.
+ */
+export function unreadMessageCount(
+  filter: InboxFilter,
+  conversations: ReadonlyArray<
+    Pick<InboxConversation, "id" | "kind" | "unread" | "mentioned" | "muted" | "unreadCount">
+  >,
+): number {
+  let total = 0;
+  for (const conversation of conversations) {
+    if (!inView("unread", filter, conversation)) continue;
+    total += conversation.muted ? 1 : Math.max(conversation.unreadCount ?? 0, 1);
+  }
+  return total;
 }
 
 const QUOTE_CHARS = 40;
