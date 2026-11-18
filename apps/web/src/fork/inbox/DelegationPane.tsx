@@ -1,11 +1,19 @@
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { ThreadId, type EnvironmentId } from "@t3tools/contracts";
 import { CHAT_USER_MARKDOWN_REMARK_PLUGINS } from "@t3tools/shared/markdownPipeline";
-import { ChevronDownIcon } from "lucide-react";
+import {
+  ChevronDownIcon,
+  CircleAlertIcon,
+  CircleDashedIcon,
+  CircleDotDashedIcon,
+  MessageCircleQuestionIcon,
+  ShieldQuestionIcon,
+  UserRoundIcon,
+} from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import ChatMarkdown from "../../components/ChatMarkdown";
-import { resolveThreadStatusPill } from "../../components/Sidebar.logic";
+import { resolveSidebarRowStatus, type SidebarThreadStatus } from "../../components/Sidebar.logic";
 import { Button } from "../../components/ui/button";
 import { Textarea } from "../../components/ui/textarea";
 import { cn } from "../../lib/utils";
@@ -18,11 +26,32 @@ import { MessageView } from "./MessageView";
 
 /** The sidebar's words, for when the thread is not in this client's sidebar state. */
 const THREAD_STATUS_LABELS: Readonly<Record<LinkedThread["status"], string | null>> = {
-  running: "Working",
+  running: null,
   idle: null,
   archived: "Archived",
   deleted: "Thread deleted",
   unknown: null,
+};
+
+/** The sidebar row's status words, icons and colors, so a thread reads the same in both places. */
+const SIDEBAR_STATUS: Readonly<
+  Record<
+    Exclude<SidebarThreadStatus, "ready">,
+    { label: string; icon: typeof CircleDashedIcon; className: string }
+  >
+> = {
+  preparing: { label: "Setting up", icon: CircleDashedIcon, className: "text-info-foreground" },
+  working: { label: "Working", icon: CircleDashedIcon, className: "text-info-foreground" },
+  waiting: { label: "Waiting", icon: CircleDotDashedIcon, className: "text-muted-foreground" },
+  approval: { label: "Approval", icon: ShieldQuestionIcon, className: "text-warning-foreground" },
+  input: {
+    label: "Input",
+    icon: MessageCircleQuestionIcon,
+    className: "text-indigo-600 dark:text-indigo-300",
+  },
+  request: { label: "Request", icon: UserRoundIcon, className: "text-guest-foreground" },
+  limited: { label: "Limited", icon: CircleAlertIcon, className: "text-warning-foreground" },
+  failed: { label: "Failed", icon: CircleAlertIcon, className: "text-error-foreground" },
 };
 
 /**
@@ -371,7 +400,7 @@ function AgentComposer({
 
 /**
  * The thread's status as the sidebar shows it, live from this client's thread state. A finished
- * thread shows `fallback` instead: the inbox marks unseen results itself, so "Completed" is noise.
+ * thread shows `fallback` instead: the inbox marks unseen results itself, so "Done" is noise.
  */
 export function ThreadStatus({
   environmentId,
@@ -383,12 +412,19 @@ export function ThreadStatus({
   readonly fallback?: ReactNode;
 }) {
   const shell = useThreadShell(scopeThreadRef(environmentId, ThreadId.make(thread.threadId)));
-  const pill = shell ? resolveThreadStatusPill({ thread: shell }) : null;
-  if (pill !== null && pill.label !== "Completed") {
+  const status = shell
+    ? resolveSidebarRowStatus(shell)
+    : thread.status === "running"
+      ? "working"
+      : null;
+  if (status !== null && status !== "ready") {
+    const { label, icon: Icon, className } = SIDEBAR_STATUS[status];
     return (
-      <span className={cn("inline-flex shrink-0 items-center gap-1 text-xs", pill.colorClass)}>
-        <span className={cn("size-1.5 rounded-full", pill.dotClass)} />
-        {pill.label}
+      <span
+        className={cn("inline-flex shrink-0 items-center gap-1 text-xs font-medium", className)}
+      >
+        <Icon aria-hidden className="size-3 shrink-0" />
+        {label}
       </span>
     );
   }

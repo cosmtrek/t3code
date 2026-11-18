@@ -7,7 +7,6 @@ import {
   ChevronDownIcon,
   ExternalLinkIcon,
   MessageSquareReplyIcon,
-  MessageSquareIcon,
   PaperclipIcon,
   ReplyIcon,
   XIcon,
@@ -516,8 +515,7 @@ function ConversationMessages({
         ))}
       </span>
     ) : null;
-  const focusRing = (row: ConversationRow) =>
-    row.message.id === focusMessageId && "bg-accent/40 ring-1 ring-primary/40";
+  const focusRing = (row: ConversationRow) => row.message.id === focusMessageId && "bg-primary/6";
   const isOpen = (id: string, replies: ReadonlyArray<ConversationRow>) => {
     const holdsFocus = replies.some((reply) => reply.message.id === focusMessageId);
     // A thread opens by itself for the message a delegation points at.
@@ -546,9 +544,10 @@ function ConversationMessages({
         key={row.message.id}
         data-message-id={row.message.id}
         className={cn(
-          "group/message relative flex min-w-0 scroll-mt-4 flex-col rounded-lg px-1 py-0.5",
+          // The negative margins take back the padding that gives the highlight room.
+          "group/message relative -mx-2 -mb-1.5 flex min-w-0 scroll-mt-4 flex-col rounded-lg px-3 py-2",
           // Speakers part with a gap; one speaker's run stays tight.
-          previous === undefined ? null : sameAuthor ? "mt-0.5" : "mt-3",
+          previous === undefined ? "-mt-1.5" : sameAuthor ? "-mt-1" : "mt-1.5",
           focusRing(row),
         )}
       >
@@ -579,7 +578,8 @@ function ConversationMessages({
       key={row.message.id}
       data-message-id={row.message.id}
       className={cn(
-        "group/message relative flex min-w-0 scroll-mt-4 flex-col rounded-md",
+        // Padding the margin takes back gives the highlight room without moving the post.
+        "group/message relative -m-2 flex min-w-0 scroll-mt-4 flex-col rounded-lg p-2",
         focusRing(row),
       )}
     >
@@ -594,7 +594,7 @@ function ConversationMessages({
       >
         {chipsFor(row)}
       </MessageView>
-      <div className="absolute -top-1.5 end-0 z-10">{toolbarFor(row, later)}</div>
+      <div className="absolute top-0.5 end-2 z-10">{toolbarFor(row, later)}</div>
     </div>
   );
 
@@ -622,8 +622,7 @@ function ConversationMessages({
                   aria-expanded
                   onClick={() => toggle(id)}
                 >
-                  <MessageSquareIcon />
-                  Hide replies
+                  {earlier + folded.length} {earlier + folded.length === 1 ? "reply" : "replies"}
                   <ChevronDownIcon className="rotate-180" />
                 </Button>
                 <div className="flex min-w-0 flex-col gap-3 pt-1">
@@ -640,7 +639,6 @@ function ConversationMessages({
                     aria-expanded={false}
                     onClick={() => toggle(id)}
                   >
-                    <MessageSquareIcon />
                     {earlier} earlier {earlier === 1 ? "reply" : "replies"}
                     {replies.slice(0, earlier).some((reply) => reply.message.mentionsSelf) ? (
                       <Badge size="sm">@you</Badge>
@@ -753,7 +751,7 @@ function ConversationMessages({
                     rows.slice(index + 1),
                   )}
                   {row.thread.length > 0 ? (
-                    <li className="mt-0.5 flex min-w-0 flex-col gap-2 ps-1">
+                    <li className="mt-1.5 flex min-w-0 flex-col gap-3 ps-1">
                       <Button
                         size="xs"
                         variant="ghost-muted"
@@ -761,10 +759,7 @@ function ConversationMessages({
                         aria-expanded={open}
                         onClick={() => toggle(row.message.id)}
                       >
-                        <MessageSquareIcon />
-                        {open
-                          ? "Hide replies"
-                          : `${replies} ${replies === 1 ? "reply" : "replies"}`}
+                        {replies} {replies === 1 ? "reply" : "replies"}
                         {!open && row.thread.some((reply) => reply.message.mentionsSelf) ? (
                           <Badge size="sm">@you</Badge>
                         ) : null}
@@ -824,8 +819,10 @@ function DelegationChip({
   const live =
     delegation.thread !== null && delegation.thread.detachedAt === null ? delegation.thread : null;
   return (
-    <Button size="xs" variant="outline" onClick={() => onSelect(delegation)}>
-      <BotIcon className={cn(delegation.agentUnseen && "text-primary")} />
+    <Button size="xs" variant="ghost-muted" onClick={() => onSelect(delegation)}>
+      {delegation.agentUnseen ? (
+        <span role="img" aria-label="New result" className="size-1.5 rounded-full bg-primary" />
+      ) : null}
       {live ? (
         <ThreadStatus
           environmentId={environmentId}
@@ -860,7 +857,8 @@ function MessageToolbar({
         disabled={readOnly}
         onClick={() => onReply(both ? "quote" : (replyModes?.[0] ?? null))}
       >
-        <ReplyIcon />
+        {/* An open arrow reads smaller than the framed glyphs beside it. */}
+        <ReplyIcon className="size-4" />
       </IconAction>
       {both ? (
         <IconAction label="Reply in thread" disabled={readOnly} onClick={() => onReply("thread")}>
