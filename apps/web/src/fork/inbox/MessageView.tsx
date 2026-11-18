@@ -205,11 +205,6 @@ export function MessageView({
             ],
       )}
     >
-      {toolbar ? (
-        <div className={cn("absolute -top-1.5 z-10", atEnd ? "end-full me-1" : "start-full ms-1")}>
-          {toolbar}
-        </div>
-      ) : null}
       <header
         className={cn(
           "flex min-w-0 items-baseline gap-2 text-xs text-muted-foreground",
@@ -218,7 +213,7 @@ export function MessageView({
         )}
       >
         {showAuthor && (post || !atEnd) ? (
-          <span className={cn("truncate", post && "font-medium text-foreground")}>
+          <span className="truncate font-medium text-foreground">
             {nameOrUnknown(message.author.name)}
           </span>
         ) : null}
@@ -236,30 +231,38 @@ export function MessageView({
           <span className="shrink-0 font-medium text-primary">@you</span>
         ) : null}
       </header>
-      {frame === "none" ? (
-        <>
-          {quote ? <QuoteLine text={quote} /> : null}
-          {body}
-        </>
-      ) : (
-        // Quote, content, and media are one message, so they share one frame as the chat app draws it.
-        <div
-          className={cn(
-            "flex max-w-full min-w-0 flex-col items-start gap-1.5 text-sm",
-            frame === "dashed"
-              ? "rounded-lg border border-dashed border-border/70 px-3 py-1.5"
-              : [
-                  "rounded-lg px-3 py-2",
-                  frame === "self"
-                    ? "bg-primary/12 text-foreground"
-                    : "bg-message text-message-foreground",
-                ],
-          )}
-        >
-          {quote ? <QuoteLine text={quote} /> : null}
-          {body}
-        </div>
-      )}
+      {/* The toolbar sits level with the bubble's top, not the name above it. */}
+      <div className="relative max-w-full min-w-0">
+        {toolbar ? (
+          <div className={cn("absolute top-0 z-10", atEnd ? "end-full me-1" : "start-full ms-1")}>
+            {toolbar}
+          </div>
+        ) : null}
+        {frame === "none" ? (
+          <>
+            {quote ? <QuoteLine text={quote} /> : null}
+            {body}
+          </>
+        ) : (
+          // Quote, content, and media are one message, so they share one frame as the chat app draws it.
+          <div
+            className={cn(
+              "flex max-w-full min-w-0 flex-col items-start gap-1.5 text-sm",
+              frame === "dashed"
+                ? "rounded-lg border border-dashed border-border/70 px-3 py-1.5"
+                : [
+                    "rounded-lg px-3 py-2",
+                    frame === "self"
+                      ? "bg-primary/12 text-foreground"
+                      : "bg-message text-message-foreground",
+                  ],
+            )}
+          >
+            {quote ? <QuoteLine text={quote} /> : null}
+            {body}
+          </div>
+        )}
+      </div>
       {children}
     </article>
   );
