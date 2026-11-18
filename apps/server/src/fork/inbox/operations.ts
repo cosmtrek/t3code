@@ -431,7 +431,6 @@ export interface InboxConversation extends ConversationState {
   readonly lastMessage: ConversationType["lastMessage"];
   /** Notifications are off for it in the chat app. */
   readonly muted: boolean;
-  readonly unreadCount: number | null;
 }
 
 export interface InboxDelegation {
@@ -563,7 +562,6 @@ const computeChannel = Effect.fn("ForkInbox.computeChannel")(function* (channelI
           lastActivityAt: conversation.lastActivityAt,
           lastMessage: conversation.lastMessage,
           muted: conversation.muted,
-          unreadCount: conversation.unreadCount ?? null,
         }) satisfies InboxConversation,
     )
     .toSorted(compareConversations);

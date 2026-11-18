@@ -123,6 +123,32 @@ describe("deriveConversation", () => {
       }),
       { unread: true, readThroughAt: hoursAgo(2) },
     ],
+    [
+      "the chat app's count holds while T3 has read no further than the chat app",
+      facts({
+        read: seen(hoursAgo(3)),
+        conversation: conversation({ selfReadThroughAt: hoursAgo(3), unreadCount: 4 }),
+      }),
+      { unread: true, unreadCount: 4 },
+    ],
+    [
+      "the count holds when neither side read it",
+      facts({ conversation: conversation({ unreadCount: 4 }) }),
+      { unread: true, unreadCount: 4 },
+    ],
+    [
+      "reading further in T3 makes the chat app's count unknown",
+      facts({
+        read: seen(hoursAgo(2)),
+        conversation: conversation({ selfReadThroughAt: hoursAgo(3), unreadCount: 4 }),
+      }),
+      { unread: true, unreadCount: null },
+    ],
+    [
+      "a T3 read with no chat app read point makes the count unknown",
+      facts({ read: seen(hoursAgo(2)), conversation: conversation({ unreadCount: 4 }) }),
+      { unread: true, unreadCount: null },
+    ],
   ] as const)("%s", (_name, input, expected) => {
     expect(deriveConversation(input)).toMatchObject(expected);
   });
