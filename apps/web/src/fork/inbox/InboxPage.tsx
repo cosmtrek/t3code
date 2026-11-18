@@ -65,7 +65,6 @@ import {
   draftReplyMode,
   emptyViewTitle,
   inView,
-  unreadMessageCount,
   matchesFilter,
   replyModes,
   skippedNotice,
@@ -389,7 +388,7 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
     option === "agent"
       ? visibleDelegations.filter((candidate) => candidate.agentUnseen || candidate.hasDraft).length
       : option === "unread"
-        ? unreadMessageCount(filter, conversations)
+        ? conversations.filter((candidate) => inView("unread", filter, candidate)).length
         : 0;
   const delegationOpen = delegation !== null;
   const conversationShown = conversation !== null;
