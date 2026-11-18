@@ -100,7 +100,7 @@ export function ConversationMenu({
   );
 }
 
-/** The agent's state on a conversation row: unseen results first, then drafts, then threads. */
+/** The agent's state on a conversation: unseen results first, then drafts, then threads. */
 export function AgentBadge({ signals }: { readonly signals: AgentSignals | undefined }) {
   if (signals === undefined || signals.live === 0) return null;
   const label =
@@ -190,7 +190,7 @@ function ConversationRow({
       </div>
       <div
         className={cn(
-          "group/row relative flex min-w-0 touch-pan-y items-start gap-1.5 py-2 pr-2.5 pl-1",
+          "group/row relative flex min-w-0 touch-pan-y items-start px-2.5 py-2",
           selected ? "bg-accent" : "bg-background pointer-fine:hover:bg-accent/50",
           !dragging && "motion-safe:transition-transform motion-safe:duration-150",
         )}
@@ -200,18 +200,6 @@ function ConversationRow({
         onPointerUp={onPointerEnd}
         onPointerCancel={onPointerEnd}
       >
-        <span
-          className={cn(
-            "mt-[7px] size-1.5 shrink-0 rounded-full",
-            !conversation.unread
-              ? "bg-transparent"
-              : conversation.muted
-                ? "bg-muted-foreground/50"
-                : "bg-primary",
-          )}
-          role={conversation.unread ? "img" : undefined}
-          aria-label={conversation.unread ? "Unread" : undefined}
-        />
         <button
           type="button"
           className="flex min-w-0 flex-1 flex-col gap-0.5 text-left"
@@ -240,7 +228,6 @@ function ConversationRow({
               ) : null}
               {lastMessageLine(conversation)}
             </span>
-            <AgentBadge signals={agent} />
             {badge > 0 ? (
               <span
                 className={cn(
@@ -253,6 +240,15 @@ function ConversationRow({
               >
                 {badge > 99 ? "99+" : badge}
               </span>
+            ) : conversation.unread ? (
+              <span
+                className={cn(
+                  "size-2 shrink-0 rounded-full",
+                  conversation.muted ? "bg-muted-foreground/50" : "bg-primary",
+                )}
+                role="img"
+                aria-label="Unread"
+              />
             ) : null}
             {conversation.muted ? (
               <BellOffIcon

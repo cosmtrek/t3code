@@ -16,6 +16,25 @@ the chat app's, so their interaction follows the chat app. Delegations are T3 Co
 state (thread status, drafts, conclusions, the agent conversation) reuses T3 Code's own components
 and wording.
 
+## Design the whole, not the patch
+
+A design change starts from the product, not from the element that looks wrong. Before touching a
+control, list what the user is trying to do on that screen, every signal and entry point that
+serves it, and where each one already lives. Then change the arrangement so each one has one
+place. Hiding, recoloring, or adding a state to the one element that drew the complaint usually
+moves the problem instead of solving it.
+
+The inbox has two jobs, and each has its own place:
+
+- **People waiting on you.** Unread and All list conversations. A row carries only chat signals:
+  one unread mark on the right, a count when the chat app gives one and a dot otherwise.
+- **The agent waiting on you.** The Agent view lists delegations with their thread status. Its tab
+  counts delegations with an unseen result or a draft to send. Running work is status, not a
+  to-do, so it is not counted.
+
+A conversation's delegations open from its header, where the user is already working on that
+conversation. They do not repeat on its list row.
+
 ## Before building a control
 
 1. Find how T3 Code already does this kind of control: a `components/ui` primitive and its variant,
