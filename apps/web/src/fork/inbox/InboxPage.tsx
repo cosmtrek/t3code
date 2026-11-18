@@ -65,6 +65,7 @@ import {
   draftReplyMode,
   emptyViewTitle,
   inView,
+  unreadMessageCount,
   matchesFilter,
   replyModes,
   skippedNotice,
@@ -383,12 +384,12 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
     );
   }
 
-  // Unread counts people, Agent counts results, so nothing is counted in both.
+  // Unread counts people waiting on you, Agent counts delegations waiting on you: a result or a draft.
   const viewCount = (option: InboxView) =>
     option === "agent"
-      ? visibleDelegations.filter((candidate) => candidate.agentUnseen).length
+      ? visibleDelegations.filter((candidate) => candidate.agentUnseen || candidate.hasDraft).length
       : option === "unread"
-        ? conversations.filter((candidate) => inView("unread", filter, candidate)).length
+        ? unreadMessageCount(filter, conversations)
         : 0;
   const delegationOpen = delegation !== null;
   const conversationShown = conversation !== null;
