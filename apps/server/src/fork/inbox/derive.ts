@@ -48,6 +48,8 @@ export interface ConversationState {
   readonly mentioned: boolean;
   /** The latest read mark, my own last message included; what came after it is new. */
   readonly readThroughAt: string | null;
+  /** The chat app's badge; null when unknown or when T3 has read past where it counts from. */
+  readonly unreadCount: number | null;
 }
 
 /**
@@ -58,7 +60,10 @@ export function deriveConversation(input: {
   readonly conversation: Pick<
     Conversation,
     "lastMessage" | "lastOtherMessageAt" | "lastSelfMessageAt" | "lastMentionAt"
-  > & { readonly selfReadThroughAt?: string | null | undefined };
+  > & {
+    readonly selfReadThroughAt?: string | null | undefined;
+    readonly unreadCount?: number | null | undefined;
+  };
   readonly read: Pick<ConversationRead, "readAt" | "pinnedUnread"> | null;
   /** The channel-wide mark: anything before it counts as seen. */
   readonly readAllBefore: string;
@@ -66,12 +71,17 @@ export function deriveConversation(input: {
   const { conversation, read } = input;
   const marks = [read?.readAt, conversation.selfReadThroughAt, input.readAllBefore];
   const lastIsSelf = conversation.lastMessage?.author.isSelf ?? false;
+  // The badge counts from the chat app's own read point; reading further in T3 does not reach it.
+  const chatReadAt = latest(conversation.selfReadThroughAt, conversation.lastSelfMessageAt);
+  const t3ReadAt = chatReadAt === null ? read?.readAt : latest(read?.readAt, input.readAllBefore);
+  const countHolds = t3ReadAt == null || !after(t3ReadAt, chatReadAt);
   return {
     unread:
       (read?.pinnedUnread ?? false) ||
       (!lastIsSelf && after(conversation.lastOtherMessageAt, ...marks)),
     mentioned: after(conversation.lastMentionAt, ...marks, conversation.lastSelfMessageAt),
     readThroughAt: latest(...marks, conversation.lastSelfMessageAt),
+    unreadCount: countHolds ? (conversation.unreadCount ?? null) : null,
   };
 }
 

@@ -48,6 +48,9 @@ export interface ConversationHandlers {
   readonly onDiscardDrafts: (conversation: InboxConversation) => void;
 }
 
+// Rows sit 8px in from both edges, as the toolbar does; the scrollbar lane is always reserved.
+const LIST_CLASS = "min-h-0 flex-1 overscroll-contain [scrollbar-gutter:stable]";
+
 const SWIPE_REVEAL = 68;
 const SWIPE_THRESHOLD = 40;
 
@@ -145,8 +148,8 @@ function ConversationRow({
     null,
   );
   const swiped = offset !== 0;
-  // Reading in T3 does not reach the chat app, so its badge counts only while T3 shows unread.
-  const badge = conversation.unread ? (conversation.unreadCount ?? 0) : 0;
+  // One mark, always a number: an unknown count is at least one, as the Unread tab counts it.
+  const badge = conversation.unread ? Math.max(conversation.unreadCount ?? 1, 1) : 0;
   const onPointerDown = (event: PointerEvent) => {
     if (event.pointerType !== "touch") return;
     drag.current = { x: event.clientX, y: event.clientY, base: offset, horizontal: null };
@@ -171,7 +174,7 @@ function ConversationRow({
   };
 
   return (
-    <div className="relative mx-1.5 overflow-hidden rounded-md">
+    <div className="relative ms-2 me-0.5 overflow-hidden rounded-md">
       <div
         className={cn("absolute inset-y-0 right-0 flex", !swiped && !dragging && "invisible")}
         aria-hidden={!swiped}
@@ -240,15 +243,6 @@ function ConversationRow({
               >
                 {badge > 99 ? "99+" : badge}
               </span>
-            ) : conversation.unread ? (
-              <span
-                className={cn(
-                  "size-2 shrink-0 rounded-full",
-                  conversation.muted ? "bg-muted-foreground/50" : "bg-primary",
-                )}
-                role="img"
-                aria-label="Unread"
-              />
             ) : null}
             {conversation.muted ? (
               <BellOffIcon
@@ -304,7 +298,7 @@ export function ConversationList({
       onScroll={(event) => setScrolledDown(event.nativeEvent.contentOffset.y > 0)}
       estimatedItemSize={56}
       drawDistance={600}
-      className="min-h-0 flex-1 overscroll-contain"
+      className={LIST_CLASS}
     />
   );
 }
@@ -336,57 +330,50 @@ export function DelegationList({
           <button
             type="button"
             className={cn(
-              "mx-1.5 flex w-[calc(100%-0.75rem)] min-w-0 items-start gap-1.5 rounded-md py-2 pr-2.5 pl-1 text-left",
+              "ms-2 me-0.5 flex w-[calc(100%-0.625rem)] min-w-0 flex-col gap-0.5 rounded-md px-2.5 py-2 text-left",
               item.id === selectedId ? "bg-accent" : "pointer-fine:hover:bg-accent/50",
             )}
             aria-current={item.id === selectedId ? "true" : undefined}
             onClick={() => onSelect(item)}
           >
-            <span
-              className={cn(
-                "mt-[7px] size-1.5 shrink-0 rounded-full",
-                item.agentUnseen ? "bg-primary" : "bg-transparent",
+            <span className="flex min-w-0 items-center gap-2">
+              <span className="flex min-w-0 items-center gap-1.5 text-sm font-medium text-foreground">
+                {kindOf.has(item.conversationId) ? (
+                  <ConversationKindIcon kind={kindOf.get(item.conversationId)!} />
+                ) : null}
+                <span className="truncate">{nameOrUnknown(item.conversationName)}</span>
+              </span>
+              <span className="ms-auto shrink-0 text-xs text-muted-foreground tabular-nums">
+                {agoLabel(item.thread?.runCompletedAt ?? item.createdAt, now)}
+              </span>
+            </span>
+            <span className="flex min-w-0 items-center gap-2 text-xs">
+              <span className="min-w-0 flex-1 truncate text-muted-foreground">
+                {delegationPreview(item.conversationName, item.preview, item.thread?.title ?? null)}
+              </span>
+              {live ? (
+                <ThreadStatus
+                  environmentId={environmentId}
+                  thread={live}
+                  fallback={<DelegationOutcome delegation={item} />}
+                />
+              ) : (
+                <DelegationOutcome delegation={item} />
               )}
-              role={item.agentUnseen ? "img" : undefined}
-              aria-label={item.agentUnseen ? "New result" : undefined}
-            />
-            <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-              <span className="flex min-w-0 items-center gap-2">
-                <span className="flex min-w-0 items-center gap-1.5 text-sm font-medium text-foreground">
-                  {kindOf.has(item.conversationId) ? (
-                    <ConversationKindIcon kind={kindOf.get(item.conversationId)!} />
-                  ) : null}
-                  <span className="truncate">{nameOrUnknown(item.conversationName)}</span>
-                </span>
-                <span className="ms-auto shrink-0 text-xs text-muted-foreground tabular-nums">
-                  {agoLabel(item.thread?.runCompletedAt ?? item.createdAt, now)}
-                </span>
-              </span>
-              <span className="flex min-w-0 items-center gap-2 text-xs">
-                <span className="min-w-0 flex-1 truncate text-muted-foreground">
-                  {delegationPreview(
-                    item.conversationName,
-                    item.preview,
-                    item.thread?.title ?? null,
-                  )}
-                </span>
-                {live ? (
-                  <ThreadStatus
-                    environmentId={environmentId}
-                    thread={live}
-                    fallback={<DelegationOutcome delegation={item} />}
-                  />
-                ) : (
-                  <DelegationOutcome delegation={item} />
-                )}
-              </span>
+              {item.agentUnseen ? (
+                <span
+                  className="size-2 shrink-0 rounded-full bg-primary"
+                  role="img"
+                  aria-label="New result"
+                />
+              ) : null}
             </span>
           </button>
         );
       }}
       estimatedItemSize={56}
       drawDistance={600}
-      className="min-h-0 flex-1 overscroll-contain"
+      className={LIST_CLASS}
     />
   );
 }
