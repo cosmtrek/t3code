@@ -315,28 +315,26 @@ seam files. Then try the example channel end to end in a browser before releasin
   `runtimeMode` field in the protocol's templates.
 - Each thread gets its own context folder, `items/<delegationId>/<thread>/`, so a newer thread
   never shows an older thread's files and an older thread that finishes late cannot overwrite
-  them. Only the delegation's current thread drives its state and offers its draft; a deleted or
-  replaced thread's conclusion shows as history. One launch per delegation runs at a time, and
+  them. Only the delegation's current thread drives its state and offers its draft. One launch per delegation runs at a time, and
   "Start a new thread" replaces only the thread the dialog showed. A reply thread longer than the
   page cap, or a range whose first message is further back than the inbox reads, is refused
   rather than delegated with part of it.
 - The dialog chooses the thread's checkout: the project's, a new worktree, or an existing one.
   Delegating the same messages again defaults to the worktree its last thread worked in, read
   from that thread rather than stored.
-- What the user types in the delegation pane goes to the current thread as typed. The thread's
-  reporting rules (in `context.md`, and in the first message when the template lacks them) say to
-  keep `conclusion.md` current and to write `draft.md` only when a message asks for the reply, so a
-  run never drafts ahead of its findings. Threads delegated before those rules get them as a note
-  on each message; the pane hides that note. When a run ends with a new draft, the pane fills the
-  conversation's reply box with it. Templates may define the draft rule themselves by naming
-  `draft.md`. When the thread cannot write there (a sandbox limited to the workspace), it ends its
-  reply with `<conclusion>` or `<draft>` tags; the inbox reads each finished run once and writes the files
-  (`.fallback.json` records the run and what it wrote). A later run's tags replace an earlier
-  run's; a file the thread wrote itself always wins.
+- The delegation pane embeds the thread's own chat (`ChatView`, as a side chat is), so the
+  findings, requests, approvals, and launched threads read as they do in the thread, and the user
+  talks to the agent in its own composer. The inbox adds only the draft. The first message carries
+  one rule, unless the template names `draft.md` itself: write `draft.md` only when a message asks
+  for the reply. Accept puts the draft into the conversation's reply box. When the thread cannot
+  write there (a sandbox limited to the workspace), it ends its reply with `<draft>` tags; the inbox
+  reads each finished run once and writes the file (`.fallback.json` records the run and what it
+  wrote). A later run's tags replace an earlier run's; a draft the thread wrote itself always
+  wins.
 - A reply sent from a delegation's draft is kept as `items/<delegationId>/sent.<time>.<hash>.md`: the text as sent, its message
   id, and whether it was the draft, an edited draft, or typed. An adapter answer without a message
   id leaves the draft in place and reports the delivery as unknown. A send whose copy cannot be
-  written still succeeds and says so. The delegation lists these records as its replies.
+  written still succeeds and says so. The newest record marks the delegation as replied.
 - What a reply can carry depends on the adapter's `capabilities`. With `mentions`, it mentions
   whoever its `@Name` matches among the people who wrote in the conversation; the reply box shows
   who will be notified before sending, and a mention the chat app refused is reported after. With
