@@ -54,6 +54,7 @@ import {
   type OlderPages,
 } from "./inboxView";
 import { MessageView } from "./MessageView";
+import { PaneHeader } from "./PaneHeader";
 import { readMentionable, sendReply } from "./sendReply";
 import { ReplyBox, useSendKey } from "./ReplyBox";
 import { loadReply, replyDraftKey, saveReply } from "./replyDrafts";
@@ -192,7 +193,7 @@ export function ConversationPane({
       aria-label="Conversation"
       className={cn("min-h-0 min-w-0 flex-1 flex-col", className)}
     >
-      <div className="flex shrink-0 items-center gap-1 border-b px-2 py-1.5">
+      <PaneHeader edge="detail">
         <Button
           size="icon-xs"
           variant="ghost"
@@ -203,7 +204,7 @@ export function ConversationPane({
           <ArrowLeftIcon />
         </Button>
         <div className="flex min-w-0 flex-1 items-center gap-1.5 px-1">
-          <h2 className="truncate text-xs font-medium">{nameOrUnknown(conversation.name)}</h2>
+          <h2 className="truncate text-sm font-medium">{nameOrUnknown(conversation.name)}</h2>
           {conversation.muted ? (
             <BellOffIcon
               className="size-3.5 shrink-0 text-muted-foreground/70"
@@ -225,7 +226,7 @@ export function ConversationPane({
           onSetRead={handlers.onSetRead}
           onDiscardDrafts={handlers.onDiscardDrafts}
         />
-      </div>
+      </PaneHeader>
       {shown ? (
         <ConversationMessages
           key={`${conversation.channelId}\u0000${conversation.id}`}
