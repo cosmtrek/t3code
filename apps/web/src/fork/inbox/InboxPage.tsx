@@ -5,6 +5,7 @@ import {
   BotIcon,
   CheckCheckIcon,
   CopyIcon,
+  EllipsisIcon,
   ExternalLinkIcon,
   InboxIcon,
   ListFilterIcon,
@@ -26,6 +27,7 @@ import {
 } from "../../components/ui/empty";
 import {
   Menu,
+  MenuItem,
   MenuPopup,
   MenuRadioGroup,
   MenuRadioItem,
@@ -746,27 +748,35 @@ function DelegationActions({
     (message) => message.id === detail.delegation.anchorMessageId,
   );
   return (
-    <>
-      <IconAction label="Copy the messages" onClick={() => void copyDelegationContext(detail)}>
-        <CopyIcon />
-      </IconAction>
-      <IconAction
-        label="Delegate again"
-        disabled={readOnly || anchor === undefined}
-        onClick={() =>
-          anchor &&
-          onDelegateAgain({
-            channelId: detail.delegation.channelId,
-            conversation: detail.conversation,
-            message: anchor,
-            later: detail.messages.filter((message) => message.id !== anchor.id),
-            scope: detail.delegation.scope,
-          })
-        }
+    <Menu>
+      <MenuTrigger
+        render={<Button size="icon-xs" variant="ghost-muted" aria-label="Delegation actions" />}
       >
-        <BotIcon />
-      </IconAction>
-    </>
+        <EllipsisIcon />
+      </MenuTrigger>
+      <MenuPopup align="end">
+        <MenuItem onClick={() => void copyDelegationContext(detail)}>
+          <CopyIcon />
+          Copy the messages
+        </MenuItem>
+        <MenuItem
+          disabled={readOnly || anchor === undefined}
+          onClick={() =>
+            anchor &&
+            onDelegateAgain({
+              channelId: detail.delegation.channelId,
+              conversation: detail.conversation,
+              message: anchor,
+              later: detail.messages.filter((message) => message.id !== anchor.id),
+              scope: detail.delegation.scope,
+            })
+          }
+        >
+          <BotIcon />
+          Delegate again
+        </MenuItem>
+      </MenuPopup>
+    </Menu>
   );
 }
 
