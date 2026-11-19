@@ -57,18 +57,19 @@ export function MessageView({
     !message.richSummary &&
     message.attachments.length === 0 &&
     message.links.length === 0;
-  // Bare media keeps no frame, as the chat app shows a lone image; a topic post's text has none.
+  const reactions = message.reactions ?? [];
+  // Bare media keeps no frame, as the chat app shows a lone image, until reactions need a bubble
+  // to sit in under it; a topic post's text has none.
   const frame: "self" | "muted" | "dashed" | "none" = message.richSummary
     ? "muted"
     : unsupported
       ? "dashed"
-      : post || (!hasText && !quote)
+      : post || (!hasText && !quote && reactions.length === 0)
         ? "none"
         : self
           ? "self"
           : "muted";
   const markdown = message.format === "markdown";
-  const reactions = message.reactions ?? [];
   // The adapter's list marks my mention in the text itself; without it the header says so.
   const selfMarked = message.mentions?.some((mention) => mention.isSelf) ?? false;
   const media = (

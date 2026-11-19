@@ -173,6 +173,10 @@ function seed(now: number): ExampleConversation[] {
           "Jordan: [Image] The export job retries are exhausted before the upstream recovers, so every nightly run after an incident fails the same way. We either raise the retry budget or move the job after the upstream maintenance window, and I don't think we have a full picture of the upstream schedule yet.\nPriya: I'll ask the upstream team for their maintenance calendar.",
           { richSummary: "Forwarded · Chat between Jordan and Priya · 2 messages" },
         ),
+        message("m-32", null, 6.8, JORDAN, "", {
+          attachments: [{ key: "chart", kind: "image", name: "cache-hit-rate.svg" }],
+          reactions: [{ key: "THUMBSUP", emoji: "👍", users: [SAM] }],
+        }),
       ],
     },
     {
