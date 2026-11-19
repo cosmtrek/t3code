@@ -11,7 +11,6 @@ import {
   buildContextMarkdown,
   firstMessage,
   fillTemplate,
-  followUpsOf,
   mediaFileName,
   parseFallbackReply,
   threadTitle,
@@ -236,25 +235,6 @@ describe("delegations", () => {
       messagesInRange(threaded, anchor, null).map((message) => message.id);
     expect(within("b")).toEqual(["b", "c", "of-c", "d"]);
     expect(within("of-a")).toEqual(["of-a", "c", "of-c", "d"]);
-  });
-});
-
-describe("follow-ups", () => {
-  it("keeps the latest five rounds after the delegation", () => {
-    const messages = Array.from({ length: 7 }, (_, index) => ({
-      role: "user" as const,
-      text: `q${index}`,
-      runId: null,
-      streaming: false,
-      at: hoursAgo(10 - index),
-    }));
-    expect(followUpsOf(messages, "/x").map((entry) => entry.text)).toEqual([
-      "q2",
-      "q3",
-      "q4",
-      "q5",
-      "q6",
-    ]);
   });
 });
 

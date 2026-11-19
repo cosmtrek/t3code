@@ -283,12 +283,6 @@ const routes = (runtime: InboxRuntimeShape) => {
     ),
     route(
       "POST",
-      `${INBOX}/ask`,
-      AuthOrchestrationOperateScope,
-      body.pipe(Effect.flatMap(Inbox.ask)),
-    ),
-    route(
-      "POST",
       `${INBOX}/discard-draft`,
       AuthOrchestrationOperateScope,
       body.pipe(Effect.flatMap(Inbox.discardDraft)),

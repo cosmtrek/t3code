@@ -65,9 +65,6 @@ import {
   REQUEST_FILE,
   buildContextMarkdown,
   firstMessage,
-  followUpMessage,
-  followUpsOf,
-  knowsDraftRule,
   mediaFileName,
   nameOrUnknown,
   parseFallbackReply,
@@ -698,29 +695,6 @@ export const listInbox = Effect.fn("ForkInbox.list")(function* (channelId: strin
   };
 });
 
-const readFollowUps = Effect.fn("ForkInbox.readFollowUps")(function* (
-  threadId: string,
-  contextDir: string,
-) {
-  const threads = yield* ThreadManagement.ThreadManagementService;
-  const records = yield* threads
-    .getThreadRecords(ThreadId.make(threadId), ["messages"], {
-      messageRoles: ["user", "assistant"],
-    })
-    .pipe(Effect.orElseSucceed(() => null));
-  if (records === null) return [];
-  return followUpsOf(
-    records.messages.map((message) => ({
-      role: message.role,
-      text: message.text,
-      runId: message.runId,
-      streaming: message.streaming,
-      at: DateTime.formatIso(message.createdAt),
-    })),
-    contextDir,
-  );
-});
-
 const decodeMessageExit = Schema.decodeUnknownExit(Message);
 
 function decodeMessages(items: ReadonlyArray<unknown>) {
@@ -886,13 +860,6 @@ export const readDelegation = Effect.fn("ForkInbox.readDelegation")(function* (
     runtime.store.linksForDelegation(item.id).filter((link) => link.threadId !== thread?.threadId),
     (link) => inspectLink(link, { current: false }),
   );
-  const followUps =
-    thread && current && thread.status !== "deleted"
-      ? yield* readFollowUps(
-          thread.threadId,
-          threadContextDir(runtime.itemsDir, item.id, thread.threadId),
-        )
-      : [];
   const access = channelAccess(channel.status);
   return {
     delegation: item,
@@ -909,7 +876,6 @@ export const readDelegation = Effect.fn("ForkInbox.readDelegation")(function* (
     // A conclusion outlives a deleted thread; the detail shows it as history.
     conclusionIsHistorical: artifacts.conclusion !== null && !current,
     previousThreads: history,
-    followUps,
     sent,
   };
 });
@@ -1716,55 +1682,4 @@ export const discardDraft = Effect.fn("ForkInbox.discardDraft")(function* (body:
   );
   runtime.hub.publish({ type: "inbox", channelId: input.channelId });
   return { discarded };
-});
-
-const AskInput = Schema.Struct({
-  channelId: Schema.String,
-  delegationId: Schema.String,
-  text: Schema.String,
-});
-const decodeAskInput = Schema.decodeUnknownEffect(AskInput);
-
-/** A message for the delegation's thread; the thread drafts the reply when it asks for one. It never reaches the chat app. */
-export const ask = Effect.fn("ForkInbox.ask")(function* (body: unknown) {
-  const input = yield* decodeAskInput(body).pipe(
-    Effect.mapError(() => badRequest("The question is missing fields.")),
-  );
-  const text = input.text.trim();
-  if (text.length === 0 || text.length > 20_000) {
-    return yield* badRequest("Write a question of up to 20,000 characters.", "text");
-  }
-  const runtime = yield* InboxRuntime;
-  const delegationId = input.delegationId;
-  const active = activeLinkOf(runtime.store.linksForDelegation(delegationId));
-  const view = active ? yield* inspectLink(active, { current: true }) : null;
-  if (active === undefined || !isCurrent(view) || view.status === "archived") {
-    return yield* badRequest(
-      view?.status === "archived"
-        ? "This delegation's thread is archived; open it or delegate again."
-        : "This delegation has no thread; delegate again.",
-    );
-  }
-  const contextDir = threadContextDir(runtime.itemsDir, delegationId, active.threadId);
-  const context = yield* Effect.promise(() =>
-    NodeFSP.readFile(NodePath.join(contextDir, CONTEXT_FILE), "utf8").catch(() => null),
-  );
-  const commandId = CommandId.make(`fork-inbox-ask:${NodeCrypto.randomUUID()}`);
-  yield* ThreadMessageIntake.sendToThread({
-    projectId: ProjectId.make(active.projectId),
-    commandId,
-    threadId: ThreadId.make(active.threadId),
-    messageId: MessageId.make(commandId),
-    text: followUpMessage(text, contextDir, {
-      markdown: supports(yield* channelOrMissing(input.channelId), "markdown"),
-      knowsRule: knowsDraftRule(context),
-    }),
-    attachments: [],
-    // A running thread takes the question after its current run.
-    mode: "queue",
-    createdBy: "user",
-    creationSource: "server",
-  }).pipe(Effect.mapError(toForkError));
-  runtime.hub.publish({ type: "inbox", channelId: input.channelId });
-  return { ok: true };
 });
