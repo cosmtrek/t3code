@@ -69,16 +69,11 @@ export interface ChannelView {
   readonly simulation: ExampleSimulation | null;
 }
 
-/** What a connection test shows; the rest of the channel always comes from the list. */
-export interface ChannelTestResult {
-  readonly status: ChannelStatus;
-  readonly steps: ReadonlyArray<ChannelCheckStep>;
-  readonly tokenWarning: string | null;
-}
-
-export function toChannelTestResult(channel: ChannelView): ChannelTestResult {
-  return { status: channel.status, steps: channel.steps, tokenWarning: channel.tokenWarning };
-}
+/** A check of an adapter that is not saved yet. */
+export type ChannelProbe = Pick<
+  ChannelView,
+  "status" | "steps" | "tokenWarning" | "health" | "config"
+>;
 
 export interface ChannelAccess {
   readonly read: boolean;

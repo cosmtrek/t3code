@@ -213,6 +213,12 @@ const routes = (runtime: InboxRuntimeShape) => {
     ),
     route(
       "POST",
+      `${CHANNELS}/probe`,
+      AuthSettingsWriteScope,
+      body.pipe(Effect.flatMap(Inbox.probeChannel)),
+    ),
+    route(
+      "POST",
       `${CHANNELS}/simulate`,
       AuthSettingsWriteScope,
       body.pipe(Effect.flatMap(Inbox.simulateChannel)),

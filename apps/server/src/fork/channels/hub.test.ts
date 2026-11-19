@@ -264,6 +264,50 @@ describe("ChannelHub checks", () => {
         { create: true },
       ),
     ).rejects.toBeInstanceOf(ChannelConfigError);
+    const added = await hub.save(
+      {
+        id: "",
+        kind: "http-adapter",
+        name: "Chat",
+        baseUrl: "http://127.0.0.1:1",
+        tokenFile: "",
+        enabled: false,
+      },
+      { create: true },
+    );
+    expect(added.id).toBe("chat-2");
+    hub.stop();
+  });
+
+  it("keeps the example channel: it cannot be removed or added again", async () => {
+    const { hub } = await hubWith((request) =>
+      json(200, request.path === "/health" ? HEALTH : CONFIG),
+    );
+    await expect(hub.remove("example")).rejects.toBeInstanceOf(ChannelConfigError);
+    await expect(
+      hub.save(
+        { id: "", kind: "example", name: "Again", baseUrl: "", tokenFile: "", enabled: true },
+        { create: true },
+      ),
+    ).rejects.toBeInstanceOf(ChannelConfigError);
+    expect(hub.list().map((channel) => channel.id)).toEqual(["example", "chat"]);
+    hub.stop();
+  });
+
+  it("checks an adapter that is not saved yet, and keeps nothing of it", async () => {
+    const { hub, dir } = await hubWith((request) =>
+      json(200, request.path === "/health" ? HEALTH : CONFIG),
+    );
+    const probe = await hub.probe({
+      baseUrl: "http://127.0.0.1:7342/",
+      tokenFile: NodePath.join(dir, "token"),
+    });
+    expect(probe.status).toBe("online");
+    expect(probe.config?.displayName).toBe("Chat");
+    await expect(
+      hub.probe({ baseUrl: "http://10.0.0.5:7341", tokenFile: "" }),
+    ).rejects.toBeInstanceOf(ChannelConfigError);
+    expect(hub.list().map((channel) => channel.id)).toEqual(["example", "chat"]);
     hub.stop();
   });
 });
@@ -405,6 +449,8 @@ describe("ChannelHub token redaction", () => {
     const view = await hub.test("chat");
     expect(view.status).toBe("needs_login");
     expect(JSON.stringify(view)).not.toContain(token);
+    const probe = await hub.probe({ baseUrl: view.baseUrl, tokenFile: view.tokenFile });
+    expect(JSON.stringify(probe)).not.toContain(token);
     expect(JSON.stringify(hub.list())).not.toContain(token);
     const failure = await hub
       .getJson("chat", "/conversations", RawPage)
@@ -775,7 +821,10 @@ describe("validateLoopbackBaseUrl", () => {
       file,
       JSON.stringify({ version: 1, channels: [{ ...entry, baseUrl: "http://[::1]:7341" }] }),
     );
-    expect((await readChannelsFile(file)).channels).toHaveLength(1);
+    expect((await readChannelsFile(file)).channels.map((channel) => channel.id)).toEqual([
+      "example",
+      "chat",
+    ]);
   });
 
   it("builds no HTTP transport for a non-loopback address", () => {

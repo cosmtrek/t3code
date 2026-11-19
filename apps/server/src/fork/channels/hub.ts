@@ -4,8 +4,10 @@ import * as Schema from "effect/Schema";
 import {
   type ChannelConfigEntry,
   type ChannelsFile,
+  channelIdFor,
   createTokenReader,
   readChannelsFile,
+  validateAdapterAddress,
   validateChannelEntry,
   writeChannelsFile,
   ChannelConfigError,
@@ -85,6 +87,12 @@ export interface ChannelView {
   /** The example channel's simulated state; null for adapters. */
   readonly simulation: ExampleSimulation | null;
 }
+
+/** A check of an adapter that is not saved yet, so a channel is added only once it answers. */
+export type ChannelProbe = Pick<
+  ChannelView,
+  "status" | "steps" | "tokenWarning" | "health" | "config"
+>;
 
 /** What reaches the browser: which local channel changed, never an adapter's own ids. */
 export type HubEvent =
@@ -282,14 +290,24 @@ export class ChannelHub {
     return runtime ? this.view(runtime) : null;
   }
 
-  /** Adds or replaces one channel. `previousId` renames are refused: ids are stable. */
+  /**
+   * Adds or replaces one channel. Ids are stable: a new channel without one gets one from its
+   * name, and an existing one keeps its own.
+   */
   async save(
     input: ChannelConfigEntry,
     options: { readonly create: boolean },
   ): Promise<ChannelView> {
-    const entry = validateChannelEntry(input);
+    if (options.create && input.kind === "example") {
+      throw new ChannelConfigError("The example channel is built in; turn it on instead.");
+    }
     return this.serialize(async () => {
       const file = this.file ?? (await readChannelsFile(this.options.configPath));
+      const entry = validateChannelEntry(
+        options.create && input.id === ""
+          ? { ...input, id: channelIdFor(input.name, new Set(file.channels.map((c) => c.id))) }
+          : input,
+      );
       const existing = file.channels.find((candidate) => candidate.id === entry.id);
       if (options.create && existing) {
         throw new ChannelConfigError(`A channel with the id "${entry.id}" already exists.`, "id");
@@ -319,7 +337,11 @@ export class ChannelHub {
   async remove(channelId: string): Promise<boolean> {
     return this.serialize(async () => {
       const file = this.file ?? (await readChannelsFile(this.options.configPath));
-      if (!file.channels.some((entry) => entry.id === channelId)) return false;
+      const existing = file.channels.find((entry) => entry.id === channelId);
+      if (!existing) return false;
+      if (existing.kind === "example") {
+        throw new ChannelConfigError("The example channel is built in; turn it off instead.");
+      }
       const next: ChannelsFile = {
         version: 1,
         channels: file.channels.filter((entry) => entry.id !== channelId),
@@ -339,6 +361,32 @@ export class ChannelHub {
     const runtime = this.requireRuntime(channelId);
     await this.runCheck(runtime, { force: true });
     return this.view(runtime);
+  }
+
+  /** Runs every step against an adapter without saving it or keeping what it read. */
+  async probe(draft: {
+    readonly baseUrl: string;
+    readonly tokenFile: string;
+  }): Promise<ChannelProbe> {
+    const address = validateAdapterAddress(draft);
+    const runtime = this.newRuntime({
+      id: "",
+      kind: "http-adapter",
+      name: "",
+      ...address,
+      enabled: true,
+    });
+    const result = await this.evaluate(runtime);
+    return redactToken(
+      {
+        status: result.status,
+        steps: result.steps,
+        tokenWarning: runtime.tokenWarning,
+        health: result.health ?? null,
+        config: result.config ?? null,
+      },
+      runtime.token,
+    );
   }
 
   /** Switches the example channel to a made-up state, so every status can be seen in a browser. */
@@ -634,8 +682,8 @@ export class ChannelHub {
     return httpTransport(entry.baseUrl);
   }
 
-  private startRuntime(entry: ChannelConfigEntry): Runtime {
-    const runtime: Runtime = {
+  private newRuntime(entry: ChannelConfigEntry): Runtime {
+    return {
       entry,
       transport: this.transportFor(entry),
       status: entry.enabled ? "unreachable" : "disabled",
@@ -655,6 +703,10 @@ export class ChannelHub {
       nextCheck: null,
       retryMs: null,
     };
+  }
+
+  private startRuntime(entry: ChannelConfigEntry): Runtime {
+    const runtime = this.newRuntime(entry);
     this.runtimes.set(entry.id, runtime);
     if (entry.enabled && this.options.background !== false) {
       runtime.stop.signal.addEventListener("abort", () => {

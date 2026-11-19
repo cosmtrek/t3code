@@ -266,6 +266,17 @@ export const testChannel = Effect.fn("ForkChannels.test")(function* (channelId: 
   return yield* channelEntry(yield* attempt(() => hub.test(channelId)));
 });
 
+const ProbeInput = Schema.Struct({ baseUrl: Schema.String, tokenFile: Schema.String });
+const decodeProbeInput = Schema.decodeUnknownEffect(ProbeInput);
+
+export const probeChannel = Effect.fn("ForkChannels.probe")(function* (body: unknown) {
+  const input = yield* decodeProbeInput(body).pipe(
+    Effect.mapError(() => badRequest("Give the adapter's address and token file.")),
+  );
+  const { hub } = yield* InboxRuntime;
+  return yield* attempt(() => hub.probe(input));
+});
+
 const SimulateInput = Schema.Struct({
   channelId: Schema.String,
   simulation: Schema.Literals(EXAMPLE_SIMULATIONS),
