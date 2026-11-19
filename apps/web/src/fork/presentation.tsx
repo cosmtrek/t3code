@@ -19,7 +19,7 @@ const DOT_CLASS: Readonly<Record<ChannelStatus, string>> = {
   token_missing: "bg-destructive",
   unauthorized: "bg-destructive",
   incompatible: "bg-destructive",
-  needs_login: "bg-destructive",
+  needs_login: "bg-warning",
   unreachable: "bg-warning",
   collector_stopped: "bg-warning",
   online: "bg-success",

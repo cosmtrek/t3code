@@ -67,6 +67,7 @@ export function EnvironmentTransportLabel(props: {
 
 export function EnvironmentRow({
   kind,
+  icon,
   label,
   subtitle,
   below,
@@ -75,7 +76,9 @@ export function EnvironmentRow({
   className,
   children,
 }: {
-  readonly kind: EnvironmentMachineKind;
+  /** The machine icon; rows that are not a machine pass `icon` instead. */
+  readonly kind?: EnvironmentMachineKind;
+  readonly icon?: ReactNode;
   readonly label: string;
   readonly subtitle: ReactNode;
   readonly below?: ReactNode;
@@ -92,11 +95,17 @@ export function EnvironmentRow({
       )}
     >
       {/* Dim only identity so switched-off controls remain readable and distinct from disabled controls. */}
-      <EnvironmentMachineIcon
-        aria-hidden
-        kind={kind}
-        className={cn("size-4 text-muted-foreground", dimmed && "opacity-60")}
-      />
+      {kind === undefined ? (
+        <span aria-hidden className={cn("flex text-muted-foreground", dimmed && "opacity-60")}>
+          {icon}
+        </span>
+      ) : (
+        <EnvironmentMachineIcon
+          aria-hidden
+          kind={kind}
+          className={cn("size-4 text-muted-foreground", dimmed && "opacity-60")}
+        />
+      )}
       <div className={cn("min-w-0", dimmed && "opacity-60")}>
         <p className="truncate text-sm font-medium text-foreground">{label}</p>
         <div className="truncate text-xs text-muted-foreground">{subtitle}</div>

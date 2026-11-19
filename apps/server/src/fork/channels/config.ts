@@ -26,22 +26,17 @@ export type ChannelsFile = typeof ChannelsFile.Type;
 
 const decodeChannelsFile = Schema.decodeUnknownExit(ChannelsFile);
 
-const EXAMPLE_CHANNEL_ID = "example";
-
-/** The built-in example channel is listed from the start, switched off. */
-const DEFAULT_CHANNELS_FILE: ChannelsFile = {
-  version: 1,
-  channels: [
-    {
-      id: EXAMPLE_CHANNEL_ID,
-      kind: "example",
-      name: "Example channel",
-      baseUrl: "",
-      tokenFile: "",
-      enabled: false,
-    },
-  ],
+const EXAMPLE_CHANNEL: ChannelConfigEntry = {
+  id: "example",
+  kind: "example",
+  name: "Example channel",
+  baseUrl: "",
+  tokenFile: "",
+  enabled: false,
 };
+
+/** The example channel is built in: listed from the start, switched off, and never removed. */
+const DEFAULT_CHANNELS_FILE: ChannelsFile = { version: 1, channels: [EXAMPLE_CHANNEL] };
 
 const CHANNEL_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,39}$/;
 
@@ -112,6 +107,32 @@ function resolveTokenFilePath(raw: string, home = NodeOS.homedir()): string {
   return NodePath.normalize(expanded);
 }
 
+/** The adapter's address and token file, checked as a channel's would be. */
+export function validateAdapterAddress(draft: {
+  readonly baseUrl: string;
+  readonly tokenFile: string;
+}): { readonly baseUrl: string; readonly tokenFile: string } {
+  const tokenFile = draft.tokenFile.trim();
+  if (tokenFile.length > 0) resolveTokenFilePath(tokenFile);
+  return { baseUrl: validateLoopbackBaseUrl(draft.baseUrl), tokenFile };
+}
+
+/** An id from the name, unique among `taken`; a name with no latin letters becomes "channel". */
+export function channelIdFor(name: string, taken: ReadonlySet<string>): string {
+  const base =
+    name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 32)
+      .replace(/-+$/, "") || "channel";
+  if (!taken.has(base)) return base;
+  for (let suffix = 2; ; suffix += 1) {
+    const id = `${base}-${suffix}`;
+    if (!taken.has(id)) return id;
+  }
+}
+
 export function validateChannelEntry(entry: ChannelConfigEntry): ChannelConfigEntry {
   if (!CHANNEL_ID_PATTERN.test(entry.id)) {
     throw new ChannelConfigError(
@@ -124,9 +145,7 @@ export function validateChannelEntry(entry: ChannelConfigEntry): ChannelConfigEn
     throw new ChannelConfigError("Give the channel a name of up to 80 characters.", "name");
   }
   if (entry.kind === "example") return { ...entry, name, baseUrl: "", tokenFile: "" };
-  const tokenFile = entry.tokenFile.trim();
-  if (tokenFile.length > 0) resolveTokenFilePath(tokenFile);
-  return { ...entry, name, baseUrl: validateLoopbackBaseUrl(entry.baseUrl), tokenFile };
+  return { ...entry, name, ...validateAdapterAddress(entry) };
 }
 
 export async function readChannelsFile(filePath: string): Promise<ChannelsFile> {
@@ -149,7 +168,11 @@ export async function readChannelsFile(filePath: string): Promise<ChannelsFile> 
       });
     }
   }
-  return exit.value;
+  if (exit.value.channels.some((entry) => entry.kind === "example")) return exit.value;
+  // A file from before the example was built in may have removed it.
+  const taken = new Set(exit.value.channels.map((entry) => entry.id));
+  const example = { ...EXAMPLE_CHANNEL, id: channelIdFor(EXAMPLE_CHANNEL.id, taken) };
+  return { ...exit.value, channels: [example, ...exit.value.channels] };
 }
 
 /** Only the server writes the file, through a rename so a crash never leaves half of it. */
