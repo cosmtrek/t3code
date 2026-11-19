@@ -4,7 +4,6 @@ import type { InboxConversation, InboxDelegation, InboxMessage } from "../types"
 import {
   agentSignalsByConversation,
   anchorOf,
-  authorsSummary,
   conversationRows,
   delegationPreview,
   draftReplyMode,
@@ -361,27 +360,6 @@ describe("delegationPreview", () => {
     ["Platform team", "  ", "  ", "Delegated messages"],
   ])("formats preview for %s", (conversationName, preview, threadTitle, expected) => {
     expect(delegationPreview(conversationName, preview, threadTitle)).toBe(expected);
-  });
-});
-
-describe("authorsSummary", () => {
-  const msg = (id: string, name: string, isSelf = false) =>
-    ({ author: { id, name, isSelf } }) as InboxMessage;
-
-  it("deduplicates authors in order, renders self as You, and caps with +N", () => {
-    expect(authorsSummary([])).toBeNull();
-    expect(authorsSummary([msg("1", "Priya"), msg("2", "Alex", true), msg("3", "Priya")])).toBe(
-      "Priya, You",
-    );
-    expect(
-      authorsSummary([
-        msg("1", "Priya"),
-        msg("2", "Sam"),
-        msg("3", "Jordan"),
-        msg("4", "Alex", true),
-        msg("5", "Priya"),
-      ]),
-    ).toBe("Priya, Sam, Jordan +1");
   });
 });
 

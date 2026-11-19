@@ -324,7 +324,8 @@ seam files. Then try the example channel end to end in a browser before releasin
   from that thread rather than stored.
 - The delegation pane embeds the thread's own chat (`ChatView`, as a side chat is), so the
   findings, requests, approvals, and launched threads read as they do in the thread, and the user
-  talks to the agent in its own composer. The inbox adds only the draft. The first message carries
+  talks to the agent in its own composer. The inbox adds only the draft; the delegated messages
+  are the conversation beside it, not repeated in the pane. The first message carries
   one rule, unless the template names `draft.md` itself: write `draft.md` only when a message asks
   for the reply. The delegation shows the draft in an editable box and sends it from there, to
   the message it answers. When the thread cannot

@@ -17,7 +17,6 @@ import { flushSync } from "react-dom";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../../components/ui/menu";
-import { Textarea } from "../../components/ui/textarea";
 import { observeResize } from "../../lib/observeResize";
 import { cn } from "../../lib/utils";
 import { forkRequest } from "../forkApiAccess";
@@ -56,6 +55,7 @@ import {
 } from "./inboxView";
 import { MessageView } from "./MessageView";
 import { readMentionable, sendReply } from "./sendReply";
+import { ReplyBox, useSendKey } from "./ReplyBox";
 import { loadReply, replyDraftKey, saveReply } from "./replyDrafts";
 
 export interface ConversationPaneHandlers {
@@ -1019,57 +1019,32 @@ function Composer({
     setFiles([]);
   };
 
+  const sendKey = useSendKey();
+  const canSend =
+    !disabled && !sending && !uploading && (text.trim().length > 0 || files.length > 0);
+  const status = error ? (
+    <span className="text-destructive-foreground">{error}</span>
+  ) : mentions.length > 0 ? (
+    <span className="text-muted-foreground">
+      Notifies {mentions.map((mention) => mention.name).join(", ")}
+    </span>
+  ) : null;
   return (
     <form
-      className="relative flex shrink-0 flex-col gap-2 border-t border-border/70 p-3"
+      className="relative shrink-0 px-3 pb-3"
       onFocus={() => {
         onEngage();
         wantPeople(text);
       }}
       onSubmit={(event) => {
         event.preventDefault();
-        void send();
+        if (canSend) void send();
       }}
     >
-      {replyTo !== null ? (
-        <div className="flex min-w-0 items-center gap-2">
-          <>
-            <p className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
-              {replyTo.inThread === true ? "Replying in thread to" : "Replying to"} {replyTo.quote}
-            </p>
-            {replyTo.canSwitch ? (
-              <Button
-                type="button"
-                size="xs"
-                variant="ghost-muted"
-                onClick={() => {
-                  const next = { ...replyTo, inThread: replyTo.inThread !== true };
-                  const nextText = named(next, text);
-                  setReplyTo(next);
-                  setText(nextText);
-                  setCaret(nextText.length);
-                }}
-              >
-                {replyTo.inThread === true ? "Quote instead" : "Reply in thread"}
-              </Button>
-            ) : null}
-            <Button
-              type="button"
-              size="icon-xs"
-              variant="ghost-muted"
-              aria-label="Send as a new message"
-              onClick={() => setReplyTo(null)}
-            >
-              <XIcon />
-            </Button>
-          </>
-        </div>
-      ) : null}
-      <Textarea
+      <ReplyBox
         ref={textareaRef}
         aria-label="Reply"
         value={text}
-        rows={2}
         disabled={disabled}
         placeholder={disabled ? "Sending is off" : `Message ${nameOrUnknown(conversation.name)}`}
         onChange={(event) => {
@@ -1105,11 +1080,116 @@ function Composer({
               return;
             }
           }
-          if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+          if (sendKey.isSend(event)) {
             event.preventDefault();
             event.currentTarget.form?.requestSubmit();
           }
         }}
+        above={
+          replyTo !== null || files.length > 0 ? (
+            <>
+              {replyTo !== null ? (
+                <div className="flex min-w-0 items-center gap-2">
+                  <p className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                    {replyTo.inThread === true ? "Replying in thread to" : "Replying to"}{" "}
+                    {replyTo.quote}
+                  </p>
+                  {replyTo.canSwitch ? (
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="ghost-muted"
+                      onClick={() => {
+                        const next = { ...replyTo, inThread: replyTo.inThread !== true };
+                        const nextText = named(next, text);
+                        setReplyTo(next);
+                        setText(nextText);
+                        setCaret(nextText.length);
+                      }}
+                    >
+                      {replyTo.inThread === true ? "Quote instead" : "Reply in thread"}
+                    </Button>
+                  ) : null}
+                  <Button
+                    type="button"
+                    size="icon-xs"
+                    variant="ghost-muted"
+                    aria-label="Send as a new message"
+                    onClick={() => setReplyTo(null)}
+                  >
+                    <XIcon />
+                  </Button>
+                </div>
+              ) : null}
+              {files.length > 0 ? (
+                <ul className="flex flex-wrap gap-1" aria-label="Attached files">
+                  {files.map((entry) => (
+                    <li
+                      key={entry.key}
+                      className="flex min-w-0 items-center gap-1 rounded-md border border-border/70 py-0.5 ps-2 pe-0.5 text-xs"
+                    >
+                      <span className="max-w-48 truncate">{entry.name}</span>
+                      {entry.uploadId === null ? (
+                        <span className="text-muted-foreground">Uploading…</span>
+                      ) : null}
+                      <Button
+                        type="button"
+                        size="icon-xs"
+                        variant="ghost-muted"
+                        aria-label={`Remove ${entry.name}`}
+                        onClick={() => setFiles(files.filter((other) => other.key !== entry.key))}
+                      >
+                        <XIcon />
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </>
+          ) : null
+        }
+        status={status}
+        actions={
+          <>
+            {canMarkdown ? (
+              <IconAction
+                type="button"
+                label="Send as Markdown"
+                variant={markdown ? "outline" : "ghost-muted"}
+                aria-pressed={markdown}
+                disabled={disabled}
+                onClick={() => setMarkdown(!markdown)}
+              >
+                <MarkdownIcon />
+              </IconAction>
+            ) : null}
+            {canAttach ? (
+              <>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  hidden
+                  onChange={(event) => {
+                    attach([...(event.target.files ?? [])]);
+                    // The same file can be picked again after it was removed.
+                    event.target.value = "";
+                  }}
+                />
+                <IconAction
+                  type="button"
+                  label="Attach files"
+                  disabled={disabled || files.length >= MAX_ATTACHMENTS}
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  <PaperclipIcon />
+                </IconAction>
+              </>
+            ) : null}
+          </>
+        }
+        sending={sending}
+        canSend={canSend}
       />
       {suggestions !== null ? (
         // Above the reply box over the messages, as the chat app opens its picker.
@@ -1139,85 +1219,6 @@ function Composer({
           ))}
         </div>
       ) : null}
-      {files.length > 0 ? (
-        <ul className="flex flex-wrap gap-1" aria-label="Attached files">
-          {files.map((entry) => (
-            <li
-              key={entry.key}
-              className="flex min-w-0 items-center gap-1 rounded-md border border-border/70 py-0.5 ps-2 pe-0.5 text-xs"
-            >
-              <span className="max-w-48 truncate">{entry.name}</span>
-              {entry.uploadId === null ? (
-                <span className="text-muted-foreground">Uploading…</span>
-              ) : null}
-              <Button
-                type="button"
-                size="icon-xs"
-                variant="ghost-muted"
-                aria-label={`Remove ${entry.name}`}
-                onClick={() => setFiles(files.filter((other) => other.key !== entry.key))}
-              >
-                <XIcon />
-              </Button>
-            </li>
-          ))}
-        </ul>
-      ) : null}
-      <div className="flex items-center gap-2">
-        {error ? (
-          <p className="min-w-0 flex-1 text-xs text-destructive-foreground">{error}</p>
-        ) : mentions.length > 0 ? (
-          <p className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
-            Notifies {mentions.map((mention) => mention.name).join(", ")}
-          </p>
-        ) : (
-          <span className="flex-1" />
-        )}
-        {canMarkdown ? (
-          <IconAction
-            type="button"
-            label="Send as Markdown"
-            variant={markdown ? "outline" : "ghost-muted"}
-            aria-pressed={markdown}
-            disabled={disabled}
-            onClick={() => setMarkdown(!markdown)}
-          >
-            <MarkdownIcon />
-          </IconAction>
-        ) : null}
-        {canAttach ? (
-          <>
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              hidden
-              onChange={(event) => {
-                attach([...(event.target.files ?? [])]);
-                // The same file can be picked again after it was removed.
-                event.target.value = "";
-              }}
-            />
-            <IconAction
-              type="button"
-              label="Attach files"
-              disabled={disabled || files.length >= MAX_ATTACHMENTS}
-              onClick={() => fileInputRef.current?.click()}
-            >
-              <PaperclipIcon />
-            </IconAction>
-          </>
-        ) : null}
-        <Button
-          type="submit"
-          size="sm"
-          disabled={
-            disabled || sending || uploading || (text.trim().length === 0 && files.length === 0)
-          }
-        >
-          {sending ? "Sending…" : "Send"}
-        </Button>
-      </div>
     </form>
   );
 }

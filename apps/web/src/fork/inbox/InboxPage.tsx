@@ -56,7 +56,7 @@ import {
   type ReplyTarget,
 } from "./ConversationPane";
 import { DelegateDialog, type DelegateTarget } from "./DelegateDialog";
-import { DelegationPane } from "./DelegationPane";
+import { DelegationPane, ThreadStatus } from "./DelegationPane";
 import { IconAction } from "./IconAction";
 import { ConversationList, DelegationList } from "./InboxList";
 import { readMentionable, sendReply } from "./sendReply";
@@ -598,6 +598,9 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
                 ) : null}
                 {delegation.thread?.title ?? delegation.preview ?? "Delegation"}
               </span>
+              {delegation.thread && delegation.thread.status !== "deleted" ? (
+                <ThreadStatus environmentId={environmentId} thread={delegation.thread} />
+              ) : null}
               {delegation.thread && delegation.thread.status !== "deleted" ? (
                 <IconAction
                   label="Open thread"

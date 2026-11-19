@@ -2,7 +2,6 @@ import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { ThreadId, type EnvironmentId, type ScopedThreadRef } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import {
-  ChevronDownIcon,
   CircleAlertIcon,
   CircleDashedIcon,
   CircleDotDashedIcon,
@@ -16,7 +15,6 @@ import ChatView from "../../components/ChatView";
 import { BackgroundThreadContext } from "../../components/chat/backgroundThread";
 import { resolveSidebarRowStatus, type SidebarThreadStatus } from "../../components/Sidebar.logic";
 import { Button } from "../../components/ui/button";
-import { Textarea } from "../../components/ui/textarea";
 import { ComposerHandleContext } from "../../composerHandleContext";
 import { useDiffPanelStore } from "../../diffPanelStore";
 import type { SideChatParentPanel } from "../../lib/sideChatPane";
@@ -24,8 +22,8 @@ import { cn } from "../../lib/utils";
 import { useRightPanelStore } from "../../rightPanelStore";
 import { useThreadShell } from "../../state/entities";
 import type { DelegationDetail, LinkedThread } from "../types";
-import { authorsSummary, skippedNotice } from "./inboxView";
-import { MessageView } from "./MessageView";
+import { skippedNotice } from "./inboxView";
+import { ReplyBox, useSendKey } from "./ReplyBox";
 
 /** The sidebar's words, for when the thread is not in this client's sidebar state. */
 const THREAD_STATUS_LABELS: Readonly<Record<LinkedThread["status"], string | null>> = {
@@ -58,9 +56,9 @@ const SIDEBAR_STATUS: Readonly<
 };
 
 /**
- * A delegation: the messages it covers and the reply the thread drafted, over the thread itself.
- * The conversation with the agent is the thread's own chat, so its findings, requests, approvals
- * and launched threads show as they do everywhere else.
+ * A delegation: the reply the thread drafted, over the thread itself. The delegated messages are
+ * in the conversation beside it, and the conversation with the agent is the thread's own chat, so
+ * its findings, requests, approvals and launched threads show as they do everywhere else.
  */
 export function DelegationPane({
   environmentId,
@@ -83,13 +81,22 @@ export function DelegationPane({
   const live = thread !== null && thread.status !== "deleted" ? thread : null;
   const threadRef = live ? scopeThreadRef(environmentId, ThreadId.make(live.threadId)) : null;
   const shell = useThreadShell(threadRef);
+  const notices = [
+    detail.complete
+      ? null
+      : "These messages run past what T3 Code reads; the thread was given only part of them.",
+    detail.rootMissing
+      ? "The message this reply thread started from is no longer available."
+      : null,
+    skippedNotice(detail.skipped),
+  ].filter((notice) => notice !== null);
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <SourceMessages
-        environmentId={environmentId}
-        detail={detail}
-        status={live ? <ThreadStatus environmentId={environmentId} thread={live} /> : null}
-      />
+      {notices.map((notice) => (
+        <p key={notice} className={cn(LANE, "shrink-0 pt-2 text-xs text-warning")}>
+          {notice}
+        </p>
+      ))}
 
       {draftReply !== null ? (
         // A draft the thread rewrites replaces what the user had changed.
@@ -106,13 +113,16 @@ export function DelegationPane({
       {threadRef !== null && shell !== null ? (
         <DelegatedThreadChat threadRef={threadRef} />
       ) : (
-        <p className="px-4 py-3 text-sm text-muted-foreground">
+        <p className={cn(LANE, "py-3 text-sm text-muted-foreground")}>
           {thread === null ? "No thread yet." : "The thread was deleted."}
         </p>
       )}
     </div>
   );
 }
+
+/** The chat's lanes, so the draft lines up with the messages and the timeline keeps its gutter. */
+const LANE = "px-3 sm:px-12";
 
 /** The thread's draft, editable in place and sent from here. */
 function DraftReply({
@@ -129,6 +139,7 @@ function DraftReply({
   readonly onDiscard: () => void;
 }) {
   const [text, setText] = useState(draft);
+  const sendKey = useSendKey();
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const send = async () => {
@@ -138,52 +149,49 @@ function DraftReply({
     setSending(false);
     setError(failure);
   };
-  const empty = text.trim().length === 0;
+  const ready = canSend && !sending && text.trim().length > 0;
   return (
     <form
-      className="flex shrink-0 flex-col gap-2 border-b border-border/70 bg-muted/40 px-4 py-3"
+      className={cn(LANE, "shrink-0 border-b border-border/70 py-3")}
       onSubmit={(event) => {
         event.preventDefault();
-        if (canSend && !sending && !empty) void send();
+        if (ready) void send();
       }}
     >
-      <div className="flex min-w-0 items-center gap-2 text-xs">
-        <h3 className="shrink-0 font-medium text-muted-foreground">Draft reply</h3>
-        {target !== null ? (
-          <p className="min-w-0 truncate text-muted-foreground">{target}</p>
-        ) : null}
-      </div>
-      <Textarea
+      <ReplyBox
         aria-label="Draft reply"
         value={text}
-        rows={3}
-        className="max-h-60"
         disabled={sending}
         onChange={(event) => setText(event.target.value)}
         onKeyDown={(event) => {
-          if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+          if (sendKey.isSend(event)) {
             event.preventDefault();
             event.currentTarget.form?.requestSubmit();
           }
         }}
+        above={
+          <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+            <h3 className="shrink-0 font-medium">Draft reply</h3>
+            {target !== null ? <p className="min-w-0 truncate">{target}</p> : null}
+          </div>
+        }
+        status={
+          error !== null ? <span className="text-destructive-foreground">{error}</span> : null
+        }
+        actions={
+          <Button
+            type="button"
+            size="xs"
+            variant="ghost-muted"
+            disabled={sending}
+            onClick={onDiscard}
+          >
+            Discard
+          </Button>
+        }
+        sending={sending}
+        canSend={ready}
       />
-      <div className="flex items-center gap-2">
-        <Button type="submit" size="xs" disabled={sending || !canSend || empty}>
-          {sending ? "Sending…" : "Send"}
-        </Button>
-        <Button
-          type="button"
-          size="xs"
-          variant="ghost-muted"
-          disabled={sending}
-          onClick={onDiscard}
-        >
-          Discard
-        </Button>
-        {error !== null ? (
-          <p className="min-w-0 flex-1 text-xs text-destructive-foreground">{error}</p>
-        ) : null}
-      </div>
     </form>
   );
 }
@@ -208,11 +216,7 @@ function DelegatedThreadChat({ threadRef }: { readonly threadRef: ScopedThreadRe
     runShellCommand: openThread,
   };
   return (
-    // The chat shares the pane's 1rem edge with the messages and draft above it.
-    <div
-      data-side-chat-pane={threadRef.threadId}
-      className="flex min-h-0 flex-1 flex-col [--chat-lane-padding:1rem]"
-    >
+    <div data-side-chat-pane={threadRef.threadId} className="flex min-h-0 flex-1 flex-col">
       <BackgroundThreadContext value>
         <ComposerHandleContext value={null}>
           <ChatView
@@ -224,79 +228,6 @@ function DelegatedThreadChat({ threadRef }: { readonly threadRef: ScopedThreadRe
         </ComposerHandleContext>
       </BackgroundThreadContext>
     </div>
-  );
-}
-
-/** The delegated messages, folded to their authors beside the thread's status. */
-function SourceMessages({
-  environmentId,
-  detail,
-  status,
-}: {
-  readonly environmentId: EnvironmentId;
-  readonly detail: DelegationDetail;
-  readonly status: ReactNode;
-}) {
-  const [open, setOpen] = useState(false);
-  const authors = authorsSummary(detail.messages);
-  const count = detail.messages.length;
-  const notices = [
-    detail.complete
-      ? null
-      : "These messages run past what T3 Code reads; only part of them is shown.",
-    detail.rootMissing
-      ? "The message this reply thread started from is no longer available."
-      : null,
-    skippedNotice(detail.skipped),
-  ].filter((notice) => notice !== null);
-  return (
-    <section
-      className={cn(
-        "flex max-h-[45%] min-w-0 shrink-0 flex-col gap-2 border-b border-border/70 px-4 py-2.5",
-        open && "overflow-y-auto overscroll-contain",
-      )}
-    >
-      <header className="flex min-w-0 items-center gap-2">
-        {count === 0 ? (
-          <span className="flex-1" />
-        ) : (
-          <button
-            type="button"
-            aria-expanded={open}
-            className="flex min-w-0 flex-1 items-center gap-2 text-left text-xs text-muted-foreground hover:text-foreground"
-            onClick={() => setOpen(!open)}
-          >
-            <ChevronDownIcon className={cn("size-3.5 shrink-0", !open && "-rotate-90")} />
-            <span className="shrink-0 font-medium">
-              {count === 1 ? "1 message" : `${count} messages`}
-            </span>
-            {authors !== null && !open ? (
-              <span className="min-w-0 truncate">· {authors}</span>
-            ) : null}
-          </button>
-        )}
-        {status}
-      </header>
-      {notices.map((notice) => (
-        <p key={notice} className="text-xs text-warning">
-          {notice}
-        </p>
-      ))}
-      {open ? (
-        <ol className="flex flex-col gap-3">
-          {detail.messages.map((message, index) => (
-            <li key={message.id} className="flex min-w-0 flex-col">
-              <MessageView
-                environmentId={environmentId}
-                channelId={detail.delegation.channelId}
-                message={message}
-                showAuthor={detail.messages[index - 1]?.author.id !== message.author.id}
-              />
-            </li>
-          ))}
-        </ol>
-      ) : null}
-    </section>
   );
 }
 
