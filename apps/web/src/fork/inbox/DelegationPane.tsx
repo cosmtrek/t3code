@@ -1,6 +1,6 @@
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
-import { ThreadId, type EnvironmentId } from "@t3tools/contracts";
-import { CHAT_USER_MARKDOWN_REMARK_PLUGINS } from "@t3tools/shared/markdownPipeline";
+import { ThreadId, type EnvironmentId, type ScopedThreadRef } from "@t3tools/contracts";
+import { useNavigate } from "@tanstack/react-router";
 import {
   ChevronDownIcon,
   CircleAlertIcon,
@@ -10,17 +10,21 @@ import {
   ShieldQuestionIcon,
   UserRoundIcon,
 } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 import ChatMarkdown from "../../components/ChatMarkdown";
+import ChatView from "../../components/ChatView";
+import { BackgroundThreadContext } from "../../components/chat/backgroundThread";
 import { resolveSidebarRowStatus, type SidebarThreadStatus } from "../../components/Sidebar.logic";
 import { Button } from "../../components/ui/button";
-import { Textarea } from "../../components/ui/textarea";
+import { ComposerHandleContext } from "../../composerHandleContext";
+import { useDiffPanelStore } from "../../diffPanelStore";
+import type { SideChatParentPanel } from "../../lib/sideChatPane";
 import { cn } from "../../lib/utils";
+import { useRightPanelStore } from "../../rightPanelStore";
 import { useThreadShell } from "../../state/entities";
-import { forkRequest } from "../forkApiAccess";
 import { useFormatTimestamp } from "../presentation";
-import type { DelegationDetail, FollowUp, LinkedThread } from "../types";
+import type { DelegationDetail, LinkedThread } from "../types";
 import { authorsSummary, skippedNotice } from "./inboxView";
 import { MessageView } from "./MessageView";
 
@@ -55,8 +59,9 @@ const SIDEBAR_STATUS: Readonly<
 };
 
 /**
- * A delegation: what the thread found, the conversation with it, and the reply. The thread does
- * the work; this pane only asks it things and takes the reply when the user wants one.
+ * A delegation: what the thread found and the reply it drafted, over the thread itself. The
+ * conversation with the agent is the thread's own chat, so requests, approvals and launched
+ * threads show as they do everywhere else.
  */
 export function DelegationPane({
   environmentId,
@@ -74,104 +79,137 @@ export function DelegationPane({
 }) {
   const thread = detail.delegation.thread;
   const live = thread !== null && thread.status !== "deleted" ? thread : null;
-  const shell = useThreadShell(
-    live ? scopeThreadRef(environmentId, ThreadId.make(live.threadId)) : null,
-  );
+  const threadRef = live ? scopeThreadRef(environmentId, ThreadId.make(live.threadId)) : null;
+  const shell = useThreadShell(threadRef);
   const cwd = shell?.worktreePath ?? undefined;
-  const canAsk = live !== null && live.status !== "archived" && !detail.conclusionIsHistorical;
+  const chat = threadRef !== null && shell !== null && !detail.conclusionIsHistorical;
+  const [open, setOpen] = useState(true);
   const draft = detail.draft?.trim() ?? "";
   const formatTimestamp = useFormatTimestamp();
-  const draftCard = (
-    <div className="flex flex-col gap-2.5 rounded-lg border border-border/70 bg-muted/40 p-3">
-      <p className="text-sm whitespace-pre-wrap wrap-anywhere">{draft}</p>
-      <div className="flex gap-2">
-        <Button
-          size="xs"
-          variant="outline"
-          disabled={sendingOff || !detail.canSend}
-          onClick={() => onUseDraft(draft)}
-        >
-          Accept
-        </Button>
-        <Button size="xs" variant="ghost-muted" onClick={() => onDiscardDraft(draft)}>
-          Discard
-        </Button>
-      </div>
-    </div>
-  );
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto overscroll-contain px-4 py-3">
-        <SourceMessages environmentId={environmentId} detail={detail} />
+      <div
+        className={cn(
+          "flex flex-col overflow-y-auto overscroll-contain px-4 py-2.5",
+          chat ? "max-h-[45%] shrink-0 border-b border-border/70" : "min-h-0 flex-1",
+        )}
+      >
+        <header className="flex min-w-0 items-center gap-2">
+          <button
+            type="button"
+            aria-expanded={open}
+            className="flex min-w-0 flex-1 items-center gap-2 text-left text-xs font-medium text-muted-foreground hover:text-foreground"
+            onClick={() => setOpen(!open)}
+          >
+            <ChevronDownIcon className={cn("size-3.5 shrink-0", !open && "-rotate-90")} />
+            <span className="min-w-0 truncate">
+              {detail.conclusionIsHistorical ? "Earlier conclusion" : "Conclusion"}
+            </span>
+          </button>
+          {live ? <ThreadStatus environmentId={environmentId} thread={live} /> : null}
+        </header>
+        {open ? (
+          <div className="flex min-w-0 flex-col gap-4 pt-2.5">
+            {detail.conclusion !== null ? (
+              <ChatMarkdown
+                text={detail.conclusion}
+                cwd={cwd}
+                headingLevelOffset={3}
+                className="text-sm"
+              />
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                {thread === null
+                  ? "No thread yet."
+                  : live === null
+                    ? "The thread was deleted."
+                    : live.status === "idle"
+                      ? "Finished without a conclusion."
+                      : "None yet."}
+              </p>
+            )}
 
-        <Section
-          title={detail.conclusionIsHistorical ? "Earlier conclusion" : "Conclusion"}
-          accessory={live ? <ThreadStatus environmentId={environmentId} thread={live} /> : null}
-        >
-          {detail.conclusion !== null ? (
-            <ChatMarkdown
-              text={detail.conclusion}
-              cwd={cwd}
-              headingLevelOffset={3}
-              className="text-sm"
-            />
-          ) : (
-            <p className="text-sm text-muted-foreground">
-              {thread === null
-                ? "No thread yet."
-                : live === null
-                  ? "The thread was deleted."
-                  : live.status === "idle"
-                    ? "Finished without a conclusion."
-                    : "None yet."}
-            </p>
-          )}
-        </Section>
+            {detail.sent.length > 0 ? (
+              <Section title="Replied">
+                <ol className="flex flex-col gap-2">
+                  {detail.sent.map((reply) => (
+                    <li key={reply.sentAt} className="flex min-w-0 flex-col gap-0.5">
+                      <span className="text-xs text-muted-foreground">
+                        <time dateTime={reply.sentAt}>{formatTimestamp(reply.sentAt)}</time> ·{" "}
+                        {reply.source}
+                      </span>
+                      <p className="line-clamp-3 text-sm whitespace-pre-wrap wrap-anywhere text-foreground/80">
+                        {reply.text}
+                      </p>
+                    </li>
+                  ))}
+                </ol>
+              </Section>
+            ) : null}
 
-        {draft.length > 0 && detail.followUps.length === 0 ? (
-          <Section title="Draft reply">{draftCard}</Section>
-        ) : null}
-
-        {detail.sent.length > 0 ? (
-          <Section title="Replied">
-            <ol className="flex flex-col gap-2">
-              {detail.sent.map((reply) => (
-                <li key={reply.sentAt} className="flex min-w-0 flex-col gap-0.5">
-                  <span className="text-xs text-muted-foreground">
-                    <time dateTime={reply.sentAt}>{formatTimestamp(reply.sentAt)}</time> ·{" "}
-                    {reply.source}
-                  </span>
-                  <p className="line-clamp-3 text-sm whitespace-pre-wrap wrap-anywhere text-foreground/80">
-                    {reply.text}
-                  </p>
-                </li>
-              ))}
-            </ol>
-          </Section>
-        ) : null}
-
-        {detail.followUps.length > 0 ? (
-          <Section title="With the agent">
-            <ol className="flex flex-col gap-3">
-              {detail.followUps.map((entry) => (
-                <li key={`${entry.role}:${entry.at}`} className="flex min-w-0 flex-col gap-0.5">
-                  <FollowUpEntry entry={entry} cwd={cwd} />
-                </li>
-              ))}
-              {draft.length > 0 ? <li className="flex min-w-0 flex-col">{draftCard}</li> : null}
-            </ol>
-          </Section>
+            <SourceMessages environmentId={environmentId} detail={detail} />
+          </div>
         ) : null}
       </div>
-      {canAsk ? (
-        <AgentComposer
-          key={live.threadId}
-          environmentId={environmentId}
-          detail={detail}
-          draft={draft}
-          onDraftReady={sendingOff || !detail.canSend ? null : onUseDraft}
-        />
+
+      {draft.length > 0 ? (
+        <div className="flex shrink-0 flex-col gap-2.5 border-b border-border/70 bg-muted/40 px-4 py-3">
+          <h3 className="text-xs font-medium text-muted-foreground">Draft reply</h3>
+          <p className="max-h-40 overflow-y-auto text-sm whitespace-pre-wrap wrap-anywhere">
+            {draft}
+          </p>
+          <div className="flex gap-2">
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={sendingOff || !detail.canSend}
+              onClick={() => onUseDraft(draft)}
+            >
+              Accept
+            </Button>
+            <Button size="xs" variant="ghost-muted" onClick={() => onDiscardDraft(draft)}>
+              Discard
+            </Button>
+          </div>
+        </div>
       ) : null}
+
+      {chat ? <DelegatedThreadChat threadRef={threadRef} /> : null}
+    </div>
+  );
+}
+
+/**
+ * The thread's own chat, embedded as a side chat is. Diffs and shell commands need the thread's
+ * panel and terminal, so they open the thread.
+ */
+function DelegatedThreadChat({ threadRef }: { readonly threadRef: ScopedThreadRef }) {
+  const navigate = useNavigate();
+  const openThread = () =>
+    void navigate({
+      to: "/$environmentId/$threadId",
+      params: { environmentId: threadRef.environmentId, threadId: threadRef.threadId },
+    });
+  const parentPanel: SideChatParentPanel = {
+    openToolDiff: (target) => {
+      useDiffPanelStore.getState().selectToolCall(threadRef, target);
+      useRightPanelStore.getState().open(threadRef, "diff");
+      openThread();
+    },
+    runShellCommand: openThread,
+  };
+  return (
+    <div data-side-chat-pane={threadRef.threadId} className="flex min-h-0 flex-1 flex-col">
+      <BackgroundThreadContext value>
+        <ComposerHandleContext value={null}>
+          <ChatView
+            environmentId={threadRef.environmentId}
+            threadId={threadRef.threadId}
+            routeKind="server"
+            embedded={parentPanel}
+          />
+        </ComposerHandleContext>
+      </BackgroundThreadContext>
     </div>
   );
 }
@@ -256,145 +294,6 @@ function SourceMessages({
         </div>
       ) : null}
     </section>
-  );
-}
-
-function FollowUpEntry({
-  entry,
-  cwd,
-}: {
-  readonly entry: FollowUp;
-  readonly cwd: string | undefined;
-}) {
-  if (entry.role === "assistant") {
-    return <ChatMarkdown text={entry.text} cwd={cwd} headingLevelOffset={3} className="text-sm" />;
-  }
-  return (
-    <div className="flex max-w-[90%] flex-col gap-0.5 self-end rounded-2xl rounded-tr-sm bg-muted px-3 py-2">
-      {entry.kind === "draft" ? (
-        entry.text.length > 0 ? (
-          <>
-            <span className="text-2xs font-medium text-muted-foreground">Draft reply</span>
-            <UserText text={entry.text} cwd={cwd} />
-          </>
-        ) : (
-          <p className="text-sm text-muted-foreground">Draft a reply</p>
-        )
-      ) : (
-        <UserText text={entry.text} cwd={cwd} />
-      )}
-    </div>
-  );
-}
-
-/** What the user asked, rendered like their messages in chat so quotes show as cards. */
-function UserText({ text, cwd }: { readonly text: string; readonly cwd: string | undefined }) {
-  return (
-    <ChatMarkdown
-      text={text}
-      cwd={cwd}
-      className="text-sm wrap-anywhere"
-      lineBreaks
-      parseRawHtml={false}
-      extraRemarkPlugins={CHAT_USER_MARKDOWN_REMARK_PLUGINS}
-      headingLevelOffset={3}
-    />
-  );
-}
-
-/**
- * One box for the thread: a question, or how to write the reply. Nothing typed here reaches the
- * chat app; the reply lands in the draft and goes out only from the conversation's reply box.
- */
-function AgentComposer({
-  environmentId,
-  detail,
-  draft,
-  onDraftReady,
-}: {
-  readonly environmentId: EnvironmentId;
-  readonly detail: DelegationDetail;
-  readonly draft: string;
-  /** Takes a draft the thread wrote in answer to this box. */
-  readonly onDraftReady: ((text: string) => void) | null;
-}) {
-  const [text, setText] = useState("");
-  // The newest request the thread had recorded when this one was sent; waiting until it moves.
-  const [sentAfter, setSentAfter] = useState<string | null | undefined>(undefined);
-  const [error, setError] = useState<string | null>(null);
-  const lastAsked = detail.followUps.findLast((entry) => entry.role === "user")?.at ?? null;
-  const waiting = sentAfter !== undefined && sentAfter === lastAsked;
-  const working = waiting || detail.followUps.at(-1)?.role === "user";
-  // The draft when the last message went out; a different one after the run answers it.
-  const draftBefore = useRef<string | undefined>(undefined);
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- hands the requested draft to the reply box, which lives outside this pane, once the run ends
-  useEffect(() => {
-    const before = draftBefore.current;
-    if (before === undefined || working) return;
-    draftBefore.current = undefined;
-    if (draft.length > 0 && draft !== before) onDraftReady?.(draft);
-  }, [working, draft, onDraftReady]);
-
-  const submit = async () => {
-    const value = text.trim();
-    if (value.length === 0) return;
-    setSentAfter(lastAsked);
-    draftBefore.current = draft;
-    setError(null);
-    setText("");
-    const failure = await forkRequest(environmentId, "/inbox/ask", {
-      method: "POST",
-      body: {
-        channelId: detail.delegation.channelId,
-        delegationId: detail.delegation.id,
-        text: value,
-      },
-    }).then(
-      () => null,
-      (cause: unknown) => (cause instanceof Error ? cause.message : String(cause)),
-    );
-    if (failure !== null) {
-      setSentAfter(undefined);
-      draftBefore.current = undefined;
-      setText(value);
-      setError(failure);
-    }
-  };
-
-  return (
-    <form
-      className="flex shrink-0 flex-col gap-2 border-t border-border/70 p-3"
-      onSubmit={(event) => {
-        event.preventDefault();
-        void submit();
-      }}
-    >
-      <Textarea
-        aria-label="Message the agent"
-        value={text}
-        rows={2}
-        placeholder="Ask the agent, or tell it what to reply…"
-        onChange={(event) => setText(event.target.value)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-            event.preventDefault();
-            event.currentTarget.form?.requestSubmit();
-          }
-        }}
-      />
-      <div className="flex items-center gap-2">
-        {error ? (
-          <p className="min-w-0 flex-1 text-xs text-destructive-foreground">{error}</p>
-        ) : (
-          <p className="min-w-0 flex-1 text-xs text-muted-foreground">
-            {working ? "Working…" : null}
-          </p>
-        )}
-        <Button type="submit" size="sm" disabled={waiting || text.trim().length === 0}>
-          Ask
-        </Button>
-      </div>
-    </form>
   );
 }
 

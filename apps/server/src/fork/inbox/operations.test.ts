@@ -25,7 +25,6 @@ import { ChannelHub } from "../channels/hub.ts";
 import type { AdapterRequest, AdapterResponse } from "../channels/transport.ts";
 import { threadContextDir } from "./artifacts.ts";
 import { delegationIdFor } from "./derive.ts";
-import { buildContextMarkdown } from "./context.ts";
 import { InboxRuntime } from "./InboxRuntime.ts";
 import { followLinkedThreads } from "./linkedThreads.ts";
 import * as Inbox from "./operations.ts";
@@ -177,10 +176,6 @@ interface Harness {
   readonly uploaded: number[];
   readonly runtime: InboxRuntime["Service"];
   readonly shells: Map<string, OrchestrationV2ThreadShell | null>;
-  /** Each thread's messages, as `getThreadRecords` reads them. */
-  readonly threadMessages: Map<string, ReadonlyArray<unknown>>;
-  /** What was sent to threads. */
-  readonly sent: Array<ThreadManagement.ThreadManagementSendInput>;
   readonly layer: Layer.Layer<
     InboxRuntime | ThreadManagement.ThreadManagementService | Project.ProjectService
   >;
@@ -240,18 +235,11 @@ async function harness(
     subscribe: (listener: Parameters<ChannelHub["subscribe"]>[0]) => hub.subscribe(listener),
   };
   const shells = new Map<string, OrchestrationV2ThreadShell | null>();
-  const threadMessages = new Map<string, ReadonlyArray<unknown>>();
-  const sent: Array<ThreadManagement.ThreadManagementSendInput> = [];
   const layer = Layer.mergeAll(
     Layer.succeed(InboxRuntime, runtime),
     Layer.mock(ThreadManagement.ThreadManagementService)({
       getThreadShell: (threadId) => Effect.succeed(shells.get(threadId) ?? null),
-      getThreadRecords: (threadId) =>
-        Effect.succeed({ messages: threadMessages.get(threadId) ?? [] } as never),
-      sendToThread: (input) => {
-        sent.push(input);
-        return Effect.succeed({ message: { attachments: [] } } as never);
-      },
+      getThreadRecords: () => Effect.succeed({ messages: [] } as never),
     }),
     Layer.mock(Project.ProjectService)({ listShells: () => Effect.succeed([]) }),
   );
@@ -262,8 +250,6 @@ async function harness(
     uploaded,
     runtime,
     shells,
-    threadMessages,
-    sent,
     layer,
     keyOf: (conversationId) => ({ channelId, conversationId }),
   };
@@ -1097,100 +1083,6 @@ describe("sending", () => {
       ).pipe(Effect.provide(plain.layer), Effect.flip);
       expect([noFiles.status, noUpload.status]).toEqual([400, 400]);
       expect(plain.posted).toHaveLength(1);
-    }),
-  );
-});
-
-describe("asking a delegation's thread", () => {
-  const oneConversation = (): ReadonlyArray<FakeConversation> => [
-    { id: "c", messages: [{ id: "m1", minute: 1, author: THEM }] },
-  ];
-  const askLayer = (h: Harness) =>
-    Layer.mergeAll(
-      h.layer,
-      Layer.succeed(ServerConfig.ServerConfig, {} as never),
-      Layer.mock(DocumentText.DocumentText)({}),
-      FileSystem.layerNoop({}),
-    );
-
-  it.effect("asks only a delegation that has a thread, and queues behind a running one", () =>
-    Effect.gen(function* () {
-      const h = yield* Effect.promise(() => harness(oneConversation));
-      const delegationId = saveDelegation(h, "c", "m1");
-      const ask = (text: string) =>
-        Inbox.ask({ channelId: h.channelId, delegationId, text }).pipe(Effect.provide(askLayer(h)));
-      expect(yield* Effect.flip(ask(" Why? "))).toMatchObject({ status: 400 });
-      expect(h.sent).toEqual([]);
-
-      const { dir } = yield* linkThread(h, "c", "m1", "thread-1", 1);
-      expect(yield* Effect.flip(ask(" "))).toMatchObject({ status: 400 });
-      // A thread whose context predates the draft rule gets it with each message.
-      yield* ask(" Why? ");
-      expect(h.sent).toHaveLength(1);
-      expect(h.sent[0]).toMatchObject({ threadId: "thread-1", projectId: "p", mode: "queue" });
-      expect(h.sent[0]!.text).toMatch(/^Why\?\n\n\(If this asks for the reply/);
-      expect(h.sent[0]!.text).toContain(`${dir}/draft.md`);
-      expect(h.sent[0]!.text).toContain(`${dir}/conclusion.md`);
-
-      yield* Effect.promise(() =>
-        NodeFSP.writeFile(
-          NodePath.join(dir, "context.md"),
-          buildContextMarkdown({
-            channelName: "Chat",
-            conversation: { name: "c", kind: "dm" },
-            messages: [],
-            images: [],
-            senderName: "",
-            senderHistory: [],
-            contextDir: dir,
-            openUrl: null,
-            skippedMessages: 0,
-            markdown: false,
-          }),
-        ),
-      );
-      yield* ask(" Tell them it is fixed ");
-      expect(h.sent[1]!.text).toBe("Tell them it is fixed");
-    }),
-  );
-
-  it.effect("shows the questions asked after the delegation without the note sent with them", () =>
-    Effect.gen(function* () {
-      const h = yield* Effect.promise(() => harness(oneConversation));
-      const { delegationId, dir } = yield* linkThread(h, "c", "m1", "thread-1", 1);
-      yield* Inbox.ask({ channelId: h.channelId, delegationId, text: "Why?" }).pipe(
-        Effect.provide(askLayer(h)),
-      );
-      const message = (role: string, text: string, runId: string | null, minute: number) => ({
-        role,
-        text,
-        runId,
-        streaming: false,
-        createdAt: DateTime.makeUnsafe(at(minute)),
-      });
-      const earlierDraftRequest = [
-        "Keep it short",
-        "",
-        `(Write the reply I should send in the chat to \`${dir}/draft.md\`, from everything so far: plain text, in the language of the conversation, ready to send as is. If you cannot write files there, end your message with \`<draft>…</draft>\` instead.)`,
-      ].join("\n");
-      h.threadMessages.set("thread-1", [
-        message("user", "Delegated", "run-1", 1),
-        message("assistant", "Looked into it", "run-1", 2),
-        message("user", h.sent[0]!.text, "run-2", 3),
-        message("assistant", "Thinking", "run-2", 4),
-        message("assistant", "Because of the cache", "run-2", 5),
-        message("user", "And then?", null, 6),
-        message("user", earlierDraftRequest, null, 7),
-      ]);
-      const detail = yield* Inbox.readDelegation(delegationQuery(h, delegationId)).pipe(
-        Effect.provide(h.layer),
-      );
-      expect(detail.followUps.map(({ role, kind, text }) => [role, kind, text])).toEqual([
-        ["user", "question", "Why?"],
-        ["assistant", "question", "Because of the cache"],
-        ["user", "question", "And then?"],
-        ["user", "draft", "Keep it short"],
-      ]);
     }),
   );
 });

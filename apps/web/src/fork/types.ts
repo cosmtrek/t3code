@@ -278,8 +278,6 @@ export interface DelegationDetail {
   readonly draft: string | null;
   readonly conclusionIsHistorical: boolean;
   readonly previousThreads: ReadonlyArray<LinkedThread>;
-  /** Questions asked from the inbox and the agent's answers, latest five rounds. */
-  readonly followUps: ReadonlyArray<FollowUp>;
   /** Replies sent from this delegation, newest first. */
   readonly sent: ReadonlyArray<SentReply>;
 }
@@ -288,14 +286,6 @@ export interface SentReply {
   readonly sentAt: string;
   readonly source: "draft" | "edited draft" | "typed";
   readonly text: string;
-}
-
-export interface FollowUp {
-  readonly role: "user" | "assistant";
-  /** What a user entry asked for: an answer, or the reply to send. */
-  readonly kind: "question" | "draft";
-  readonly text: string;
-  readonly at: string;
 }
 
 export type WorkspaceStrategy =

@@ -92,9 +92,9 @@ One read of the conversation list is all the list costs; each conversation carri
 and mention summary. The other routes go through the same layers. `conversation` reads one page
 of a conversation's messages for the chat view. `delegation` reads what a delegation covers: a
 reply thread through `?root=`, or a range by paging the conversation back to its first message.
-`delegate` ends in `launchThread`, in the checkout the dialog chose; `ask` ends in
-`sendToThread` on the delegation's current thread, queued behind a running turn, and never
-reaches the adapter; `send` ends in the adapter's `POST /messages`.
+`delegate` ends in `launchThread`, in the checkout the dialog chose; `send` ends in the adapter's
+`POST /messages`. The conversation with the agent has no inbox route: the delegation view embeds
+the thread's own chat, so requests, approvals, and launched threads read as they do in the thread.
 
 ## Change signals
 
@@ -109,7 +109,7 @@ again.
 | Only `lastSyncAt` moved (sent as `{ type: "sync" }`)                | `ChannelHub.check`           |
 | A thread wrote to its context folder (300 ms debounce)              | `fs.watch` in `InboxRuntime` |
 | A linked thread's run status changed, or it was archived or deleted | `linkedThreads.ts`           |
-| Save, remove, delegate, ask, send, read, seen, or read all          | the operation itself         |
+| Save, remove, delegate, send, read, seen, or read all               | the operation itself         |
 
 State is derived on fetch. Requests for one channel share a derivation until the hub's
 `revision` for it moves (any signal above except `sync`) or it is 10 s old, so a missed signal is
