@@ -15,7 +15,6 @@ import {
 } from "lucide-react";
 import { useRef, useState, type CSSProperties, type ReactNode } from "react";
 
-import { WorkspacePageHeader } from "../../components/WorkspacePageHeader";
 import { RightPanelResizeHandle } from "../../components/preview/RightPanelResizeHandle";
 import { Button } from "../../components/ui/button";
 import {
@@ -43,7 +42,7 @@ import {
 } from "../../components/ui/select";
 import { SidebarInset } from "../../components/ui/sidebar";
 import { Toggle, ToggleGroup } from "../../components/ui/toggle-group";
-import { isElectron } from "../../env";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../../components/ui/tooltip";
 import { RESIZABLE_WIDTH_PROPERTY, useResizableWidth } from "../../hooks/useResizableWidth";
 import { cn } from "../../lib/utils";
 import { ChannelStatusDot, formatSince } from "../presentation";
@@ -58,6 +57,7 @@ import {
 import { DelegateDialog, type DelegateTarget } from "./DelegateDialog";
 import { DelegationPane, ThreadStatus } from "./DelegationPane";
 import { IconAction } from "./IconAction";
+import { PaneHeader } from "./PaneHeader";
 import { ConversationList, DelegationList } from "./InboxList";
 import { readMentionable, sendReply } from "./sendReply";
 import {
@@ -141,40 +141,47 @@ export function InboxPage() {
   return (
     <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none">
       <div className="flex min-h-0 flex-1 flex-col bg-background">
-        <WorkspacePageHeader electron={isElectron} className="border-b">
-          <h1 className="truncate text-sm font-medium">Inbox</h1>
-          {inboxes.length > 1 && inbox ? (
-            <Select
-              value={inbox.environmentId}
-              onValueChange={(value) => {
-                if (!value) return;
-                setChosenEnvironment(value);
-                storeEnvironment(value);
-              }}
-            >
-              <SelectTrigger aria-label="Environment" size="xs" className="w-auto max-w-48">
-                <SelectValue>{inbox.label}</SelectValue>
-              </SelectTrigger>
-              <SelectPopup>
-                {inboxes.map((candidate) => (
-                  <SelectItem key={candidate.environmentId} value={candidate.environmentId}>
-                    {candidate.label}
-                    {candidate.unreadCount > 0 ? ` (${candidate.unreadCount})` : ""}
-                  </SelectItem>
-                ))}
-              </SelectPopup>
-            </Select>
-          ) : null}
-        </WorkspacePageHeader>
         {inbox ? (
-          <EnvironmentInboxView key={inbox.environmentId} inbox={inbox} />
-        ) : (
-          <InboxEmpty
-            icon={<MessagesSquareIcon />}
-            title="No channels"
-            description="Enable a channel on a connected environment."
-            settingsLink
+          <EnvironmentInboxView
+            key={inbox.environmentId}
+            inbox={inbox}
+            environmentPicker={
+              inboxes.length > 1 ? (
+                <Select
+                  value={inbox.environmentId}
+                  onValueChange={(value) => {
+                    if (!value) return;
+                    setChosenEnvironment(value);
+                    storeEnvironment(value);
+                  }}
+                >
+                  <SelectTrigger aria-label="Environment" size="xs" className="w-auto min-w-0">
+                    <SelectValue>{inbox.label}</SelectValue>
+                  </SelectTrigger>
+                  <SelectPopup>
+                    {inboxes.map((candidate) => (
+                      <SelectItem key={candidate.environmentId} value={candidate.environmentId}>
+                        {candidate.label}
+                        {candidate.unreadCount > 0 ? ` (${candidate.unreadCount})` : ""}
+                      </SelectItem>
+                    ))}
+                  </SelectPopup>
+                </Select>
+              ) : null
+            }
           />
+        ) : (
+          <>
+            <PaneHeader edge="list">
+              <h1 className="truncate px-1 text-sm font-medium">Inbox</h1>
+            </PaneHeader>
+            <InboxEmpty
+              icon={<MessagesSquareIcon />}
+              title="No channels"
+              description="Enable a channel on a connected environment."
+              settingsLink
+            />
+          </>
         )}
       </div>
     </SidebarInset>
@@ -211,7 +218,13 @@ function InboxEmpty({
   );
 }
 
-function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
+function EnvironmentInboxView({
+  inbox,
+  environmentPicker,
+}: {
+  readonly inbox: EnvironmentInbox;
+  readonly environmentPicker: ReactNode;
+}) {
   const environmentId = inbox.environmentId;
   const navigate = useNavigate();
   const listWidth = useResizableWidth({
@@ -283,6 +296,7 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
   const readOnly = listing.data?.access.stale ?? !channel.access.send;
   const draftReply = draftReplyOf(detail.data, delegation, channel.capabilities);
   const banner = channelBanner(channel);
+  const syncedLabel = `${channel.selfName ? `${channel.selfName} · ` : ""}synced ${formatSince(channel.lastSyncAt)}`;
 
   const onSetRead = async (target: InboxConversation, read: boolean) => {
     const token = Symbol(target.id);
@@ -399,44 +413,6 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex min-w-0 shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b px-3 py-1.5 text-xs">
-        {inbox.channels.length > 1 ? (
-          <Select value={channel.id} onValueChange={(value) => value && setChannelId(value)}>
-            <SelectTrigger aria-label="Channel" size="xs" className="w-auto max-w-48">
-              <SelectValue>{channel.name}</SelectValue>
-            </SelectTrigger>
-            <SelectPopup>
-              {inbox.channels.map((candidate) => (
-                <SelectItem key={candidate.id} value={candidate.id}>
-                  {candidate.name}
-                </SelectItem>
-              ))}
-            </SelectPopup>
-          </Select>
-        ) : (
-          <span className="flex min-w-0 items-center gap-1.5 font-medium">
-            <ChannelStatusDot status={channel.status} />
-            <span className="truncate">{channel.name}</span>
-          </span>
-        )}
-        {banner === null ? (
-          <span className="text-muted-foreground">
-            {channel.selfName ? `${channel.selfName} · ` : ""}synced{" "}
-            {formatSince(channel.lastSyncAt)}
-          </span>
-        ) : (
-          <span
-            role="status"
-            className={cn(
-              "min-w-0 flex-1",
-              banner.tone === "error" ? "text-destructive-foreground" : "text-warning",
-            )}
-          >
-            {banner.text}
-          </span>
-        )}
-      </div>
-
       <div ref={containerRef} className="@container/inbox flex min-h-0 flex-1">
         <section
           aria-label={view === "agent" ? "Delegations" : "Conversations"}
@@ -451,27 +427,33 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
             label="Resize the list"
             className="-right-1 left-auto hidden @2xl/inbox:block any-pointer-coarse:-right-2 any-pointer-coarse:left-auto"
           />
-          <div className="flex shrink-0 items-center gap-2 p-2">
-            <ToggleGroup
-              value={[view]}
-              onValueChange={(next) => {
-                const value = next[0] as InboxView | undefined;
-                if (!value) return;
-                setView(value);
-                setHeldId(null);
-              }}
-              aria-label="Inbox view"
-            >
-              {INBOX_VIEWS.map((option) => {
-                const count = viewCount(option.id);
-                return (
-                  <Toggle key={option.id} value={option.id} aria-label={option.label}>
-                    {option.label}
-                    {count > 0 ? ` ${count}` : ""}
-                  </Toggle>
-                );
-              })}
-            </ToggleGroup>
+          <PaneHeader edge="list">
+            <h1 className="shrink-0 px-1 text-sm font-medium">Inbox</h1>
+            {environmentPicker}
+            <Tooltip>
+              <TooltipTrigger
+                render={<span className="flex shrink-0 p-1" aria-label={syncedLabel} />}
+              >
+                <ChannelStatusDot status={channel.status} />
+              </TooltipTrigger>
+              <TooltipPopup>{syncedLabel}</TooltipPopup>
+            </Tooltip>
+            {inbox.channels.length > 1 ? (
+              <Select value={channel.id} onValueChange={(value) => value && setChannelId(value)}>
+                <SelectTrigger aria-label="Channel" size="xs" className="w-auto min-w-0">
+                  <SelectValue>{channel.name}</SelectValue>
+                </SelectTrigger>
+                <SelectPopup>
+                  {inbox.channels.map((candidate) => (
+                    <SelectItem key={candidate.id} value={candidate.id}>
+                      {candidate.name}
+                    </SelectItem>
+                  ))}
+                </SelectPopup>
+              </Select>
+            ) : (
+              <span className="min-w-0 truncate text-xs text-muted-foreground">{channel.name}</span>
+            )}
             <IconAction
               label="Mark all as read"
               className="ms-auto"
@@ -503,6 +485,39 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
                 </MenuRadioGroup>
               </MenuPopup>
             </Menu>
+          </PaneHeader>
+          {banner === null ? null : (
+            <p
+              role="status"
+              className={cn(
+                "shrink-0 border-b px-3 py-1.5 text-xs",
+                banner.tone === "error" ? "text-destructive-foreground" : "text-warning",
+              )}
+            >
+              {banner.text}
+            </p>
+          )}
+          <div className="shrink-0 p-2">
+            <ToggleGroup
+              value={[view]}
+              onValueChange={(next) => {
+                const value = next[0] as InboxView | undefined;
+                if (!value) return;
+                setView(value);
+                setHeldId(null);
+              }}
+              aria-label="Inbox view"
+            >
+              {INBOX_VIEWS.map((option) => {
+                const count = viewCount(option.id);
+                return (
+                  <Toggle key={option.id} value={option.id} aria-label={option.label}>
+                    {option.label}
+                    {count > 0 ? ` ${count}` : ""}
+                  </Toggle>
+                );
+              })}
+            </ToggleGroup>
           </div>
           {listing.data?.truncatedAtPages ? (
             <p className="shrink-0 px-3 pb-1.5 text-xs text-muted-foreground">
@@ -559,6 +574,7 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
           />
         ) : delegationOpen ? null : (
           <section className="hidden min-h-0 min-w-0 flex-1 flex-col @2xl/inbox:flex">
+            <PaneHeader edge="detail" />
             <InboxEmpty icon={<MessageSquareIcon />} title="No conversation selected" />
           </section>
         )}
@@ -580,7 +596,7 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
                 className="hidden @5xl/inbox:block"
               />
             ) : null}
-            <div className="flex shrink-0 items-center gap-1 border-b px-2 py-1.5">
+            <PaneHeader edge="detail">
               <Button
                 size="icon-xs"
                 variant="ghost"
@@ -590,7 +606,7 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
               >
                 <ArrowLeftIcon />
               </Button>
-              <span className="min-w-0 flex-1 truncate px-1 text-xs font-medium">
+              <span className="min-w-0 flex-1 truncate px-1 text-sm font-medium">
                 {delegation.conversationName ? (
                   <span className="text-muted-foreground @5xl/inbox:hidden">
                     {delegation.conversationName} ·{" "}
@@ -629,7 +645,7 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
                   <XIcon />
                 </IconAction>
               </span>
-            </div>
+            </PaneHeader>
             {detail.data && detail.data.delegation.id === delegation.id ? (
               <DelegationPane
                 environmentId={environmentId}
