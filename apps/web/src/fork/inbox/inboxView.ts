@@ -516,19 +516,3 @@ export function delegationPreview(
   }
   return raw;
 }
-
-/** Unique author labels in order of appearance, capped at `max` with a `+N` overflow count. */
-export function authorsSummary(messages: ReadonlyArray<InboxMessage>, max = 3): string | null {
-  const seen = new Set<string>();
-  const names: string[] = [];
-  for (const message of messages) {
-    const label = message.author.isSelf ? "You" : nameOrUnknown(message.author.name);
-    if (!seen.has(label)) {
-      seen.add(label);
-      names.push(label);
-    }
-  }
-  if (names.length === 0) return null;
-  if (names.length <= max) return names.join(", ");
-  return `${names.slice(0, max).join(", ")} +${names.length - max}`;
-}
