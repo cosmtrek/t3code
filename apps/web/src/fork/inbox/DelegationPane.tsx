@@ -12,7 +12,6 @@ import {
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
-import ChatMarkdown from "../../components/ChatMarkdown";
 import ChatView from "../../components/ChatView";
 import { BackgroundThreadContext } from "../../components/chat/backgroundThread";
 import { resolveSidebarRowStatus, type SidebarThreadStatus } from "../../components/Sidebar.logic";
@@ -23,7 +22,6 @@ import type { SideChatParentPanel } from "../../lib/sideChatPane";
 import { cn } from "../../lib/utils";
 import { useRightPanelStore } from "../../rightPanelStore";
 import { useThreadShell } from "../../state/entities";
-import { useFormatTimestamp } from "../presentation";
 import type { DelegationDetail, LinkedThread } from "../types";
 import { authorsSummary, skippedNotice } from "./inboxView";
 import { MessageView } from "./MessageView";
@@ -59,9 +57,9 @@ const SIDEBAR_STATUS: Readonly<
 };
 
 /**
- * A delegation: what the thread found and the reply it drafted, over the thread itself. The
- * conversation with the agent is the thread's own chat, so requests, approvals and launched
- * threads show as they do everywhere else.
+ * A delegation: the messages it covers and the reply the thread drafted, over the thread itself.
+ * The conversation with the agent is the thread's own chat, so its findings, requests, approvals
+ * and launched threads show as they do everywhere else.
  */
 export function DelegationPane({
   environmentId,
@@ -81,76 +79,14 @@ export function DelegationPane({
   const live = thread !== null && thread.status !== "deleted" ? thread : null;
   const threadRef = live ? scopeThreadRef(environmentId, ThreadId.make(live.threadId)) : null;
   const shell = useThreadShell(threadRef);
-  const cwd = shell?.worktreePath ?? undefined;
-  const chat = threadRef !== null && shell !== null && !detail.conclusionIsHistorical;
-  const [open, setOpen] = useState(true);
   const draft = detail.draft?.trim() ?? "";
-  const formatTimestamp = useFormatTimestamp();
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div
-        className={cn(
-          "flex flex-col overflow-y-auto overscroll-contain px-4 py-2.5",
-          chat ? "max-h-[45%] shrink-0 border-b border-border/70" : "min-h-0 flex-1",
-        )}
-      >
-        <header className="flex min-w-0 items-center gap-2">
-          <button
-            type="button"
-            aria-expanded={open}
-            className="flex min-w-0 flex-1 items-center gap-2 text-left text-xs font-medium text-muted-foreground hover:text-foreground"
-            onClick={() => setOpen(!open)}
-          >
-            <ChevronDownIcon className={cn("size-3.5 shrink-0", !open && "-rotate-90")} />
-            <span className="min-w-0 truncate">
-              {detail.conclusionIsHistorical ? "Earlier conclusion" : "Conclusion"}
-            </span>
-          </button>
-          {live ? <ThreadStatus environmentId={environmentId} thread={live} /> : null}
-        </header>
-        {open ? (
-          <div className="flex min-w-0 flex-col gap-4 pt-2.5">
-            {detail.conclusion !== null ? (
-              <ChatMarkdown
-                text={detail.conclusion}
-                cwd={cwd}
-                headingLevelOffset={3}
-                className="text-sm"
-              />
-            ) : (
-              <p className="text-sm text-muted-foreground">
-                {thread === null
-                  ? "No thread yet."
-                  : live === null
-                    ? "The thread was deleted."
-                    : live.status === "idle"
-                      ? "Finished without a conclusion."
-                      : "None yet."}
-              </p>
-            )}
-
-            {detail.sent.length > 0 ? (
-              <Section title="Replied">
-                <ol className="flex flex-col gap-2">
-                  {detail.sent.map((reply) => (
-                    <li key={reply.sentAt} className="flex min-w-0 flex-col gap-0.5">
-                      <span className="text-xs text-muted-foreground">
-                        <time dateTime={reply.sentAt}>{formatTimestamp(reply.sentAt)}</time> ·{" "}
-                        {reply.source}
-                      </span>
-                      <p className="line-clamp-3 text-sm whitespace-pre-wrap wrap-anywhere text-foreground/80">
-                        {reply.text}
-                      </p>
-                    </li>
-                  ))}
-                </ol>
-              </Section>
-            ) : null}
-
-            <SourceMessages environmentId={environmentId} detail={detail} />
-          </div>
-        ) : null}
-      </div>
+      <SourceMessages
+        environmentId={environmentId}
+        detail={detail}
+        status={live ? <ThreadStatus environmentId={environmentId} thread={live} /> : null}
+      />
 
       {draft.length > 0 ? (
         <div className="flex shrink-0 flex-col gap-2.5 border-b border-border/70 bg-muted/40 px-4 py-3">
@@ -174,7 +110,13 @@ export function DelegationPane({
         </div>
       ) : null}
 
-      {chat ? <DelegatedThreadChat threadRef={threadRef} /> : null}
+      {threadRef !== null && shell !== null ? (
+        <DelegatedThreadChat threadRef={threadRef} />
+      ) : (
+        <p className="px-4 py-3 text-sm text-muted-foreground">
+          {thread === null ? "No thread yet." : "The thread was deleted."}
+        </p>
+      )}
     </div>
   );
 }
@@ -214,35 +156,15 @@ function DelegatedThreadChat({ threadRef }: { readonly threadRef: ScopedThreadRe
   );
 }
 
-function Section({
-  title,
-  accessory,
-  children,
-}: {
-  readonly title: string;
-  readonly accessory?: ReactNode;
-  readonly children: ReactNode;
-}) {
-  return (
-    <section className="flex min-w-0 flex-col gap-2 border-t border-border/60 pt-3.5">
-      <header className="flex min-w-0 items-center gap-2">
-        <h3 className="min-w-0 flex-1 truncate text-xs font-medium text-muted-foreground">
-          {title}
-        </h3>
-        {accessory}
-      </header>
-      {children}
-    </section>
-  );
-}
-
-/** The delegated messages, folded to their authors: once delegated, the findings matter more. */
+/** The delegated messages, folded to their authors beside the thread's status. */
 function SourceMessages({
   environmentId,
   detail,
+  status,
 }: {
   readonly environmentId: EnvironmentId;
   readonly detail: DelegationDetail;
+  readonly status: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
   const authors = authorsSummary(detail.messages);
@@ -257,41 +179,51 @@ function SourceMessages({
     skippedNotice(detail.skipped),
   ].filter((notice) => notice !== null);
   return (
-    <section className="flex min-w-0 flex-col gap-2">
-      {count === 0 ? null : (
-        <button
-          type="button"
-          aria-expanded={open}
-          className="flex min-w-0 items-center gap-2 text-left text-xs text-muted-foreground hover:text-foreground"
-          onClick={() => setOpen(!open)}
-        >
-          <ChevronDownIcon className={cn("size-3.5 shrink-0", !open && "-rotate-90")} />
-          <span className="shrink-0 font-medium">
-            {count === 1 ? "1 message" : `${count} messages`}
-          </span>
-          {authors !== null && !open ? <span className="min-w-0 truncate">· {authors}</span> : null}
-        </button>
+    <section
+      className={cn(
+        "flex max-h-[45%] min-w-0 shrink-0 flex-col gap-2 border-b border-border/70 px-4 py-2.5",
+        open && "overflow-y-auto overscroll-contain",
       )}
+    >
+      <header className="flex min-w-0 items-center gap-2">
+        {count === 0 ? (
+          <span className="flex-1" />
+        ) : (
+          <button
+            type="button"
+            aria-expanded={open}
+            className="flex min-w-0 flex-1 items-center gap-2 text-left text-xs text-muted-foreground hover:text-foreground"
+            onClick={() => setOpen(!open)}
+          >
+            <ChevronDownIcon className={cn("size-3.5 shrink-0", !open && "-rotate-90")} />
+            <span className="shrink-0 font-medium">
+              {count === 1 ? "1 message" : `${count} messages`}
+            </span>
+            {authors !== null && !open ? (
+              <span className="min-w-0 truncate">· {authors}</span>
+            ) : null}
+          </button>
+        )}
+        {status}
+      </header>
       {notices.map((notice) => (
         <p key={notice} className="text-xs text-warning">
           {notice}
         </p>
       ))}
       {open ? (
-        <div className="rounded-lg border border-border/60 bg-muted/30 p-3">
-          <ol className="flex flex-col gap-3">
-            {detail.messages.map((message, index) => (
-              <li key={message.id} className="flex min-w-0 flex-col">
-                <MessageView
-                  environmentId={environmentId}
-                  channelId={detail.delegation.channelId}
-                  message={message}
-                  showAuthor={detail.messages[index - 1]?.author.id !== message.author.id}
-                />
-              </li>
-            ))}
-          </ol>
-        </div>
+        <ol className="flex flex-col gap-3">
+          {detail.messages.map((message, index) => (
+            <li key={message.id} className="flex min-w-0 flex-col">
+              <MessageView
+                environmentId={environmentId}
+                channelId={detail.delegation.channelId}
+                message={message}
+                showAuthor={detail.messages[index - 1]?.author.id !== message.author.id}
+              />
+            </li>
+          ))}
+        </ol>
       ) : null}
     </section>
   );

@@ -12,7 +12,7 @@ import {
   firstMessage,
   fillTemplate,
   mediaFileName,
-  parseFallbackReply,
+  parseFallbackDraft,
   threadTitle,
 } from "./context.ts";
 import {
@@ -249,7 +249,7 @@ describe("delegation text", () => {
     ).toBe("/x (none) (not available) {other}");
   });
 
-  it("adds the link and the write-back contract when the template lacks them", () => {
+  it("adds the link and the draft rule when the template lacks them", () => {
     const text = firstMessage({
       template: "Look at {contextDir}/context.md",
       contextDir: "/ctx",
@@ -259,25 +259,25 @@ describe("delegation text", () => {
       markdown: false,
     });
     expect(text).toContain("Open in app: https://chat.example.com/t/1");
-    expect(text).toContain("/ctx/conclusion.md");
-    expect(text).toContain("<conclusion>");
-    expect(text).toContain("/ctx/draft.md` only when");
+    expect(text).toContain("/ctx/draft.md`");
+    expect(text).toContain("<draft>");
+    expect(text).not.toContain("conclusion");
     const complete = firstMessage({
-      template: "{openUrl} {contextDir}/conclusion.md {contextDir}/draft.md",
+      template: "{openUrl} {contextDir}/draft.md",
       contextDir: "/ctx",
       note: "",
       openUrl: "https://chat.example.com/t/1",
       skippedMessages: 0,
       markdown: false,
     });
-    expect(complete).toBe("https://chat.example.com/t/1 /ctx/conclusion.md /ctx/draft.md");
+    expect(complete).toBe("https://chat.example.com/t/1 /ctx/draft.md");
   });
 
   it("tells the thread about messages it is not given, and names nameless authors", () => {
     const missing = "2 messages in this conversation could not be read and are missing";
     expect(
       firstMessage({
-        template: "{contextDir}/conclusion.md {contextDir}/draft.md",
+        template: "{contextDir}/draft.md",
         contextDir: "/ctx",
         note: "",
         openUrl: null,
@@ -303,10 +303,8 @@ describe("delegation text", () => {
       images: [],
       senderName: "",
       senderHistory: [],
-      contextDir: "/ctx",
       openUrl: null,
       skippedMessages: 2,
-      markdown: false,
     });
     expect(markdown.split("\n").slice(0, 3)).toEqual(["# Unknown", "", `${missing} below.`]);
     expect(markdown).toContain(`### Unknown · ${hoursAgo(1)}`);
@@ -314,16 +312,11 @@ describe("delegation text", () => {
     expect(markdown).toContain("> Rich content: Forwarded · 1 message\n\nhello");
   });
 
-  it("parses the last tagged conclusion and draft", () => {
-    expect(
-      parseFallbackReply(
-        "<draft>old</draft> text <conclusion>\n Cause found \n</conclusion>\n<draft>new reply</draft>",
-      ),
-    ).toEqual({ conclusion: "Cause found", draft: "new reply" });
-    expect(parseFallbackReply("<draft>  </draft> nothing")).toEqual({
-      conclusion: null,
-      draft: null,
-    });
+  it("parses the last tagged draft", () => {
+    expect(parseFallbackDraft("<draft>old</draft> text\n<draft>\n new reply \n</draft>")).toBe(
+      "new reply",
+    );
+    expect(parseFallbackDraft("<draft>  </draft> nothing")).toBeNull();
   });
 
   it.each([
@@ -523,10 +516,8 @@ describe("context media", () => {
       ],
       senderName: "Other",
       senderHistory: [],
-      contextDir: "/ctx",
       openUrl: null,
       skippedMessages: 0,
-      markdown: false,
     });
     expect(markdown.indexOf("/ctx/media/first.png")).toBeLessThan(
       markdown.indexOf("/ctx/media/second.png"),
@@ -541,82 +532,61 @@ describe("tagged-reply fallback", () => {
 
   it("lets a later run replace what an earlier run's tags wrote", async () => {
     const dir = await folder();
-    await applyFallback(dir, "run-1", { conclusion: "first look", draft: "first reply" });
-    await applyFallback(dir, "run-2", { conclusion: null, draft: "corrected reply" });
-    expect(await readArtifacts(dir)).toEqual({
-      conclusion: "first look",
-      draft: "corrected reply",
-    });
+    await applyFallback(dir, "run-1", "first reply");
+    await applyFallback(dir, "run-2", "corrected reply");
+    expect(await readArtifacts(dir)).toEqual({ draft: "corrected reply" });
     // The same run twice is a no-op.
     await NodeFSP.writeFile(NodePath.join(dir, "draft.md"), "edited by the thread\n");
-    await applyFallback(dir, "run-2", { conclusion: null, draft: "corrected reply" });
+    await applyFallback(dir, "run-2", "corrected reply");
     expect(await read(dir, "draft.md")).toBe("edited by the thread\n");
   });
 
   it("never replaces a file the thread wrote itself", async () => {
     const dir = await folder();
     await NodeFSP.writeFile(NodePath.join(dir, "draft.md"), "from the file\n");
-    await applyFallback(dir, "run-1", { conclusion: "tagged", draft: "from tags" });
-    expect(await readArtifacts(dir)).toEqual({ conclusion: "tagged", draft: "from the file" });
+    await applyFallback(dir, "run-1", "from tags");
+    expect(await readArtifacts(dir)).toEqual({ draft: "from the file" });
     // A thread that rewrote a fallback file owns it from then on.
-    await NodeFSP.writeFile(NodePath.join(dir, "conclusion.md"), "rewritten\n");
-    await applyFallback(dir, "run-2", { conclusion: "newer tags", draft: null });
-    expect(await read(dir, "conclusion.md")).toBe("rewritten\n");
+    const owned = await folder();
+    await applyFallback(owned, "run-1", "tagged");
+    await NodeFSP.writeFile(NodePath.join(owned, "draft.md"), "rewritten\n");
+    await applyFallback(owned, "run-2", "newer tags");
+    expect(await read(owned, "draft.md")).toBe("rewritten\n");
   });
 
   it("keeps a thread's write that lands while the fallback is writing", async () => {
     const dir = await folder();
-    await applyFallback(
-      dir,
-      "run-1",
-      { conclusion: null, draft: "from tags" },
-      {
-        beforeWrite: (file) => NodeFSP.writeFile(NodePath.join(dir, file), "thread wrote\n"),
-      },
-    );
+    await applyFallback(dir, "run-1", "from tags", {
+      beforeWrite: (file) => NodeFSP.writeFile(NodePath.join(dir, file), "thread wrote\n"),
+    });
     expect(await read(dir, "draft.md")).toBe("thread wrote\n");
     // Owned by the inbox, then rewritten mid-replacement: the thread still wins.
     await NodeFSP.writeFile(NodePath.join(dir, "draft.md"), "x\n");
     const owned = await folder();
-    await applyFallback(owned, "run-1", { conclusion: null, draft: "first" });
-    await applyFallback(
-      owned,
-      "run-2",
-      { conclusion: null, draft: "second" },
-      {
-        beforeWrite: (file) => NodeFSP.writeFile(NodePath.join(owned, file), "thread wrote\n"),
-      },
-    );
+    await applyFallback(owned, "run-1", "first");
+    await applyFallback(owned, "run-2", "second", {
+      beforeWrite: (file) => NodeFSP.writeFile(NodePath.join(owned, file), "thread wrote\n"),
+    });
     expect(await read(owned, "draft.md")).toBe("thread wrote\n");
     expect((await NodeFSP.readdir(owned)).filter((file) => file.includes(".aside"))).toEqual([]);
   });
 
   it("applies one run once when two reads race, and the next run still updates", async () => {
     const dir = await folder();
-    await applyFallback(dir, "run-1", { conclusion: null, draft: "one" });
+    await applyFallback(dir, "run-1", "one");
     let other: Promise<void> | null = null;
-    await applyFallback(
-      dir,
-      "run-2",
-      { conclusion: null, draft: "two" },
-      {
-        // A second read of the same run arrives while the first is about to write; this one
-        // carries on once that read has finished or is waiting its turn.
-        beforeWrite: () =>
-          new Promise<void>((resume) => {
-            other = applyFallback(
-              dir,
-              "run-2",
-              { conclusion: null, draft: "two" },
-              { onQueued: resume },
-            );
-            void other.then(resume);
-          }),
-      },
-    );
+    await applyFallback(dir, "run-2", "two", {
+      // A second read of the same run arrives while the first is about to write; this one
+      // carries on once that read has finished or is waiting its turn.
+      beforeWrite: () =>
+        new Promise<void>((resume) => {
+          other = applyFallback(dir, "run-2", "two", { onQueued: resume });
+          void other.then(resume);
+        }),
+    });
     await other;
     expect(await read(dir, "draft.md")).toBe("two\n");
-    await applyFallback(dir, "run-3", { conclusion: null, draft: "three" });
+    await applyFallback(dir, "run-3", "three");
     expect(await read(dir, "draft.md")).toBe("three\n");
   });
 });

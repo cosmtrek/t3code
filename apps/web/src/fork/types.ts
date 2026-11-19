@@ -158,7 +158,6 @@ export interface InboxDelegation {
   readonly thread: LinkedThread | null;
   /** The thread finished a run after the user last looked. */
   readonly agentUnseen: boolean;
-  readonly hasConclusion: boolean;
   readonly hasDraft: boolean;
   /** When the user last replied from this delegation; null before the first reply. */
   readonly lastSentAt: string | null;
@@ -269,18 +268,8 @@ export interface DelegationDetail {
   readonly stale: boolean;
   readonly skipped: number;
   readonly canSend: boolean;
-  readonly conclusion: string | null;
   readonly draft: string | null;
-  readonly conclusionIsHistorical: boolean;
   readonly previousThreads: ReadonlyArray<LinkedThread>;
-  /** Replies sent from this delegation, newest first. */
-  readonly sent: ReadonlyArray<SentReply>;
-}
-
-export interface SentReply {
-  readonly sentAt: string;
-  readonly source: "draft" | "edited draft" | "typed";
-  readonly text: string;
 }
 
 export type WorkspaceStrategy =

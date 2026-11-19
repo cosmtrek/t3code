@@ -533,13 +533,13 @@ export function createExampleChannel(
             id: "investigate",
             name: "Investigate",
             prompt:
-              "A message thread needs a look. Read {contextDir}/context.md for the full conversation and any images.\n\nInvestigate without changing code. Write your findings to {contextDir}/conclusion.md.\n\nNote from me: {note}\nOriginal thread: {openUrl}",
+              "A message thread needs a look. Read {contextDir}/context.md for the full conversation and any images.\n\nInvestigate without changing code, then tell me what you found.\n\nNote from me: {note}\nOriginal thread: {openUrl}",
           },
           {
             id: "fix",
             name: "Fix it",
             prompt:
-              "A message thread reports a problem. Read {contextDir}/context.md first.\n\nFind the cause and fix it in this project. Then write what you changed to {contextDir}/conclusion.md.\n\nNote from me: {note}\nOriginal thread: {openUrl}",
+              "A message thread reports a problem. Read {contextDir}/context.md first.\n\nFind the cause and fix it in this project, then tell me what you changed.\n\nNote from me: {note}\nOriginal thread: {openUrl}",
           },
         ],
         relevanceSummary:

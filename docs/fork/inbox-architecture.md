@@ -39,7 +39,7 @@ flowchart TB
   web -->|media ticket| routes
   inbox -->|"1: launchThread"| svc
   svc -->|"2: thread events, shells"| inbox
-  cli -->|"3: draft.md, conclusion.md"| state
+  cli -->|"3: draft.md"| state
   inbox <-->|HTTP + SSE| adapter <--> im
 ```
 
@@ -129,7 +129,7 @@ one of them:
 - **Delegations** are T3 Code's. A delegation is a set of messages handed to a thread: a message
   and its replies (`chain`), or a message through a later one (`range`, fixed when delegated).
   Its id hashes the channel, conversation, and first message, so delegating the same messages
-  again is the same delegation with a new thread. Threads, drafts, conclusions, and whether the
+  again is the same delegation with a new thread. Threads, drafts, and whether the
   user saw the latest run belong to the delegation.
 
 A delegation made before protocol v2 was a v1 topic. Its topic id was its first message's id, so

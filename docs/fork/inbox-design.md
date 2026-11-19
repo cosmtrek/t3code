@@ -13,7 +13,7 @@ should feel familiar on both counts:
 
 This follows the [two layers](./inbox-architecture.md#two-layers): conversations and messages are
 the chat app's, so their interaction follows the chat app. Delegations are T3 Code's, so agent
-state (thread status, drafts, conclusions, the agent conversation) reuses T3 Code's own components
+state (thread status, drafts, the agent conversation) reuses T3 Code's own components
 and wording.
 
 ## Design the whole, not the patch

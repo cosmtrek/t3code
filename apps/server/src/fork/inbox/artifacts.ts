@@ -2,13 +2,13 @@
 /**
  * Files a delegated thread reports back through. Each thread gets its own folder under the item,
  * `items/<itemId>/<thread>/`, so a newer delegation never shows, and an older thread never
- * overwrites, another thread's conclusion or draft.
+ * overwrites, another thread's draft.
  */
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 
-import { CONCLUSION_FILE, DRAFT_FILE } from "./context.ts";
+import { DRAFT_FILE } from "./context.ts";
 
 /** What the inbox wrote from tagged replies: the run, and a hash per file it still owns. */
 const FALLBACK_RECORD = ".fallback.json";
@@ -32,16 +32,9 @@ async function readText(filePath: string): Promise<string | null> {
 const meaningful = (text: string | null) =>
   text !== null && text.trim().length > 0 ? text.trim() : null;
 
-/** The conclusion and draft as the inbox shows them; a blank file counts as none. */
-export async function readArtifacts(dir: string): Promise<{
-  readonly conclusion: string | null;
-  readonly draft: string | null;
-}> {
-  const [conclusion, draft] = await Promise.all([
-    readText(NodePath.join(dir, CONCLUSION_FILE)),
-    readText(NodePath.join(dir, DRAFT_FILE)),
-  ]);
-  return { conclusion: meaningful(conclusion), draft: meaningful(draft) };
+/** The draft as the inbox shows it; a blank file counts as none. */
+export async function readArtifacts(dir: string): Promise<{ readonly draft: string | null }> {
+  return { draft: meaningful(await readText(NodePath.join(dir, DRAFT_FILE))) };
 }
 
 interface FallbackRecord {
@@ -124,19 +117,19 @@ interface FallbackOptions {
 }
 
 /**
- * Writes the conclusion and draft a run left in tags. A later run may replace what an earlier
- * fallback wrote; a file the thread wrote itself always wins.
+ * Writes the draft a run left in tags. A later run may replace what an earlier fallback wrote;
+ * a draft the thread wrote itself always wins.
  */
 export function applyFallback(
   dir: string,
   runId: string,
-  reply: { readonly conclusion: string | null; readonly draft: string | null },
+  draft: string | null,
   options: FallbackOptions = {},
 ): Promise<void> {
   const previous = folderQueues.get(dir);
   if (previous !== undefined) options.onQueued?.();
   const run = (previous ?? Promise.resolve()).then(() =>
-    applyFallbackNow(dir, runId, reply, options),
+    applyFallbackNow(dir, runId, draft, options),
   );
   const settled = run.catch(() => undefined);
   folderQueues.set(dir, settled);
@@ -149,31 +142,26 @@ export function applyFallback(
 async function applyFallbackNow(
   dir: string,
   runId: string,
-  reply: { readonly conclusion: string | null; readonly draft: string | null },
+  draft: string | null,
   options: FallbackOptions,
 ): Promise<void> {
   const record = await readRecord(dir);
   if (record?.runId === runId) return;
   const files: Record<string, string> = { ...record?.files };
-  const wanted: ReadonlyArray<readonly [string, string | null]> = [
-    [CONCLUSION_FILE, reply.conclusion],
-    [DRAFT_FILE, reply.draft],
-  ];
-  for (const [fileName, value] of wanted) {
-    if (value === null) continue;
-    const target = NodePath.join(dir, fileName);
-    const content = `${value}\n`;
+  if (draft !== null) {
+    const target = NodePath.join(dir, DRAFT_FILE);
+    const content = `${draft}\n`;
     const current = await readText(target);
-    const owned = files[fileName];
-    await options.beforeWrite?.(fileName);
+    const owned = files[DRAFT_FILE];
+    await options.beforeWrite?.(DRAFT_FILE);
     const written =
       current === null
         ? await createExclusive(target, content)
         : owned !== undefined && hash(current) === owned
           ? await replaceOwned(target, owned, content)
           : false;
-    if (written) files[fileName] = hash(content);
-    else delete files[fileName];
+    if (written) files[DRAFT_FILE] = hash(content);
+    else delete files[DRAFT_FILE];
   }
   await writeRecord(dir, { runId, files });
 }
