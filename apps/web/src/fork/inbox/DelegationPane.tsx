@@ -16,6 +16,7 @@ import ChatView from "../../components/ChatView";
 import { BackgroundThreadContext } from "../../components/chat/backgroundThread";
 import { resolveSidebarRowStatus, type SidebarThreadStatus } from "../../components/Sidebar.logic";
 import { Button } from "../../components/ui/button";
+import { Textarea } from "../../components/ui/textarea";
 import { ComposerHandleContext } from "../../composerHandleContext";
 import { useDiffPanelStore } from "../../diffPanelStore";
 import type { SideChatParentPanel } from "../../lib/sideChatPane";
@@ -64,22 +65,24 @@ const SIDEBAR_STATUS: Readonly<
 export function DelegationPane({
   environmentId,
   detail,
+  draftReply,
   sendingOff,
-  onUseDraft,
+  onSendDraft,
   onDiscardDraft,
 }: {
   readonly environmentId: EnvironmentId;
   readonly detail: DelegationDetail;
+  /** The draft as it would go out, and where; null without one. */
+  readonly draftReply: { readonly text: string; readonly target: string | null } | null;
   readonly sendingOff: boolean;
-  /** Puts the draft into the conversation's reply box. */
-  readonly onUseDraft: (text: string) => void;
-  readonly onDiscardDraft: (draft: string) => void;
+  /** Sends the reply; resolves with the error to show. */
+  readonly onSendDraft: (text: string) => Promise<string | null>;
+  readonly onDiscardDraft: () => void;
 }) {
   const thread = detail.delegation.thread;
   const live = thread !== null && thread.status !== "deleted" ? thread : null;
   const threadRef = live ? scopeThreadRef(environmentId, ThreadId.make(live.threadId)) : null;
   const shell = useThreadShell(threadRef);
-  const draft = detail.draft?.trim() ?? "";
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <SourceMessages
@@ -88,26 +91,16 @@ export function DelegationPane({
         status={live ? <ThreadStatus environmentId={environmentId} thread={live} /> : null}
       />
 
-      {draft.length > 0 ? (
-        <div className="flex shrink-0 flex-col gap-2.5 border-b border-border/70 bg-muted/40 px-4 py-3">
-          <h3 className="text-xs font-medium text-muted-foreground">Draft reply</h3>
-          <p className="max-h-40 overflow-y-auto text-sm whitespace-pre-wrap wrap-anywhere">
-            {draft}
-          </p>
-          <div className="flex gap-2">
-            <Button
-              size="xs"
-              variant="outline"
-              disabled={sendingOff || !detail.canSend}
-              onClick={() => onUseDraft(draft)}
-            >
-              Accept
-            </Button>
-            <Button size="xs" variant="ghost-muted" onClick={() => onDiscardDraft(draft)}>
-              Discard
-            </Button>
-          </div>
-        </div>
+      {draftReply !== null ? (
+        // A draft the thread rewrites replaces what the user had changed.
+        <DraftReply
+          key={draftReply.text}
+          draft={draftReply.text}
+          target={draftReply.target}
+          canSend={!sendingOff && detail.canSend}
+          onSend={onSendDraft}
+          onDiscard={onDiscardDraft}
+        />
       ) : null}
 
       {threadRef !== null && shell !== null ? (
@@ -118,6 +111,80 @@ export function DelegationPane({
         </p>
       )}
     </div>
+  );
+}
+
+/** The thread's draft, editable in place and sent from here. */
+function DraftReply({
+  draft,
+  target,
+  canSend,
+  onSend,
+  onDiscard,
+}: {
+  readonly draft: string;
+  readonly target: string | null;
+  readonly canSend: boolean;
+  readonly onSend: (text: string) => Promise<string | null>;
+  readonly onDiscard: () => void;
+}) {
+  const [text, setText] = useState(draft);
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const send = async () => {
+    setSending(true);
+    setError(null);
+    const failure = await onSend(text);
+    setSending(false);
+    setError(failure);
+  };
+  const empty = text.trim().length === 0;
+  return (
+    <form
+      className="flex shrink-0 flex-col gap-2 border-b border-border/70 bg-muted/40 px-4 py-3"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (canSend && !sending && !empty) void send();
+      }}
+    >
+      <div className="flex min-w-0 items-center gap-2 text-xs">
+        <h3 className="shrink-0 font-medium text-muted-foreground">Draft reply</h3>
+        {target !== null ? (
+          <p className="min-w-0 truncate text-muted-foreground">{target}</p>
+        ) : null}
+      </div>
+      <Textarea
+        aria-label="Draft reply"
+        value={text}
+        rows={3}
+        className="max-h-60"
+        disabled={sending}
+        onChange={(event) => setText(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+            event.preventDefault();
+            event.currentTarget.form?.requestSubmit();
+          }
+        }}
+      />
+      <div className="flex items-center gap-2">
+        <Button type="submit" size="xs" disabled={sending || !canSend || empty}>
+          {sending ? "Sending…" : "Send"}
+        </Button>
+        <Button
+          type="button"
+          size="xs"
+          variant="ghost-muted"
+          disabled={sending}
+          onClick={onDiscard}
+        >
+          Discard
+        </Button>
+        {error !== null ? (
+          <p className="min-w-0 flex-1 text-xs text-destructive-foreground">{error}</p>
+        ) : null}
+      </div>
+    </form>
   );
 }
 
@@ -141,7 +208,11 @@ function DelegatedThreadChat({ threadRef }: { readonly threadRef: ScopedThreadRe
     runShellCommand: openThread,
   };
   return (
-    <div data-side-chat-pane={threadRef.threadId} className="flex min-h-0 flex-1 flex-col">
+    // The chat shares the pane's 1rem edge with the messages and draft above it.
+    <div
+      data-side-chat-pane={threadRef.threadId}
+      className="flex min-h-0 flex-1 flex-col [--chat-lane-padding:1rem]"
+    >
       <BackgroundThreadContext value>
         <ComposerHandleContext value={null}>
           <ChatView

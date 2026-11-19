@@ -18,10 +18,9 @@ import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../../components/ui/menu";
 import { Textarea } from "../../components/ui/textarea";
-import { toastManager } from "../../components/ui/toast";
 import { observeResize } from "../../lib/observeResize";
 import { cn } from "../../lib/utils";
-import { ForkApiError, forkRequest } from "../forkApiAccess";
+import { forkRequest } from "../forkApiAccess";
 import type {
   ConversationKind,
   ConversationResponse,
@@ -29,7 +28,6 @@ import type {
   InboxDelegation,
   InboxMessage,
   Mention,
-  SendResult,
   Upload,
 } from "../types";
 import { useForkResource, type ForkRefreshFilter } from "../useForkResource";
@@ -41,7 +39,6 @@ import {
   agentSignalsFor,
   conversationRows,
   delegationPreview,
-  mentionablePeople,
   mentionsIn,
   mentionSuggestions,
   mergeConversationPages,
@@ -58,6 +55,7 @@ import {
   type OlderPages,
 } from "./inboxView";
 import { MessageView } from "./MessageView";
+import { readMentionable, sendReply } from "./sendReply";
 import { loadReply, replyDraftKey, saveReply } from "./replyDrafts";
 
 export interface ConversationPaneHandlers {
@@ -72,13 +70,11 @@ export interface ConversationPaneHandlers {
 }
 
 /** What the reply box should hold; a new `nonce` replaces what it holds. */
-export interface ReplyRequest {
+interface ReplyRequest {
   readonly nonce: number;
   /** The conversation it is for; another conversation's reply box ignores it. */
   readonly conversationId: string;
   readonly replyTo: ReplyTarget | null;
-  /** A delegation's draft, sent on its behalf. */
-  readonly draft: { readonly text: string; readonly delegationId: string } | null;
 }
 
 export interface ReplyTarget {
@@ -90,6 +86,13 @@ export interface ReplyTarget {
   readonly canSwitch: boolean;
   /** Whom a quote reply names, as the chat app does. */
   readonly mention: Mention | null;
+}
+
+/** A quote reply names whom it answers, as the chat app does. */
+export function namedInReply(canMention: boolean, target: ReplyTarget | null, text: string) {
+  return canMention && target?.inThread === false && target.mention !== null
+    ? withMention(text, target.mention.name)
+    : text;
 }
 
 export function replyTargetOf(
@@ -120,8 +123,8 @@ interface AttachedFile {
 const MAX_ATTACHMENTS = 9;
 
 let replyNonce = 0;
-/** Orders requests from the page and from the chat's own toolbar; the newest wins. */
-export const nextReplyNonce = () => ++replyNonce;
+/** Tells one reply request, or one attached file, from the next. */
+const nextReplyNonce = () => ++replyNonce;
 
 /** Replies a folded topic shows under its post, as the chat app does. */
 const FOLDED_REPLIES = 2;
@@ -152,7 +155,6 @@ export function ConversationPane({
   newSince,
   readOnly,
   capabilities,
-  replyRequest,
   handlers,
   refreshOn,
   className,
@@ -169,26 +171,20 @@ export function ConversationPane({
   readonly readOnly: boolean;
   /** The optional parts of the protocol the channel's adapter implements. */
   readonly capabilities: ReadonlyArray<string>;
-  readonly replyRequest: ReplyRequest | null;
   readonly handlers: ConversationPaneHandlers;
   readonly refreshOn: ForkRefreshFilter;
   readonly className?: string;
 }) {
   const sectionRef = useRef<HTMLElement>(null);
   const shown = useShown(sectionRef);
-  const [localRequest, setLocalRequest] = useState<ReplyRequest | null>(null);
-  const request =
-    localRequest !== null && (replyRequest === null || localRequest.nonce > replyRequest.nonce)
-      ? localRequest
-      : replyRequest;
+  const [request, setRequest] = useState<ReplyRequest | null>(null);
   const modesOf = (message: InboxMessage) =>
     replyModes(conversation.kind, message, capabilities.includes("quotes"));
   const replyTo = (message: InboxMessage, mode: ReplyMode | null) =>
-    setLocalRequest({
+    setRequest({
       nonce: nextReplyNonce(),
       conversationId: conversation.id,
       replyTo: replyTargetOf(conversation.kind, message, modesOf(message), mode),
-      draft: null,
     });
   return (
     <section
@@ -903,14 +899,10 @@ function Composer({
   const [applied, setApplied] = useState<number | null>(null);
   const [text, setText] = useState(saved?.text ?? "");
   const [replyTo, setReplyTo] = useState<ReplyTarget | null>(saved?.replyTo ?? null);
-  const [draft, setDraft] = useState<{
-    readonly delegationId: string;
-    readonly text: string;
-  } | null>(saved?.draft ?? null);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // An agent writes its draft in Markdown; what the user types is sent as typed unless they ask.
-  const [markdown, setMarkdown] = useState(saved?.draft != null);
+  // What the user types is sent as typed unless they ask for Markdown.
+  const [markdown, setMarkdown] = useState(false);
   const [files, setFiles] = useState<ReadonlyArray<AttachedFile>>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   // Null until the reply first holds an `@`.
@@ -920,28 +912,16 @@ function Composer({
   const [activeSuggestion, setActiveSuggestion] = useState(0);
   const [dismissedAt, setDismissedAt] = useState<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  /** A quote reply names whom it answers, as the chat app does; a draft keeps its badge. */
   const named = (target: ReplyTarget | null, base: string) =>
-    canMention && target?.inThread === false && target.mention !== null
-      ? withMention(base, target.mention.name)
-      : base;
+    namedInReply(canMention, target, base);
   if (request !== null && request.conversationId === conversation.id && request.nonce !== applied) {
     setApplied(request.nonce);
     setReplyTo(request.replyTo);
-    if (request.draft !== null) {
-      const next = named(request.replyTo, request.draft.text);
-      setDraft({ ...request.draft, text: next });
-      setText(next);
-      setCaret(next.length);
-      setMarkdown(true);
-    } else {
-      const next = named(request.replyTo, text);
-      setText(next);
-      setCaret(next.length);
-    }
+    const next = named(request.replyTo, text);
+    setText(next);
+    setCaret(next.length);
   }
-  const fromDraft = draft !== null && text === draft.text;
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- moves DOM focus into the reply box when the user picks a message or draft to answer
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- moves DOM focus into the reply box when the user picks a message to answer
   useEffect(() => {
     const textarea = textareaRef.current;
     if (applied === null || textarea === null) return;
@@ -950,21 +930,14 @@ function Composer({
   }, [applied]);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- mirrors the reply into browser storage
   useEffect(() => {
-    saveReply(storageKey, { text, replyTo, draft });
-  }, [storageKey, text, replyTo, draft]);
+    saveReply(storageKey, { text, replyTo });
+  }, [storageKey, text, replyTo]);
 
   const readPeople = async () => {
     if (!canMention) return [];
-    const page = await forkRequest<ConversationResponse>(
-      environmentId,
-      `/inbox/conversation?${new URLSearchParams({
-        channelId: conversation.channelId,
-        conversationId: conversation.id,
-      }).toString()}`,
-    ).catch(() => null);
+    const next = await readMentionable(environmentId, conversation);
     // A failed read keeps who was known: the message still goes out, with fewer mentions.
-    if (page === null) return people ?? [];
-    const next = mentionablePeople(page.messages);
+    if (next === null) return people ?? [];
     setPeople(next);
     return next;
   };
@@ -1026,59 +999,24 @@ function Composer({
     setSending(true);
     setError(null);
     // Read again at send, so someone who wrote a moment ago can be mentioned.
-    const mentioned = text.includes("@") ? mentionsIn(text, withReplied(await readPeople())) : [];
-    const result = await forkRequest<SendResult>(environmentId, "/inbox/send", {
-      method: "POST",
-      body: {
-        channelId: conversation.channelId,
-        conversationId: conversation.id,
-        ...(replyTo ? { replyToId: replyTo.messageId } : {}),
-        ...(replyTo?.inThread != null ? { inThread: replyTo.inThread } : {}),
-        // An edited draft still answers for its delegation; the copy records the edit.
-        ...(draft ? { delegationId: draft.delegationId } : {}),
-        text,
-        ...(mentioned.length > 0 ? { mentions: mentioned } : {}),
-        ...(canMarkdown && markdown ? { format: "markdown" } : {}),
-        ...(files.length > 0
-          ? { attachments: files.map(({ uploadId, name }) => ({ uploadId, name })) }
-          : {}),
-      },
-    }).catch((cause: unknown) => ({
-      failure:
-        cause instanceof ForkApiError && cause.code === "delivery_unknown"
-          ? "Delivery unknown: the adapter did not confirm the message. Check the chat before sending again."
-          : cause instanceof Error
-            ? cause.message
-            : String(cause),
-    }));
+    const failure = await sendReply(environmentId, {
+      conversation,
+      text,
+      replyTo,
+      delegationId: null,
+      markdown: canMarkdown && markdown,
+      people: text.includes("@") ? withReplied(await readPeople()) : [],
+      attachments: files,
+    });
     setSending(false);
-    if ("failure" in result) {
-      setError(result.failure);
+    if (failure !== null) {
+      setError(failure);
       return;
     }
     setText("");
     setReplyTo(null);
-    setDraft(null);
     setMarkdown(false);
     setFiles([]);
-    if (result.failedAttachments.length > 0) {
-      toastManager.add({
-        type: "warning",
-        title: `Sent, but these files did not go out: ${result.failedAttachments.join(", ")}.`,
-      });
-    }
-    if (result.unresolvedMentions.length > 0) {
-      toastManager.add({
-        type: "warning",
-        title: `Sent, but not everyone was notified: ${result.unresolvedMentions.join(", ")}.`,
-      });
-    }
-    if (result.archived === false) {
-      toastManager.add({
-        type: "warning",
-        title: "Sent, but the copy in the delegation's folder could not be saved.",
-      });
-    }
   };
 
   return (
@@ -1093,45 +1031,38 @@ function Composer({
         void send();
       }}
     >
-      {replyTo !== null || fromDraft ? (
+      {replyTo !== null ? (
         <div className="flex min-w-0 items-center gap-2">
-          {replyTo !== null ? (
-            <>
-              <p className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
-                {replyTo.inThread === true ? "Replying in thread to" : "Replying to"}{" "}
-                {replyTo.quote}
-              </p>
-              {replyTo.canSwitch ? (
-                <Button
-                  type="button"
-                  size="xs"
-                  variant="ghost-muted"
-                  onClick={() => {
-                    const next = { ...replyTo, inThread: replyTo.inThread !== true };
-                    const nextText = named(next, text);
-                    setReplyTo(next);
-                    if (draft !== null && fromDraft) setDraft({ ...draft, text: nextText });
-                    setText(nextText);
-                    setCaret(nextText.length);
-                  }}
-                >
-                  {replyTo.inThread === true ? "Quote instead" : "Reply in thread"}
-                </Button>
-              ) : null}
+          <>
+            <p className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+              {replyTo.inThread === true ? "Replying in thread to" : "Replying to"} {replyTo.quote}
+            </p>
+            {replyTo.canSwitch ? (
               <Button
                 type="button"
-                size="icon-xs"
+                size="xs"
                 variant="ghost-muted"
-                aria-label="Send as a new message"
-                onClick={() => setReplyTo(null)}
+                onClick={() => {
+                  const next = { ...replyTo, inThread: replyTo.inThread !== true };
+                  const nextText = named(next, text);
+                  setReplyTo(next);
+                  setText(nextText);
+                  setCaret(nextText.length);
+                }}
               >
-                <XIcon />
+                {replyTo.inThread === true ? "Quote instead" : "Reply in thread"}
               </Button>
-            </>
-          ) : (
-            <span className="flex-1" />
-          )}
-          {fromDraft ? <Badge variant="success">Draft</Badge> : null}
+            ) : null}
+            <Button
+              type="button"
+              size="icon-xs"
+              variant="ghost-muted"
+              aria-label="Send as a new message"
+              onClick={() => setReplyTo(null)}
+            >
+              <XIcon />
+            </Button>
+          </>
         </div>
       ) : null}
       <Textarea

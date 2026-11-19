@@ -49,14 +49,15 @@ import type { DelegationDetail, InboxConversation, InboxDelegation, InboxRespons
 import { useForkResource } from "../useForkResource";
 import {
   ConversationPane,
-  nextReplyNonce,
+  namedInReply,
   replyTargetOf,
-  type ReplyRequest,
+  type ReplyTarget,
 } from "./ConversationPane";
 import { DelegateDialog, type DelegateTarget } from "./DelegateDialog";
 import { DelegationPane } from "./DelegationPane";
 import { IconAction } from "./IconAction";
 import { ConversationList, DelegationList } from "./InboxList";
+import { readMentionable, sendReply } from "./sendReply";
 import {
   INBOX_FILTERS,
   INBOX_VIEWS,
@@ -241,7 +242,6 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
   const [heldId, setHeldId] = remember("heldId", null);
   const [delegationId, setDelegationId] = remember("delegationId", null);
   const [delegating, setDelegating] = useState<DelegateTarget | null>(null);
-  const [replyRequest, setReplyRequest] = useState<ReplyRequest | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   // Reads sent but not yet read back, shown at once so the list answers the click.
   const [pendingReads, setPendingReads] = useState<
@@ -279,6 +279,7 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
     matchesFilter(filter, kindOf.get(candidate.conversationId)),
   );
   const readOnly = listing.data?.access.stale ?? !channel.access.send;
+  const draftReply = draftReplyOf(detail.data, delegation, channel.capabilities);
   const banner = channelBanner(channel);
 
   const onSetRead = async (target: InboxConversation, read: boolean) => {
@@ -529,7 +530,6 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
             newSince={opened.id === conversation.id ? opened.newSince : null}
             readOnly={readOnly}
             capabilities={channel.capabilities}
-            replyRequest={replyRequest}
             refreshOn={refreshChannel}
             // With a delegation open, the chat shares the width only on a wide screen.
             className={delegationOpen ? "hidden @5xl/inbox:flex" : "flex"}
@@ -629,39 +629,49 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
               <DelegationPane
                 environmentId={environmentId}
                 detail={detail.data}
-                sendingOff={readOnly}
-                onDiscardDraft={(draftText) =>
-                  void discardDraft(environmentId, delegation, draftText).then(async (ok) => {
-                    if (ok) await Promise.all([detail.refresh(), listing.refresh()]);
-                  })
+                draftReply={
+                  draftReply === null
+                    ? null
+                    : {
+                        text: draftReply.text,
+                        target: draftReply.replyTo
+                          ? `${draftReply.replyTo.inThread === true ? "In thread to" : "Replying to"} ${draftReply.replyTo.quote}`
+                          : null,
+                      }
                 }
-                onUseDraft={(text) => {
-                  const data = detail.data!;
-                  const anchor = data.messages.find(
-                    (message) => message.id === delegation.anchorMessageId,
-                  );
-                  // A message's draft answers that message; a range's or a DM's is a new message.
-                  const kind = data.conversation.kind;
-                  const answers =
-                    kind !== "dm" && delegation.scope !== "range" ? anchor : undefined;
-                  const modes = answers
-                    ? replyModes(kind, answers, channel.capabilities.includes("quotes"))
-                    : null;
-                  setReplyRequest({
-                    nonce: nextReplyNonce(),
-                    conversationId: delegation.conversationId,
-                    replyTo: answers
-                      ? replyTargetOf(
-                          kind,
-                          answers,
-                          modes,
-                          modes === null ? null : draftReplyMode(modes, answers, data.messages),
-                        )
-                      : null,
-                    draft: { text, delegationId: delegation.id },
+                sendingOff={readOnly}
+                onDiscardDraft={() =>
+                  void discardDraft(environmentId, delegation, detail.data!.draft!.trim()).then(
+                    async (ok) => {
+                      if (ok) await Promise.all([detail.refresh(), listing.refresh()]);
+                    },
+                  )
+                }
+                onSendDraft={async (text) => {
+                  const replyTo = draftReply?.replyTo ?? null;
+                  const conversation = {
+                    channelId: delegation.channelId,
+                    id: delegation.conversationId,
+                  };
+                  const people =
+                    channel.capabilities.includes("mentions") && text.includes("@")
+                      ? [
+                          ...((await readMentionable(environmentId, conversation)) ?? []),
+                          ...(replyTo?.mention ? [replyTo.mention] : []),
+                        ]
+                      : [];
+                  const failure = await sendReply(environmentId, {
+                    conversation,
+                    text,
+                    replyTo,
+                    // An edited draft still answers for its delegation; the copy records the edit.
+                    delegationId: delegation.id,
+                    markdown: channel.capabilities.includes("markdown"),
+                    people,
+                    attachments: [],
                   });
-                  // On a narrow screen the reply box is in the conversation.
-                  if ((containerRef.current?.clientWidth ?? 0) < 1024) setDelegationId(null);
+                  if (failure === null) await Promise.all([detail.refresh(), listing.refresh()]);
+                  return failure;
                 }}
               />
             ) : detail.error ? (
@@ -686,6 +696,40 @@ function EnvironmentInboxView({ inbox }: { readonly inbox: EnvironmentInbox }) {
         />
       ) : null}
     </div>
+  );
+}
+
+/** The delegation's draft as it would go out, and the message it answers. */
+function draftReplyOf(
+  detail: DelegationDetail | null | undefined,
+  delegation: InboxDelegation | null,
+  capabilities: ReadonlyArray<string>,
+): { readonly text: string; readonly replyTo: ReplyTarget | null } | null {
+  const draft = detail?.draft?.trim() ?? "";
+  if (detail == null || delegation === null || detail.delegation.id !== delegation.id) return null;
+  if (draft.length === 0) return null;
+  const replyTo = draftReplyTarget(detail, delegation, capabilities);
+  return { text: namedInReply(capabilities.includes("mentions"), replyTo, draft), replyTo };
+}
+
+/** A message's draft answers that message; a range's or a DM's is a new message. */
+function draftReplyTarget(
+  detail: DelegationDetail,
+  delegation: InboxDelegation,
+  capabilities: ReadonlyArray<string>,
+): ReplyTarget | null {
+  const kind = detail.conversation.kind;
+  const answers =
+    kind !== "dm" && delegation.scope !== "range"
+      ? detail.messages.find((message) => message.id === delegation.anchorMessageId)
+      : undefined;
+  if (answers === undefined) return null;
+  const modes = replyModes(kind, answers, capabilities.includes("quotes"));
+  return replyTargetOf(
+    kind,
+    answers,
+    modes,
+    modes === null ? null : draftReplyMode(modes, answers, detail.messages),
   );
 }
 
