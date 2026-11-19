@@ -326,7 +326,8 @@ seam files. Then try the example channel end to end in a browser before releasin
   findings, requests, approvals, and launched threads read as they do in the thread, and the user
   talks to the agent in its own composer. The inbox adds only the draft. The first message carries
   one rule, unless the template names `draft.md` itself: write `draft.md` only when a message asks
-  for the reply. Accept puts the draft into the conversation's reply box. When the thread cannot
+  for the reply. The delegation shows the draft in an editable box and sends it from there, to
+  the message it answers. When the thread cannot
   write there (a sandbox limited to the workspace), it ends its reply with `<draft>` tags; the inbox
   reads each finished run once and writes the file (`.fallback.json` records the run and what it
   wrote). A later run's tags replace an earlier run's; a draft the thread wrote itself always

@@ -5,7 +5,6 @@ import type { ReplyTarget } from "./ConversationPane";
 export interface SavedReply {
   readonly text: string;
   readonly replyTo: ReplyTarget | null;
-  readonly draft: { readonly text: string; readonly delegationId: string } | null;
 }
 
 export const replyDraftKey = (environmentId: string, channelId: string, conversationId: string) =>
@@ -22,12 +21,10 @@ function mentionOf(value: unknown): Mention | null {
 function parse(raw: string): SavedReply | null {
   const value: unknown = JSON.parse(raw);
   if (typeof value !== "object" || value === null) return null;
-  const { text, replyTo, draft } = value as Record<string, unknown>;
+  const { text, replyTo } = value as Record<string, unknown>;
   if (!isString(text)) return null;
   const target =
     typeof replyTo === "object" && replyTo !== null ? (replyTo as Record<string, unknown>) : null;
-  const from =
-    typeof draft === "object" && draft !== null ? (draft as Record<string, unknown>) : null;
   return {
     text,
     replyTo:
@@ -39,10 +36,6 @@ function parse(raw: string): SavedReply | null {
             canSwitch: target.canSwitch === true,
             mention: mentionOf(target.mention),
           }
-        : null,
-    draft:
-      from && isString(from.text) && isString(from.delegationId)
-        ? { text: from.text, delegationId: from.delegationId }
         : null,
   };
 }
