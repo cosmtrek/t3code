@@ -804,16 +804,11 @@ describe("linked threads and their files", () => {
     }),
   );
 
-  it.effect("treats a deleted thread's files as history, not as the delegation's state", () =>
+  it.effect("drops a deleted thread's draft from the delegation's state", () =>
     Effect.gen(function* () {
       const h = yield* Effect.promise(() => harness(oneConversation));
       const { dir, delegationId } = yield* linkThread(h, "c", "m1", "thread-1", 1);
-      yield* Effect.promise(() =>
-        Promise.all([
-          NodeFSP.writeFile(NodePath.join(dir, "draft.md"), "reply\n"),
-          NodeFSP.writeFile(NodePath.join(dir, "conclusion.md"), "cause\n"),
-        ]),
-      );
+      yield* Effect.promise(() => NodeFSP.writeFile(NodePath.join(dir, "draft.md"), "reply\n"));
       const query = delegationQuery(h, delegationId);
       expect(
         (yield* Inbox.readDelegation(query).pipe(Effect.provide(h.layer))).delegation.hasDraft,
@@ -823,11 +818,7 @@ describe("linked threads and their files", () => {
       h.runtime.hub.publish({ type: "inbox", channelId: h.channelId });
       const after = yield* Inbox.readDelegation(query).pipe(Effect.provide(h.layer));
       expect(after.delegation).toMatchObject({ hasDraft: false });
-      expect(after).toMatchObject({
-        draft: null,
-        conclusion: "cause",
-        conclusionIsHistorical: true,
-      });
+      expect(after.draft).toBeNull();
     }),
   );
 
@@ -921,14 +912,8 @@ describe("sending", () => {
       const threadFiles = yield* Effect.promise(() => NodeFSP.readdir(dir));
       expect(threadFiles).not.toContain("draft.md");
       expect(threadFiles.some((file) => /^draft\..+\.md$/.test(file))).toBe(true);
-      const detail = yield* Inbox.readDelegation(delegationQuery(h, delegationId)).pipe(
-        Effect.provide(h.layer),
-      );
-      expect(detail.sent.map(({ source, text }) => [source, text])).toEqual([
-        ["edited draft", "edited text"],
-      ]);
       const listed = yield* Inbox.listInbox(h.channelId).pipe(Effect.provide(h.layer));
-      expect(listed.delegations[0]!.lastSentAt).toBe(detail.sent[0]!.sentAt);
+      expect(listed.delegations[0]!.lastSentAt).not.toBeNull();
 
       const typed = yield* Effect.promise(() => harness(oneConversation));
       const typedId = saveDelegation(typed, "c", "m1");
@@ -1178,7 +1163,7 @@ describe("tagged replies", () => {
             Effect.succeed({
               messages: [
                 {
-                  text: "Done. <conclusion>cause</conclusion> <draft>fixed it</draft>",
+                  text: "Done. <draft>fixed it</draft>",
                   streaming: false,
                   createdAt: DateTime.makeUnsafe(at(2)),
                 },
@@ -1189,7 +1174,7 @@ describe("tagged replies", () => {
       const detail = yield* Inbox.readDelegation(delegationQuery(h, delegationId)).pipe(
         Effect.provide(layer),
       );
-      expect(detail).toMatchObject({ conclusion: "cause", draft: "fixed it" });
+      expect(detail.draft).toBe("fixed it");
       expect(
         yield* Effect.promise(() => NodeFSP.readFile(NodePath.join(dir, "draft.md"), "utf8")),
       ).toBe("fixed it\n");

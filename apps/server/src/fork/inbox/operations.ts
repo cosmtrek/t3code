@@ -67,7 +67,7 @@ import {
   firstMessage,
   mediaFileName,
   nameOrUnknown,
-  parseFallbackReply,
+  parseFallbackDraft,
   threadTitle,
   type ContextImage,
 } from "./context.ts";
@@ -359,8 +359,8 @@ const applyFallbackFor = Effect.fn("ForkInbox.applyFallback")(function* (
     (left, right) =>
       DateTime.toEpochMillis(left.createdAt) - DateTime.toEpochMillis(right.createdAt),
   )[finished.length - 1];
-  const reply = last ? parseFallbackReply(last.text) : { conclusion: null, draft: null };
-  yield* Effect.promise(() => applyFallback(contextDir, runId, reply).catch(() => undefined));
+  const draft = last ? parseFallbackDraft(last.text) : null;
+  yield* Effect.promise(() => applyFallback(contextDir, runId, draft).catch(() => undefined));
 });
 
 /**
@@ -454,7 +454,6 @@ export interface InboxDelegation {
   readonly thread: LinkedThreadView | null;
   /** The thread finished a run after the user last looked. */
   readonly agentUnseen: boolean;
-  readonly hasConclusion: boolean;
   readonly hasDraft: boolean;
   /** When the user last replied from this delegation; null before the first reply. */
   readonly lastSentAt: string | null;
@@ -534,7 +533,7 @@ const inspectDelegation = Effect.fn("ForkInbox.inspectDelegation")(function* (
     Promise.all([
       thread
         ? readArtifacts(threadContextDir(runtime.itemsDir, delegation.id, thread.threadId))
-        : { conclusion: null, draft: null },
+        : { draft: null },
       readSent(NodePath.join(runtime.itemsDir, delegation.id)),
     ]),
   );
@@ -606,7 +605,6 @@ const computeChannel = Effect.fn("ForkInbox.computeChannel")(function* (channelI
             runCompletedAt: current?.runCompletedAt ?? null,
             readAllBefore,
           }),
-          hasConclusion: artifacts.conclusion !== null,
           hasDraft: current !== null && artifacts.draft !== null,
           lastSentAt,
         } satisfies InboxDelegation;
@@ -858,15 +856,13 @@ export const readDelegation = Effect.fn("ForkInbox.readDelegation")(function* (
   );
   const scoped = yield* readScope(delegation, conversation.kind, { cacheMs: 5_000 });
   const thread = item.thread;
-  const [artifacts, sent] = yield* Effect.promise(() =>
-    Promise.all([
-      thread
-        ? readArtifacts(threadContextDir(runtime.itemsDir, item.id, thread.threadId))
-        : { conclusion: null, draft: null },
-      readSent(NodePath.join(runtime.itemsDir, item.id)),
-    ]),
-  );
-  const current = isCurrent(thread);
+  // Only the current thread's draft can go into the reply box.
+  const draft =
+    thread && isCurrent(thread)
+      ? (yield* Effect.promise(() =>
+          readArtifacts(threadContextDir(runtime.itemsDir, item.id, thread.threadId)),
+        )).draft
+      : null;
   const history = yield* Effect.forEach(
     runtime.store.linksForDelegation(item.id).filter((link) => link.threadId !== thread?.threadId),
     (link) => inspectLink(link, { current: false }),
@@ -881,13 +877,8 @@ export const readDelegation = Effect.fn("ForkInbox.readDelegation")(function* (
     stale: scoped.stale,
     skipped: scoped.skipped,
     canSend: access.send,
-    conclusion: artifacts.conclusion,
-    // Only the current thread's draft can go into the reply box.
-    draft: current ? artifacts.draft : null,
-    // A conclusion outlives a deleted thread; the detail shows it as history.
-    conclusionIsHistorical: artifacts.conclusion !== null && !current,
+    draft,
     previousThreads: history,
-    sent,
   };
 });
 
@@ -1386,11 +1377,9 @@ export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown
       images,
       senderName: sender.name,
       senderHistory,
-      contextDir,
       openUrl,
       skippedMessages: scoped.skipped,
       rootMissing: scoped.rootMissing,
-      markdown: supports(channel, "markdown"),
     });
     const text = firstMessage({
       template: template.prompt,

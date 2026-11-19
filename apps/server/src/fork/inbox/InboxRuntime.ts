@@ -77,7 +77,7 @@ const make = Effect.gen(function* () {
     });
   }
 
-  // The thread writes draft.md and conclusion.md; the inbox shows them as they land.
+  // The thread writes draft.md; the inbox shows it as it lands.
   const pending = new Map<string, ReturnType<typeof setTimeout>>();
   let watcher: NodeFS.FSWatcher | null = null;
   try {

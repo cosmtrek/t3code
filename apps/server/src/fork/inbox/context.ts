@@ -3,7 +3,6 @@ import * as NodeCrypto from "node:crypto";
 
 import type { Conversation, Message } from "../channels/protocol.ts";
 
-export const CONCLUSION_FILE = "conclusion.md";
 export const DRAFT_FILE = "draft.md";
 export const CONTEXT_FILE = "context.md";
 export const REQUEST_FILE = "request.json";
@@ -12,14 +11,8 @@ export const MEDIA_DIR = "media";
 const replyFormat = (markdown: boolean) =>
   markdown ? "simple Markdown, no headings or tables" : "plain text";
 
-function writeBackInstructions(contextDir: string, markdown: boolean): string {
-  return [
-    "## Reporting back",
-    "",
-    `- Keep your findings in \`${contextDir}/${CONCLUSION_FILE}\` (Markdown), current as they change.`,
-    `- Write \`${contextDir}/${DRAFT_FILE}\` only when a message of mine asks for the reply to the chat, such as "reply that…", "tell them…", or "make it shorter". Write the whole reply, ready to send in the conversation's language, as ${replyFormat(markdown)}. Questions and other tasks leave it alone.`,
-    "- If you cannot write files there, end your last message with `<conclusion>…</conclusion>` or `<draft>…</draft>` instead.",
-  ].join("\n");
+function draftRule(contextDir: string, markdown: boolean): string {
+  return `When I ask for the reply to the chat ("reply that…", "tell them…", "make it shorter"), write the whole reply to \`${contextDir}/${DRAFT_FILE}\` as ${replyFormat(markdown)}, in the conversation's language, ready to send; if you cannot write there, end your message with \`<draft>…</draft>\` instead. Otherwise leave that file alone.`;
 }
 
 /** Replaces `{contextDir}`, `{note}`, and `{openUrl}`; other braces stay as they are. */
@@ -57,9 +50,7 @@ export function firstMessage(input: {
   if (input.openUrl !== null && !body.includes(input.openUrl)) {
     parts.push(`Open in app: ${input.openUrl}`);
   }
-  if (!body.includes(CONCLUSION_FILE) || !body.includes(DRAFT_FILE)) {
-    parts.push(writeBackInstructions(input.contextDir, input.markdown));
-  }
+  if (!body.includes(DRAFT_FILE)) parts.push(draftRule(input.contextDir, input.markdown));
   return parts.join("\n\n");
 }
 
@@ -93,11 +84,8 @@ function lastTagged(text: string, tag: string): string | null {
   return found !== null && found.length > 0 ? found : null;
 }
 
-export function parseFallbackReply(text: string): {
-  readonly conclusion: string | null;
-  readonly draft: string | null;
-} {
-  return { conclusion: lastTagged(text, "conclusion"), draft: lastTagged(text, "draft") };
+export function parseFallbackDraft(text: string): string | null {
+  return lastTagged(text, "draft");
 }
 
 export interface ContextImage {
@@ -126,13 +114,10 @@ export function buildContextMarkdown(input: {
   readonly images: ReadonlyArray<ContextImage>;
   readonly senderName: string;
   readonly senderHistory: ReadonlyArray<SenderHistoryEntry>;
-  readonly contextDir: string;
   readonly openUrl: string | null;
   readonly skippedMessages: number;
   /** The reply thread's first message is gone from the adapter; only its replies are here. */
   readonly rootMissing?: boolean;
-  /** Whether the channel sends Markdown, which decides how a draft is written. */
-  readonly markdown: boolean;
 }): string {
   const conversationName = nameOrUnknown(input.conversation.name);
   const lines: string[] = [
@@ -185,7 +170,6 @@ export function buildContextMarkdown(input: {
     }
     lines.push("");
   }
-  lines.push(writeBackInstructions(input.contextDir, input.markdown), "");
   return lines.join("\n");
 }
 

@@ -42,8 +42,8 @@ is "Sign-in needed" (reading works, sending does not); `online: false` is "Colle
 
 `/config` names the templates messages can be delegated with. A template is only a prompt with
 `{contextDir}`, `{note}`, and `{openUrl}`; the thread runs in the project's default mode. A
-template asks for findings in `{contextDir}/conclusion.md` and not for a reply: T3 asks the thread
-for `draft.md` only when the user wants one.
+template asks for the work, not for a reply: the user reads the findings in the thread itself, and
+T3 adds the rule for `draft.md`, which the thread writes only when the user asks for a reply.
 
 `/config` may also list `capabilities`: the optional parts of this page the adapter implements,
 `"mentions"`, `"markdown"`, `"attachments"`, and `"quotes"` (see [Sending](#sending)). T3 offers a feature
