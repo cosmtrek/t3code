@@ -187,6 +187,7 @@ export function DelegateDialog({
           channelId: target.channelId,
           conversationId: target.conversation.id,
           anchorMessageId,
+          pickedMessageId: target.message.id,
           scope,
           ...(scope === "range" && untilMessageId !== LATEST ? { untilMessageId } : {}),
           projectId: chosenProject,

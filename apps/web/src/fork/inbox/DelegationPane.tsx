@@ -2,12 +2,15 @@ import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { ThreadId, type EnvironmentId, type ScopedThreadRef } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import {
+  ArchiveIcon,
   CircleAlertIcon,
   CircleDashedIcon,
   CircleDotDashedIcon,
   MessageCircleQuestionIcon,
   ShieldQuestionIcon,
+  Trash2Icon,
   UserRoundIcon,
+  type LucideIcon,
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
@@ -26,11 +29,13 @@ import { skippedNotice } from "./inboxView";
 import { ReplyBox, useSendKey } from "./ReplyBox";
 
 /** The sidebar's words, for when the thread is not in this client's sidebar state. */
-const THREAD_STATUS_LABELS: Readonly<Record<LinkedThread["status"], string | null>> = {
+const THREAD_STATUS_LABELS: Readonly<
+  Record<LinkedThread["status"], { label: string; icon: LucideIcon } | null>
+> = {
   running: null,
   idle: null,
-  archived: "Archived",
-  deleted: "Thread deleted",
+  archived: { label: "Archived", icon: ArchiveIcon },
+  deleted: { label: "Thread deleted", icon: Trash2Icon },
   unknown: null,
 };
 
@@ -38,7 +43,7 @@ const THREAD_STATUS_LABELS: Readonly<Record<LinkedThread["status"], string | nul
 const SIDEBAR_STATUS: Readonly<
   Record<
     Exclude<SidebarThreadStatus, "ready">,
-    { label: string; icon: typeof CircleDashedIcon; className: string }
+    { label: string; icon: LucideIcon; className: string }
   >
 > = {
   preparing: { label: "Setting up", icon: CircleDashedIcon, className: "text-info-foreground" },
@@ -251,17 +256,28 @@ export function ThreadStatus({
       ? "working"
       : null;
   if (status !== null && status !== "ready") {
-    const { label, icon: Icon, className } = SIDEBAR_STATUS[status];
-    return (
-      <span
-        className={cn("inline-flex shrink-0 items-center gap-1 text-xs font-medium", className)}
-      >
-        <Icon aria-hidden className="size-3 shrink-0" />
-        {label}
-      </span>
-    );
+    const { label, icon, className } = SIDEBAR_STATUS[status];
+    return <StatusLabel icon={icon} label={label} className={className} />;
   }
-  const label = THREAD_STATUS_LABELS[thread.status];
-  if (label === null) return fallback;
-  return <span className="shrink-0 text-xs text-muted-foreground">{label}</span>;
+  const known = THREAD_STATUS_LABELS[thread.status];
+  if (known === null) return fallback;
+  return <StatusLabel icon={known.icon} label={known.label} className="text-muted-foreground" />;
+}
+
+/** Every delegation status draws as one icon and one word, so a column of them lines up. */
+export function StatusLabel({
+  icon: Icon,
+  label,
+  className,
+}: {
+  readonly icon: LucideIcon;
+  readonly label: string;
+  readonly className: string;
+}) {
+  return (
+    <span className={cn("inline-flex shrink-0 items-center gap-1 text-xs font-medium", className)}>
+      <Icon aria-hidden className="size-3 shrink-0" />
+      {label}
+    </span>
+  );
 }

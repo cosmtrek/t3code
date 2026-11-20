@@ -669,6 +669,7 @@ describe("delegating", () => {
                 },
                 { id: "reply", minute: 3, author: ME, replyTo: "root" },
                 { id: "late", minute: 4, author: THEM },
+                { id: "ask", minute: 5, author: THEM, replyTo: "root" },
               ],
             },
           ],
@@ -692,11 +693,18 @@ describe("delegating", () => {
           ),
         );
       const mentioned = (context: string) =>
-        ["root", "aside", "reply", "late"].filter((id) => context.includes(`text of ${id}\n`));
+        ["root", "aside", "reply", "late", "ask"].filter((id) =>
+          context.includes(`text of ${id}\n`),
+        );
       const modelSelection = { instanceId: "codex", model: "gpt" };
 
-      const chain = yield* delegate({ anchorMessageId: "root", scope: "chain", modelSelection });
-      expect(mentioned(yield* contextOf(chain))).toEqual(["root", "reply"]);
+      const chain = yield* delegate({
+        anchorMessageId: "root",
+        pickedMessageId: "ask",
+        scope: "chain",
+        modelSelection,
+      });
+      expect(mentioned(yield* contextOf(chain))).toEqual(["root", "reply", "ask"]);
 
       const range = yield* delegate({
         anchorMessageId: "aside",
@@ -725,9 +733,9 @@ describe("delegating", () => {
       expect(backwards).toMatchObject({ status: 400, field: "untilMessageId" });
 
       yield* delegate({ anchorMessageId: "reply", scope: "range", modelSelection });
-      // The sender's first message gets the reaction, unless it already has mine.
+      // The picked message gets the reaction, the sender's first when it is mine, never a second.
       expect(h.posted).toEqual([
-        { conversationId: "c", messageId: "root", key: "OK" },
+        { conversationId: "c", messageId: "ask", key: "OK" },
         { conversationId: "c", messageId: "late", key: "OK" },
       ]);
     }),

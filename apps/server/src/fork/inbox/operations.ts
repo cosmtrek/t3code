@@ -1094,6 +1094,8 @@ const DelegateInput = Schema.Struct({
   conversationId: Schema.String,
   /** For a chain, the root of the reply thread; the client picks it from the message. */
   anchorMessageId: Schema.String,
+  /** The message the user delegated from, inside a chain's thread; its sender gets the reaction. */
+  pickedMessageId: Schema.optional(Schema.NullOr(Schema.String)),
   scope: Schema.Literals(["chain", "range"]),
   /** A range's last message; the newest one when left out. */
   untilMessageId: Schema.optional(Schema.NullOr(Schema.String)),
@@ -1349,7 +1351,13 @@ export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown
     const images = yield* downloadImages(input.channelId, contextDir, scoped.messages);
     const anchor = scoped.messages.find((message) => message.id === input.anchorMessageId);
     const preview = clipPreview(anchor ?? scoped.messages[0]);
-    const request = scoped.messages.find((message) => !message.author.isSelf);
+    const picked = scoped.messages.find(
+      (message) => message.id === (input.pickedMessageId ?? input.anchorMessageId),
+    );
+    const request =
+      picked !== undefined && !picked.author.isSelf
+        ? picked
+        : scoped.messages.find((message) => !message.author.isSelf);
     const sender = request?.author ?? scoped.messages[0]!.author;
     const since = Date.now() - SENDER_HISTORY_MS;
     const senderHistory = listing.conversations
