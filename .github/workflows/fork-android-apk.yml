@@ -37,9 +37,9 @@ jobs:
   apk:
     name: Build ${{ inputs.variant }} ${{ inputs.version }}
     if: github.repository != 'pingdotgg/t3code'
-    # The macOS arm64 Namespace profile the desktop release uses: more cores than GitHub's
-    # ubuntu-24.04, where native modules and R8 took ~20 minutes.
-    runs-on: namespace-profile-t3code
+    # A Linux Namespace profile: more cores than GitHub's ubuntu-24.04, where native modules
+    # and R8 took ~20 minutes.
+    runs-on: namespace-profile-default
     timeout-minutes: 90
     env:
       APP_VARIANT: ${{ inputs.variant }}
@@ -64,7 +64,6 @@ jobs:
           fi
 
       - name: Free disk space
-        if: runner.os == 'Linux'
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL
           df -h /
@@ -109,9 +108,7 @@ jobs:
         env:
           VERSION_CODE: ${{ github.run_number }}
         run: |
-          # BSD sed (macOS) needs the suffix attached to -i.
-          sed -i.bak -E "s/versionCode [0-9]+/versionCode $VERSION_CODE/" app/build.gradle
-          rm app/build.gradle.bak
+          sed -i -E "s/versionCode [0-9]+/versionCode $VERSION_CODE/" app/build.gradle
           grep -E "applicationId|versionCode|versionName" app/build.gradle
 
       - name: Build

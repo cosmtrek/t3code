@@ -128,7 +128,7 @@ gh variable set T3CODE_APP_ICON -R cosmtrek/t3code --body nightly
 ## Android builds (GitHub Actions)
 
 Workflow: `.github/workflows/fork-android-apk.yml`, manual trigger only. It runs on the Namespace
-profile `namespace-profile-t3code` (macOS arm64), like the desktop release.
+profile `namespace-profile-default` (Linux).
 
 ```bash
 gh workflow run fork-android-apk.yml --ref r/main -f version=1.0.0
