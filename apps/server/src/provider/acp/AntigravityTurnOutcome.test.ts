@@ -148,6 +148,12 @@ describe("watchAntigravityPromptOutcome", () => {
         assert.equal(outcome?.failure.code, "INVALID_THINKING_SIGNATURE");
         assert.equal(outcome?.threadDisposition, "broken");
       }
+      const checkpoint = yield* turn([
+        [USER_INPUT, input],
+        [ERROR_MESSAGE, errorPayload("agent executor error: could not find doneCh for checkpoint")],
+      ]);
+      assert.equal(checkpoint?.failure.code, "SESSION_CORRUPTED");
+      assert.equal(checkpoint?.threadDisposition, "broken");
       // A completed tool keeps its usage, and the turn still fails.
       assert.equal(
         (yield* turn(
