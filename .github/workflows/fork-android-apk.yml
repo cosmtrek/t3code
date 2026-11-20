@@ -37,7 +37,9 @@ jobs:
   apk:
     name: Build ${{ inputs.variant }} ${{ inputs.version }}
     if: github.repository != 'pingdotgg/t3code'
-    runs-on: ubuntu-24.04
+    # The macOS arm64 Namespace profile the desktop release uses: more cores than GitHub's
+    # ubuntu-24.04, where native modules and R8 took ~20 minutes.
+    runs-on: namespace-profile-t3code
     timeout-minutes: 90
     env:
       APP_VARIANT: ${{ inputs.variant }}
@@ -62,6 +64,7 @@ jobs:
           fi
 
       - name: Free disk space
+        if: runner.os == 'Linux'
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL
           df -h /
@@ -89,6 +92,10 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      # GitHub's images ship the Android SDK; Namespace's do not. Gradle fetches the NDK itself.
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
       # Public identifiers official builds ship with; they enable T3 Connect against upstream's relay.
       - name: Enable T3 Connect
         run: cp .env.example .env
@@ -102,7 +109,9 @@ jobs:
         env:
           VERSION_CODE: ${{ github.run_number }}
         run: |
-          sed -i -E "s/versionCode [0-9]+/versionCode $VERSION_CODE/" app/build.gradle
+          # BSD sed (macOS) needs the suffix attached to -i.
+          sed -i.bak -E "s/versionCode [0-9]+/versionCode $VERSION_CODE/" app/build.gradle
+          rm app/build.gradle.bak
           grep -E "applicationId|versionCode|versionName" app/build.gradle
 
       - name: Build
