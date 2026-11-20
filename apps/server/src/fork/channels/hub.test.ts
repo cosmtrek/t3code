@@ -62,7 +62,6 @@ const HEALTH = {
 const CONFIG = {
   displayName: "Chat",
   defaultProjectPaths: [],
-  delegateTemplates: [{ id: "t", name: "T", prompt: "{contextDir}" }],
   relevanceSummary: "Everything",
 };
 

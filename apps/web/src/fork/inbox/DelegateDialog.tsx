@@ -1,11 +1,21 @@
-import { ThreadId, type EnvironmentId } from "@t3tools/contracts";
+import { useAtomValue } from "@effect/atom-react";
+import { ProjectId, ThreadId, type EnvironmentId, type ModelSelection } from "@t3tools/contracts";
+import { createModelSelection } from "@t3tools/shared/model";
 import { useNavigate } from "@tanstack/react-router";
+import { ChevronDownIcon, FolderGit2Icon, FolderGitIcon, FolderIcon } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
+import { ComposerControl, ComposerSelectControl } from "../../components/chat/ComposerControl";
+import {
+  ComposerEffortColumn,
+  describeComposerEffort,
+} from "../../components/chat/ComposerModelEffort";
+import { ProviderModelPicker } from "../../components/chat/ProviderModelPicker";
+import type { TraitsSelectionInput } from "../../components/chat/TraitsPicker";
+import { ComposerContextLabel } from "../../components/ComposerContextLabel";
 import { Button } from "../../components/ui/button";
 import {
   Dialog,
-  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogPanel,
@@ -13,16 +23,23 @@ import {
   DialogTitle,
 } from "../../components/ui/dialog";
 import {
-  Select,
-  SelectItem,
-  SelectPopup,
-  SelectTrigger,
-  SelectValue,
-} from "../../components/ui/select";
-import { Input } from "../../components/ui/input";
-import { Textarea } from "../../components/ui/textarea";
+  Menu,
+  MenuGroup,
+  MenuGroupLabel,
+  MenuPopup,
+  MenuRadioGroup,
+  MenuRadioItem,
+  MenuSeparator,
+  MenuTrigger,
+} from "../../components/ui/menu";
+import { MiddleTruncate } from "../../components/ui/middle-truncate";
+import { Select, SelectItem, SelectPopup } from "../../components/ui/select";
 import { WorktreeBaseBranchPicker } from "../../components/WorktreeBaseBranchPicker";
+import { useClientSettings, useEnvironmentSettings } from "../../hooks/useSettings";
+import { getCustomModelOptionsByInstance } from "../../modelSelection";
+import { providerInstanceEntriesFor } from "../../providerInstances";
 import { useEnvironmentQuery } from "../../state/query";
+import { EMPTY_SERVER_PROVIDERS, serverEnvironment } from "../../state/server";
 import { vcsEnvironment } from "../../state/vcs";
 import { ForkApiError, forkRequest } from "../forkApiAccess";
 import type {
@@ -30,14 +47,11 @@ import type {
   DelegateOptions,
   DelegationScope,
   InboxMessage,
-  ModelChoice,
   WorkspaceStrategy,
 } from "../types";
 import { useForkResource } from "../useForkResource";
-import { anchorOf, defaultScope, nameOrUnknown, quoteOfMessage } from "./inboxView";
-
-const modelKey = (choice: ModelChoice | null) =>
-  choice === null ? "" : `${choice.instanceId}\u0000${choice.model}`;
+import { anchorOf, defaultScope, gistOf, nameOrUnknown, quoteOfMessage } from "./inboxView";
+import { ReplyBox, useSendKey } from "./ReplyBox";
 
 type WorkspaceMode = WorkspaceStrategy["type"];
 
@@ -46,11 +60,6 @@ const WORKSPACE_MODE_LABELS: Readonly<Record<WorkspaceMode, string>> = {
   worktree: "New worktree",
   existing_worktree: "Existing worktree",
 };
-
-function parseModelKey(key: string): ModelChoice | null {
-  const [instanceId, model] = key.split("\u0000");
-  return instanceId && model ? { instanceId, model } : null;
-}
 
 const SCOPE_LABELS: Readonly<Record<DelegationScope, string>> = {
   chain: "This message and its replies",
@@ -103,23 +112,31 @@ export function DelegateDialog({
   );
   const [forceNew, setForceNew] = useState(false);
   const [projectId, setProjectId] = useState<string | null>(null);
-  const [templateId, setTemplateId] = useState<string | null>(null);
-  const [model, setModel] = useState<string | null>(null);
+  const [model, setModel] = useState<ModelSelection | null>(null);
   const [note, setNote] = useState("");
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode | null>(null);
   const [baseRef, setBaseRef] = useState<string | null>(null);
-  const [newBranch, setNewBranch] = useState("");
+  const [placeOpen, setPlaceOpen] = useState(false);
   const [startFromOrigin, setStartFromOrigin] = useState(false);
   const [worktreePath, setWorktreePath] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const sendKey = useSendKey();
   const data = options.data;
+  const untilMessage = target.later.find((message) => message.id === untilMessageId) ?? null;
+  const replyCount = target.message.rootId == null ? (target.message.replyCount ?? 0) : 0;
+  const scopeLabel =
+    scope === "chain"
+      ? replyCount > 0
+        ? `With ${replyCount} ${replyCount === 1 ? "reply" : "replies"}`
+        : "With its replies"
+      : target.later.length === 0
+        ? "From here on"
+        : `${(untilMessage === null ? target.later.length : target.later.indexOf(untilMessage) + 1) + 1} messages from here`;
   const chosenProject = projectId ?? data?.defaultProjectId ?? data?.projects[0]?.id ?? null;
   const project = data?.projects.find((candidate) => candidate.id === chosenProject) ?? null;
-  const chosenTemplate = templateId ?? data?.templates[0]?.id ?? null;
-  const defaultModel = modelKey(project?.defaultModel ?? null);
-  const chosenModel = model ?? defaultModel;
+  const chosenModel = model ?? project?.defaultModel ?? null;
   // The last thread's checkout belongs to its project; another project starts in its own.
   const defaultWorkspace: WorkspaceStrategy =
     data && chosenProject === data.defaultProjectId
@@ -127,7 +144,8 @@ export function DelegateDialog({
       : { type: "root" };
   const chosenMode = workspaceMode ?? defaultWorkspace.type;
   const refs = useEnvironmentQuery(
-    project && chosenMode !== "root"
+    // Existing worktrees are listed in the workspace menu; read them once it opens.
+    project && (chosenMode !== "root" || placeOpen)
       ? vcsEnvironment.listRefs({
           environmentId,
           input: { cwd: project.workspaceRoot, refKind: "local", limit: 200 },
@@ -158,7 +176,6 @@ export function DelegateDialog({
             type: "worktree",
             baseRef: chosenBaseRef,
             startFromOrigin,
-            ...(newBranch.trim() ? { branch: newBranch.trim() } : {}),
           }
         : chosenWorktreePath === null
           ? null
@@ -173,7 +190,7 @@ export function DelegateDialog({
   };
 
   const submit = async () => {
-    if (chosenProject === null || chosenTemplate === null || workspaceStrategy === null) return;
+    if (chosenProject === null || workspaceStrategy === null) return;
     setSubmitting(true);
     setError(null);
     try {
@@ -191,9 +208,8 @@ export function DelegateDialog({
           scope,
           ...(scope === "range" && untilMessageId !== LATEST ? { untilMessageId } : {}),
           projectId: chosenProject,
-          templateId: chosenTemplate,
           note,
-          modelSelection: chosenModel === defaultModel ? null : parseModelKey(chosenModel),
+          modelSelection: model,
           workspaceStrategy,
           replaceThreadId: forceNew ? (data?.existing?.threadId ?? null) : null,
         },
@@ -215,6 +231,67 @@ export function DelegateDialog({
 
   const existing = data?.existing ?? null;
   const askAboutExisting = existing !== null && !forceNew;
+  const canDelegate =
+    !submitting &&
+    data !== null &&
+    chosenProject !== null &&
+    chosenModel !== null &&
+    workspaceStrategy !== null;
+
+  const quote = (
+    <div className="min-w-0 border-s-2 border-border ps-3 text-sm">
+      <p className="truncate">
+        <span className="font-medium">{nameOrUnknown(target.message.author.name)}</span>
+        {target.conversation.kind === "dm" ? null : (
+          <span className="text-muted-foreground">
+            {" · "}
+            {nameOrUnknown(target.conversation.name)}
+          </span>
+        )}
+      </p>
+      <p className="truncate">{gistOf(target.message)}</p>
+      {data !== null && !askAboutExisting ? (
+        <div className="-ms-1.75 mt-1 flex min-w-0 flex-wrap items-center gap-0.5">
+          <Select value={scope} onValueChange={(value) => value && setScope(value)}>
+            <ComposerSelectControl size="xs" aria-label="Messages">
+              <ComposerContextLabel>{scopeLabel}</ComposerContextLabel>
+              <ChevronDownIcon data-composer-control-chevron className="opacity-60" />
+            </ComposerSelectControl>
+            <SelectPopup align="start">
+              {(Object.keys(SCOPE_LABELS) as DelegationScope[]).map((option) => (
+                <SelectItem key={option} value={option}>
+                  {SCOPE_LABELS[option]}
+                </SelectItem>
+              ))}
+            </SelectPopup>
+          </Select>
+          {scope === "range" && target.later.length > 0 ? (
+            <Select
+              value={untilMessageId}
+              onValueChange={(value) => value !== null && setUntilMessageId(value)}
+            >
+              <ComposerSelectControl size="xs" className="min-w-0 shrink" aria-label="Through">
+                <ComposerContextLabel>
+                  {untilMessage === null
+                    ? "through the latest"
+                    : `through ${quoteOfMessage(untilMessage)}`}
+                </ComposerContextLabel>
+                <ChevronDownIcon data-composer-control-chevron className="opacity-60" />
+              </ComposerSelectControl>
+              <SelectPopup align="start">
+                <SelectItem value={LATEST}>The latest message</SelectItem>
+                {[target.message, ...target.later].map((message) => (
+                  <SelectItem key={message.id} value={message.id}>
+                    {quoteOfMessage(message)}
+                  </SelectItem>
+                ))}
+              </SelectPopup>
+            </Select>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
 
   let body: ReactNode;
   if (options.error) {
@@ -229,197 +306,136 @@ export function DelegateDialog({
           : `These messages already have a thread${existing.title ? `: ${existing.title}` : ""}.`}
       </p>
     );
-  } else if (data.templates.length === 0) {
-    body = (
-      <p className="text-sm text-muted-foreground">
-        The adapter offers no delegate templates. Add one in the adapter's configuration.
-      </p>
-    );
   } else if (data.projects.length === 0) {
     body = (
       <p className="text-sm text-muted-foreground">Add a project in this environment first.</p>
     );
   } else {
-    body = (
-      <div className="flex flex-col gap-3">
-        <Labeled label="Messages">
-          <Select value={scope} onValueChange={(value) => value && setScope(value)}>
-            <SelectTrigger aria-label="Messages" size="sm">
-              <SelectValue>{SCOPE_LABELS[scope]}</SelectValue>
-            </SelectTrigger>
-            <SelectPopup>
-              {(Object.keys(SCOPE_LABELS) as DelegationScope[]).map((option) => (
-                <SelectItem key={option} value={option}>
-                  {SCOPE_LABELS[option]}
-                </SelectItem>
-              ))}
-            </SelectPopup>
-          </Select>
-        </Labeled>
-        {scope === "range" && target.later.length > 0 ? (
-          <Labeled label="Through">
-            <Select
-              value={untilMessageId}
-              onValueChange={(value) => value !== null && setUntilMessageId(value)}
-            >
-              <SelectTrigger aria-label="Through" size="sm">
-                <SelectValue>
-                  {untilMessageId === LATEST
-                    ? "The latest message"
-                    : quoteOfMessage(
-                        target.later.find((message) => message.id === untilMessageId) ??
-                          target.message,
-                      )}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectPopup>
-                <SelectItem value={LATEST}>The latest message</SelectItem>
-                {[target.message, ...target.later].map((message) => (
-                  <SelectItem key={message.id} value={message.id}>
-                    {quoteOfMessage(message)}
-                  </SelectItem>
-                ))}
-              </SelectPopup>
-            </Select>
-          </Labeled>
-        ) : null}
-        <Labeled label="Project">
-          <Select
-            value={chosenProject ?? ""}
-            onValueChange={(value) => {
-              if (!value) return;
-              setProjectId(value);
-              setBaseRef(null);
-              setWorktreePath(null);
-            }}
-          >
-            <SelectTrigger aria-label="Project" size="sm">
-              <SelectValue>{project?.title}</SelectValue>
-            </SelectTrigger>
-            <SelectPopup>
-              {data.projects.map((candidate) => (
-                <SelectItem key={candidate.id} value={candidate.id}>
-                  {candidate.title}
-                </SelectItem>
-              ))}
-            </SelectPopup>
-          </Select>
-        </Labeled>
-        <Labeled label="Workspace">
-          <Select
-            value={chosenMode}
-            onValueChange={(value) => value && setWorkspaceMode(value as WorkspaceMode)}
-          >
-            <SelectTrigger aria-label="Workspace" size="sm">
-              <SelectValue>{WORKSPACE_MODE_LABELS[chosenMode]}</SelectValue>
-            </SelectTrigger>
-            <SelectPopup>
-              {(Object.keys(WORKSPACE_MODE_LABELS) as WorkspaceMode[]).map((mode) => (
-                <SelectItem key={mode} value={mode}>
-                  {WORKSPACE_MODE_LABELS[mode]}
-                </SelectItem>
-              ))}
-            </SelectPopup>
-          </Select>
-        </Labeled>
-        {chosenMode === "worktree" && project ? (
-          <>
-            <Labeled label="Base branch" group>
-              <WorktreeBaseBranchPicker
-                key={project.id}
-                environmentId={environmentId}
-                cwd={project.workspaceRoot}
-                value={chosenBaseRef}
-                onValueChange={setBaseRef}
-                startFromOrigin={startFromOrigin}
-                onStartFromOriginChange={setStartFromOrigin}
-              />
-            </Labeled>
-            <Labeled label="New branch (optional)">
-              <Input
-                value={newBranch}
-                placeholder="A temporary branch when left empty"
-                onChange={(event) => setNewBranch(event.target.value)}
-              />
-            </Labeled>
-          </>
-        ) : null}
-        {chosenMode === "existing_worktree" ? (
-          <Labeled label="Worktree">
-            {worktrees.length === 0 ? (
-              <p className="text-xs text-muted-foreground">
-                {refs === undefined ? "Loading…" : "This project has no other worktrees."}
-              </p>
-            ) : (
-              <Select
-                value={chosenWorktreePath ?? ""}
-                onValueChange={(value) => value && setWorktreePath(value)}
-              >
-                <SelectTrigger aria-label="Worktree" size="sm">
-                  <SelectValue>{chosenWorktreePath}</SelectValue>
-                </SelectTrigger>
-                <SelectPopup>
-                  {worktrees.map((entry) => (
-                    <SelectItem key={entry.path} value={entry.path}>
-                      {entry.branch ? `${entry.branch} · ` : ""}
-                      {entry.path}
-                    </SelectItem>
-                  ))}
-                </SelectPopup>
-              </Select>
+    const place = (
+      <Menu open={placeOpen} onOpenChange={setPlaceOpen}>
+        <MenuTrigger
+          render={<ComposerControl size="xs" className="min-w-0 shrink" />}
+          aria-label="Project and workspace"
+        >
+          {chosenMode === "root" ? (
+            <FolderIcon className="size-3" />
+          ) : (
+            <FolderGit2Icon className="size-3" />
+          )}
+          <ComposerContextLabel>
+            {project?.title}
+            {chosenMode === "root" ? null : (
+              <span className="text-muted-foreground">
+                {" · "}
+                {chosenMode === "worktree"
+                  ? "New worktree"
+                  : (worktrees.find((entry) => entry.path === chosenWorktreePath)?.branch ??
+                    "Worktree")}
+              </span>
             )}
-          </Labeled>
-        ) : null}
-        <Labeled label="How">
-          <Select
-            value={chosenTemplate ?? ""}
-            onValueChange={(value) => value && setTemplateId(value)}
-          >
-            <SelectTrigger aria-label="Template" size="sm">
-              <SelectValue>
-                {data.templates.find((template) => template.id === chosenTemplate)?.name}
-              </SelectValue>
-            </SelectTrigger>
-            <SelectPopup>
-              {data.templates.map((template) => (
-                <SelectItem key={template.id} value={template.id}>
-                  {template.name}
-                </SelectItem>
+          </ComposerContextLabel>
+          <ChevronDownIcon data-composer-control-chevron className="opacity-60" />
+        </MenuTrigger>
+        <MenuPopup align="start" side="bottom" className="w-[min(21rem,calc(100vw-2rem))]">
+          <MenuGroup>
+            <MenuGroupLabel>Project</MenuGroupLabel>
+            <MenuRadioGroup
+              value={chosenProject ?? ""}
+              onValueChange={(value) => {
+                setProjectId(value as string);
+                setWorkspaceMode(null);
+                setBaseRef(null);
+                setWorktreePath(null);
+              }}
+            >
+              {data.projects.map((candidate) => (
+                <MenuRadioItem key={candidate.id} value={candidate.id} closeOnClick>
+                  <span className="min-w-0 truncate">{candidate.title}</span>
+                </MenuRadioItem>
               ))}
-            </SelectPopup>
-          </Select>
-        </Labeled>
-        <Labeled label="Model">
-          <Select value={chosenModel} onValueChange={(value) => value !== null && setModel(value)}>
-            <SelectTrigger aria-label="Model" size="sm">
-              <SelectValue>
-                {modelLabel(data, parseModelKey(chosenModel)) ?? "Choose a model"}
-                {chosenModel !== "" && chosenModel === defaultModel ? " (default)" : ""}
-              </SelectValue>
-            </SelectTrigger>
-            <SelectPopup>
-              {data.providers.flatMap((provider) =>
-                provider.models.map((candidate) => {
-                  const key = modelKey({ instanceId: provider.instanceId, model: candidate.slug });
-                  return (
-                    <SelectItem key={key} value={key}>
-                      {provider.name} · {candidate.name}
-                      {key === defaultModel ? " (default)" : ""}
-                    </SelectItem>
-                  );
-                }),
-              )}
-            </SelectPopup>
-          </Select>
-        </Labeled>
-        <Labeled label="Note (optional)">
-          <Textarea
-            value={note}
-            rows={3}
-            placeholder="Anything the agent should know"
-            onChange={(event) => setNote(event.target.value)}
-          />
-        </Labeled>
+            </MenuRadioGroup>
+          </MenuGroup>
+          <MenuSeparator />
+          <MenuGroup>
+            <MenuGroupLabel>Workspace</MenuGroupLabel>
+            <MenuRadioGroup
+              value={chosenMode === "existing_worktree" ? (chosenWorktreePath ?? "") : chosenMode}
+              onValueChange={(value) => {
+                if (value === "root" || value === "worktree") {
+                  setWorkspaceMode(value);
+                  return;
+                }
+                setWorkspaceMode("existing_worktree");
+                setWorktreePath(value as string);
+              }}
+            >
+              <MenuRadioItem value="root" closeOnClick>
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <FolderIcon className="size-3" />
+                  {WORKSPACE_MODE_LABELS.root}
+                </span>
+              </MenuRadioItem>
+              <MenuRadioItem value="worktree" closeOnClick>
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <FolderGit2Icon className="size-3" />
+                  {WORKSPACE_MODE_LABELS.worktree}
+                </span>
+              </MenuRadioItem>
+              {worktrees.map((entry) => (
+                <MenuRadioItem key={entry.path} value={entry.path} closeOnClick>
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    <FolderGitIcon className="size-3" />
+                    <MiddleTruncate value={entry.branch ?? entry.path} />
+                  </span>
+                </MenuRadioItem>
+              ))}
+            </MenuRadioGroup>
+          </MenuGroup>
+        </MenuPopup>
+      </Menu>
+    );
+    body = (
+      <div className="flex flex-col gap-1.5">
+        <ReplyBox
+          aria-label="Request"
+          value={note}
+          autoFocus
+          placeholder="What should the agent do? Leave blank to have it read and report back."
+          onChange={(event) => setNote(event.target.value)}
+          onKeyDown={(event) => {
+            if (sendKey.isSend(event)) {
+              event.preventDefault();
+              event.currentTarget.form?.requestSubmit();
+            }
+          }}
+          status={error ? <span className="text-destructive-foreground">{error}</span> : null}
+          actions={
+            <DelegateModelPicker
+              environmentId={environmentId}
+              projectId={chosenProject}
+              selection={chosenModel}
+              onChange={setModel}
+            />
+          }
+          sending={submitting}
+          canSend={canDelegate}
+          sendLabel="Delegate"
+        />
+        <div className="flex min-w-0 items-center gap-0.5 px-1.5">
+          {place}
+          {chosenMode === "worktree" && project ? (
+            <WorktreeBaseBranchPicker
+              key={project.id}
+              environmentId={environmentId}
+              cwd={project.workspaceRoot}
+              value={chosenBaseRef}
+              onValueChange={setBaseRef}
+              startFromOrigin={startFromOrigin}
+              onStartFromOriginChange={setStartFromOrigin}
+              compact
+            />
+          ) : null}
+        </div>
       </div>
     );
   }
@@ -431,83 +447,100 @@ export function DelegateDialog({
         if (!open) onClose();
       }}
     >
-      <DialogPopup className="sm:max-w-lg">
+      <DialogPopup className="sm:max-w-xl">
         <form
           className="flex min-h-0 flex-col"
           onSubmit={(event) => {
             event.preventDefault();
-            void submit();
+            if (canDelegate) void submit();
           }}
         >
           <DialogHeader>
-            <DialogTitle>Delegate to a thread</DialogTitle>
-            <DialogDescription>
-              <span className="line-clamp-2">
-                {nameOrUnknown(target.conversation.name)}: {quoteOfMessage(target.message)}
-              </span>
-            </DialogDescription>
+            <DialogTitle>Delegate</DialogTitle>
           </DialogHeader>
           <DialogPanel>
-            {body}
-            {error ? <p className="mt-3 text-sm text-destructive-foreground">{error}</p> : null}
+            <div className="flex flex-col gap-3">
+              {quote}
+              {body}
+            </div>
           </DialogPanel>
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={onClose}>
-              Cancel
-            </Button>
-            {askAboutExisting ? (
-              <>
-                <Button type="button" variant="outline" onClick={() => setForceNew(true)}>
-                  Start a new thread
-                </Button>
-                <Button type="button" onClick={() => openThread(existing.threadId)}>
-                  {existing.status === "archived" ? "Open archived thread" : "Open thread"}
-                </Button>
-              </>
-            ) : (
-              <Button
-                type="submit"
-                disabled={
-                  submitting ||
-                  data === null ||
-                  chosenProject === null ||
-                  chosenTemplate === null ||
-                  chosenModel === "" ||
-                  workspaceStrategy === null
-                }
-              >
-                {submitting ? "Starting…" : "Delegate"}
+          {askAboutExisting ? (
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setForceNew(true)}>
+                Start a new thread
               </Button>
-            )}
-          </DialogFooter>
+              <Button type="button" onClick={() => openThread(existing.threadId)}>
+                {existing.status === "archived" ? "Open archived thread" : "Open thread"}
+              </Button>
+            </DialogFooter>
+          ) : null}
         </form>
       </DialogPopup>
     </Dialog>
   );
 }
 
-function modelLabel(data: DelegateOptions, choice: ModelChoice | null): string | null {
-  if (choice === null) return null;
-  const provider = data.providers.find((candidate) => candidate.instanceId === choice.instanceId);
-  const model = provider?.models.find((candidate) => candidate.slug === choice.model);
-  return provider ? `${provider.name} · ${model?.name ?? choice.model}` : choice.model;
-}
-
-function Labeled({
-  label,
-  group = false,
-  children,
+/** T3 Code's own model picker, with the model's effort levels docked beside it as in the composer. */
+function DelegateModelPicker({
+  environmentId,
+  projectId,
+  selection,
+  onChange,
 }: {
-  readonly label: string;
-  /** Several controls: a label would forward its clicks to the first one. */
-  readonly group?: boolean;
-  readonly children: ReactNode;
+  readonly environmentId: EnvironmentId;
+  readonly projectId: string | null;
+  readonly selection: ModelSelection | null;
+  readonly onChange: (selection: ModelSelection) => void;
 }) {
-  const Element = group ? "div" : "label";
+  const settings = useEnvironmentSettings(environmentId);
+  const effortDisplay = useClientSettings((client) => client.effortDisplay);
+  const providers =
+    useAtomValue(serverEnvironment.providersValueAtom(environmentId)) ?? EMPTY_SERVER_PROVIDERS;
+  const entries = providerInstanceEntriesFor(
+    providers,
+    settings,
+    projectId === null ? null : ProjectId.make(projectId),
+  );
+  const instanceId = selection?.instanceId ?? entries[0]?.instanceId ?? null;
+  if (instanceId === null) {
+    return <span className="px-2 text-xs text-muted-foreground">No providers</span>;
+  }
+  const entry = entries.find((candidate) => candidate.instanceId === instanceId);
+  const model = selection?.model ?? "";
+  const traits: TraitsSelectionInput | null = entry
+    ? {
+        provider: entry.driverKind,
+        instanceId: entry.instanceId,
+        models: entry.models,
+        model,
+        modelOptions: selection?.options ?? [],
+        allowPromptInjectedEffort: false,
+        onModelOptionsChange: (options) =>
+          onChange(createModelSelection(instanceId, model, options)),
+      }
+    : null;
+  const effort = describeComposerEffort(traits, effortDisplay, "sm");
   return (
-    <Element className="flex min-w-0 flex-col gap-1.5">
-      <span className="text-xs font-medium">{label}</span>
-      {children}
-    </Element>
+    <ProviderModelPicker
+      environmentId={environmentId}
+      activeInstanceId={instanceId}
+      model={model}
+      lockedProvider={null}
+      instanceEntries={entries}
+      modelOptionsByInstance={getCustomModelOptionsByInstance(
+        settings,
+        providers,
+        instanceId,
+        model,
+      )}
+      isComposerOwned={false}
+      popupAlign="end"
+      triggerSuffix={effort.suffix}
+      triggerDetail={effort.detail}
+      effortColumn={<ComposerEffortColumn traits={traits} />}
+      onInstanceModelChange={(nextInstanceId, nextModel) =>
+        onChange(createModelSelection(nextInstanceId, nextModel))
+      }
+    />
   );
 }

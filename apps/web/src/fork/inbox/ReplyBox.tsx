@@ -18,6 +18,7 @@ export function ReplyBox({
   actions,
   sending,
   canSend,
+  sendLabel = "Send",
   ...textarea
 }: Omit<ComponentProps<typeof Textarea>, "rows" | "unstyled" | "className"> & {
   readonly above?: ReactNode;
@@ -26,6 +27,7 @@ export function ReplyBox({
   readonly actions?: ReactNode;
   readonly sending: boolean;
   readonly canSend: boolean;
+  readonly sendLabel?: string;
 }) {
   const sendKey = useSendKey();
   return (
@@ -43,6 +45,7 @@ export function ReplyBox({
             <SendButton
               sending={sending}
               disabled={!canSend || sending}
+              label={sendLabel}
               shortcut={sendKey.label(String(textarea.value ?? ""))}
             />
           </div>
@@ -76,10 +79,12 @@ export function useSendKey() {
 function SendButton({
   sending,
   disabled,
+  label,
   shortcut,
 }: {
   readonly sending: boolean;
   readonly disabled: boolean;
+  readonly label: string;
   readonly shortcut: string;
 }) {
   return (
@@ -88,7 +93,7 @@ function SendButton({
         render={
           <button
             type="submit"
-            aria-label={sending ? "Sending" : "Send"}
+            aria-label={sending ? `${label}…` : label}
             disabled={disabled}
             className="ms-1 flex size-8 shrink-0 items-center justify-center rounded-full bg-message-action text-message-action-foreground shadow-xs transition-colors duration-150 enabled:cursor-pointer enabled:shadow-message-action/24 enabled:inset-shadow-control-highlight hover:bg-message-action-hover disabled:bg-foreground/12 disabled:text-muted-foreground disabled:shadow-none [&_svg]:pointer-events-none"
           />
@@ -108,7 +113,9 @@ function SendButton({
           </svg>
         )}
       </TooltipTrigger>
-      <TooltipPopup side="top">Send · {shortcut}</TooltipPopup>
+      <TooltipPopup side="top">
+        {label} · {shortcut}
+      </TooltipPopup>
     </Tooltip>
   );
 }

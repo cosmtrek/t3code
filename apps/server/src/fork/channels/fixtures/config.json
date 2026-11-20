@@ -1,13 +1,6 @@
 {
   "displayName": "Lark",
   "defaultProjectPaths": ["~/code/example-service"],
-  "delegateTemplates": [
-    {
-      "id": "investigate",
-      "name": "Investigate",
-      "prompt": "Read {contextDir}/context.md. Write your findings to {contextDir}/conclusion.md.\n\nNote: {note}\nOriginal: {openUrl}"
-    }
-  ],
   "relevanceSummary": "Direct messages, mentions of you, and threads you took part in.",
   "capabilities": ["mentions", "markdown", "attachments"],
   "ackReaction": "OK"

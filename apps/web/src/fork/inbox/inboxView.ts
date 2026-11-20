@@ -154,7 +154,7 @@ export function quoteOf(author: string | null, text: string): string {
  * chat with its own speakers, so the rich summary names the message better.
  */
 export const quoteOfMessage = (message: InboxMessage) =>
-  quoteOf(message.author.name, message.richSummary || message.text);
+  quoteOf(message.author.name, gistOf(message));
 
 export type ReplyMode = "quote" | "thread";
 
@@ -282,10 +282,15 @@ function attachmentLabel(message: InboxMessage): string {
   return file.kind === "image" ? "[Image]" : `[File] ${file.name}`;
 }
 
+/** What a message says in one line: its summary, its text, or the file it carries. */
+export const gistOf = (message: InboxMessage) =>
+  (message.richSummary || message.text.trim() || attachmentLabel(message))
+    .replace(/\s+/g, " ")
+    .trim();
+
 /** A reply as one line under a folded topic: who wrote it and what, whatever its length. */
 export function replyLine(message: InboxMessage): string {
-  const body = message.richSummary || message.text.trim() || attachmentLabel(message);
-  return `${nameOrUnknown(message.author.name)}: ${body.replace(/\s+/g, " ").trim()}`;
+  return `${nameOrUnknown(message.author.name)}: ${gistOf(message)}`;
 }
 
 /**

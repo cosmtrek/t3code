@@ -10,7 +10,6 @@ import { applyFallback, discardDraft, readArtifacts, readSent, recordSent } from
 import {
   buildContextMarkdown,
   firstMessage,
-  fillTemplate,
   mediaFileName,
   parseFallbackDraft,
   threadTitle,
@@ -239,47 +238,38 @@ describe("delegations", () => {
 });
 
 describe("delegation text", () => {
-  it("fills known placeholders only", () => {
-    expect(
-      fillTemplate("{contextDir} {note} {openUrl} {other}", {
-        contextDir: "/x",
-        note: "  ",
-        openUrl: null,
-      }),
-    ).toBe("/x (none) (not available) {other}");
-  });
-
-  it("adds the link and the draft rule when the template lacks them", () => {
+  it("puts the user's request after the context, or a default one when blank", () => {
     const text = firstMessage({
-      template: "Look at {contextDir}/context.md",
       contextDir: "/ctx",
-      note: "",
+      request: "  Find why sign-in fails  ",
       openUrl: "https://chat.example.com/t/1",
       skippedMessages: 0,
       markdown: false,
     });
-    expect(text).toContain("Open in app: https://chat.example.com/t/1");
+    expect(text.split("\n\n").slice(0, 3)).toEqual([
+      "Read `/ctx/context.md` for the chat messages and any images.",
+      "Find why sign-in fails",
+      "Open in app: https://chat.example.com/t/1",
+    ]);
     expect(text).toContain("/ctx/draft.md`");
     expect(text).toContain("<draft>");
-    expect(text).not.toContain("conclusion");
-    const complete = firstMessage({
-      template: "{openUrl} {contextDir}/draft.md",
+    const blank = firstMessage({
       contextDir: "/ctx",
-      note: "",
-      openUrl: "https://chat.example.com/t/1",
+      request: " ",
+      openUrl: null,
       skippedMessages: 0,
       markdown: false,
     });
-    expect(complete).toBe("https://chat.example.com/t/1 /ctx/draft.md");
+    expect(blank).toContain("Do not change anything yet.");
+    expect(blank).not.toContain("Open in app");
   });
 
   it("tells the thread about messages it is not given, and names nameless authors", () => {
     const missing = "2 messages in this conversation could not be read and are missing";
     expect(
       firstMessage({
-        template: "{contextDir}/draft.md",
         contextDir: "/ctx",
-        note: "",
+        request: "",
         openUrl: null,
         skippedMessages: 2,
         markdown: false,

@@ -35,18 +35,9 @@ export const ChannelHealth = Schema.Struct({
 });
 export type ChannelHealth = typeof ChannelHealth.Type;
 
-/** Only a prompt: the thread runs in the project's default mode, whatever the prompt asks. */
-export const DelegateTemplate = Schema.Struct({
-  id: Schema.String,
-  name: Schema.String,
-  prompt: Schema.String,
-});
-export type DelegateTemplate = typeof DelegateTemplate.Type;
-
 export const AdapterConfig = Schema.Struct({
   displayName: Schema.String,
   defaultProjectPaths: Schema.Array(Schema.String),
-  delegateTemplates: Schema.Array(DelegateTemplate),
   relevanceSummary: Schema.String,
   /** Optional parts of the protocol the adapter implements; names T3 does not know are ignored. */
   capabilities: Schema.optional(Schema.Array(Schema.String)),

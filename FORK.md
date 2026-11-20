@@ -310,9 +310,10 @@ seam files. Then try the example channel end to end in a browser before releasin
   `creationSource: "server"` and `createdBy: "user"`. The default model is the project's, through
   the shared `resolveNewThreadModelSelection`, else the first ready provider's default model. The
   title is `<sender>: <summary>`, cut at a word or sentence near 48 characters.
-- A protocol template is only a prompt. "Read only" in a template is an instruction to the
-  agent; the thread runs in the project's default runtime mode. Enforcing a mode would need a
-  `runtimeMode` field in the protocol's templates.
+- The first message is T3's: the context file, the user's request from the dialog, the link,
+  and the draft rule. There are no adapter templates; a fixed prompt fought the request the user
+  writes anyway. "Do not change anything" in the default request is an instruction to the agent;
+  the thread runs in the project's default runtime mode.
 - Each thread gets its own context folder, `items/<delegationId>/<thread>/`, so a newer thread
   never shows an older thread's files and an older thread that finishes late cannot overwrite
   them. Only the delegation's current thread drives its state and offers its draft. One launch per delegation runs at a time, and
@@ -326,7 +327,7 @@ seam files. Then try the example channel end to end in a browser before releasin
   findings, requests, approvals, and launched threads read as they do in the thread, and the user
   talks to the agent in its own composer. The inbox adds only the draft; the delegated messages
   are the conversation beside it, not repeated in the pane. The first message carries
-  one rule, unless the template names `draft.md` itself: write `draft.md` only when a message asks
+  one rule: write `draft.md` only when a message asks
   for the reply. The delegation shows the draft in an editable box and sends it from there, to
   the message it answers. When the thread cannot
   write there (a sandbox limited to the workspace), it ends its reply with `<draft>` tags; the inbox

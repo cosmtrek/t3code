@@ -138,7 +138,6 @@ function fakeAdapter(
       return json(200, {
         displayName: "Chat",
         defaultProjectPaths: ["~/code/somewhere"],
-        delegateTemplates: [{ id: "t", name: "T", prompt: "{contextDir}" }],
         relevanceSummary: "All",
         ...config,
       });
@@ -623,7 +622,6 @@ describe("delegating", () => {
           anchorMessageId,
           scope: "chain",
           projectId: "p",
-          templateId: "t",
           modelSelection: { instanceId: "codex", model: "gpt" },
           ...(workspaceStrategy === undefined ? {} : { workspaceStrategy }),
         }).pipe(Effect.provide(launchLayer(h, launched)));
@@ -679,7 +677,7 @@ describe("delegating", () => {
       );
       const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
       const delegate = (input: Record<string, unknown>) =>
-        Inbox.delegate({ ...h.keyOf("c"), projectId: "p", templateId: "t", ...input }).pipe(
+        Inbox.delegate({ ...h.keyOf("c"), projectId: "p", ...input }).pipe(
           Effect.provide(launchLayer(h, launched)),
         );
       const contextOf = (result: { delegationId: string; threadId: string }) =>
@@ -765,7 +763,6 @@ describe("delegating", () => {
         anchorMessageId: "m0",
         scope,
         projectId: "p",
-        templateId: "t",
       }).pipe(
         Effect.provide(
           Layer.mergeAll(
