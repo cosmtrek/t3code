@@ -1046,9 +1046,6 @@ export const delegateOptions = Effect.fn("ForkInbox.delegateOptions")(function* 
       Effect.orElseSucceed(() => [project.id, null] as const),
     ),
   );
-  const providers = yield* ProviderRegistry.ProviderRegistry.pipe(
-    Effect.flatMap((registry) => registry.getProviders),
-  );
   const links = runtime.store.linksForDelegation(delegationId);
   const lastProjectId = links[0]?.projectId ?? null;
   const active = activeLinkOf(links);
@@ -1077,14 +1074,6 @@ export const delegateOptions = Effect.fn("ForkInbox.delegateOptions")(function* 
     defaultWorkspaceStrategy: (lastShell?.worktreePath && lastShell.deletedAt === null
       ? { type: "existing_worktree", worktreePath: lastShell.worktreePath }
       : { type: "root" }) satisfies WorkspaceStrategy,
-    templates: channel.config?.delegateTemplates ?? [],
-    providers: providers
-      .filter((provider) => provider.enabled && provider.installed)
-      .map((provider) => ({
-        instanceId: provider.instanceId,
-        name: provider.displayName ?? provider.driver,
-        models: provider.models.map((model) => ({ slug: model.slug, name: model.name })),
-      })),
     existing: isCurrent(existing) ? existing : null,
   };
 });
@@ -1100,7 +1089,7 @@ const DelegateInput = Schema.Struct({
   /** A range's last message; the newest one when left out. */
   untilMessageId: Schema.optional(Schema.NullOr(Schema.String)),
   projectId: Schema.String,
-  templateId: Schema.String,
+  /** What the agent should do; a default request when blank. */
   note: Schema.optional(Schema.String),
   modelSelection: Schema.optional(Schema.NullOr(Schema.Unknown)),
   /** Where the thread works; the project checkout when left out. */
@@ -1303,10 +1292,6 @@ export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown
         detail: "The channel has none of these messages any more.",
       });
     }
-    const template = channel.config?.delegateTemplates.find(
-      (candidate) => candidate.id === input.templateId,
-    );
-    if (!template) return yield* badRequest("Choose one of the adapter's templates.", "templateId");
     const projects = yield* activeProjects;
     const project = projects.find((candidate) => candidate.id === input.projectId);
     if (!project) return yield* badRequest("Choose a project in this environment.", "projectId");
@@ -1390,9 +1375,8 @@ export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown
       rootMissing: scoped.rootMissing,
     });
     const text = firstMessage({
-      template: template.prompt,
       contextDir,
-      note: input.note ?? "",
+      request: input.note ?? "",
       openUrl,
       skippedMessages: scoped.skipped,
       markdown: supports(channel, "markdown"),
@@ -1410,7 +1394,6 @@ export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown
             scope: input.scope,
             untilAt: scoped.untilAt,
             projectId: project.id,
-            templateId: template.id,
             note: input.note ?? "",
             modelSelection,
             runtimeMode,

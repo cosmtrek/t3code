@@ -221,14 +221,14 @@ describe("conversationRows", () => {
 
   it("writes a folded reply as one line, naming an image or file when it has no text", () => {
     expect(replyLine({ ...message("a"), text: "first\n  second" })).toBe("Sam: first second");
-    expect(
-      replyLine({
-        ...message("b"),
-        text: "",
-        richSummary: null,
-        attachments: [{ key: "k", kind: "image", name: "x.png" }],
-      }),
-    ).toBe("Sam: [Image]");
+    const image = {
+      ...message("b"),
+      text: "",
+      richSummary: null,
+      attachments: [{ key: "k", kind: "image" as const, name: "x.png" }],
+    };
+    expect(replyLine(image)).toBe("Sam: [Image]");
+    expect(quoteOfMessage(image)).toBe("Sam: [Image]");
     const forward = {
       ...message("c"),
       text: "Jordan 12:20: the export failed",

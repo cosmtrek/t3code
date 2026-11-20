@@ -40,10 +40,10 @@ which split conversations into units the chat app does not show; T3 Code speaks 
 is "Sign-in needed" (reading works, sending does not); `online: false` is "Collector stopped"
 (both work, new messages stop arriving). `self.name` is shown as the signed-in account.
 
-`/config` names the templates messages can be delegated with. A template is only a prompt with
-`{contextDir}`, `{note}`, and `{openUrl}`; the thread runs in the project's default mode. A
-template asks for the work, not for a reply: the user reads the findings in the thread itself, and
-T3 adds the rule for `draft.md`, which the thread writes only when the user asks for a reply.
+The adapter supplies no prompts. When the user delegates, T3 writes the thread's first message
+itself: where the context file is, the user's request (a "read and report back" default when
+blank), the original link, and the rule for `draft.md`, which the thread writes only when the
+user asks for a reply.
 
 `/config` may also list `capabilities`: the optional parts of this page the adapter implements,
 `"mentions"`, `"markdown"`, `"attachments"`, and `"quotes"` (see [Sending](#sending)). T3 offers a feature

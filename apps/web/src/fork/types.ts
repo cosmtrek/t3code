@@ -1,3 +1,5 @@
+import type { ModelSelection } from "@t3tools/contracts";
+
 /**
  * Responses of `/api/fork/*`, mirrored from apps/server/src/fork (channels/hub.ts,
  * inbox/operations.ts). Contracts stay untouched, so these change together with the server.
@@ -27,12 +29,6 @@ export interface ChannelCheckStep {
   readonly detail: string;
 }
 
-export interface DelegateTemplate {
-  readonly id: string;
-  readonly name: string;
-  readonly prompt: string;
-}
-
 export interface ChannelView {
   readonly id: string;
   readonly kind: ChannelKind;
@@ -58,7 +54,6 @@ export interface ChannelView {
   readonly config: {
     readonly displayName: string;
     readonly defaultProjectPaths: ReadonlyArray<string>;
-    readonly delegateTemplates: ReadonlyArray<DelegateTemplate>;
     readonly relevanceSummary: string;
   } | null;
   readonly projectMatches: ReadonlyArray<{
@@ -282,11 +277,6 @@ export type WorkspaceStrategy =
       readonly startFromOrigin?: boolean;
     };
 
-export interface ModelChoice {
-  readonly instanceId: string;
-  readonly model: string;
-}
-
 export interface DelegateOptions {
   readonly delegationId: string;
   /** The scope it was delegated with before; null when it never was. */
@@ -295,16 +285,11 @@ export interface DelegateOptions {
     readonly id: string;
     readonly title: string;
     readonly workspaceRoot: string;
-    readonly defaultModel: ModelChoice | null;
+    /** The project's model for new threads, with its options such as effort. */
+    readonly defaultModel: ModelSelection | null;
   }>;
   readonly defaultProjectId: string | null;
   /** Where the delegation's last thread worked: its worktree, else the project checkout. */
   readonly defaultWorkspaceStrategy: WorkspaceStrategy;
-  readonly templates: ReadonlyArray<DelegateTemplate>;
-  readonly providers: ReadonlyArray<{
-    readonly instanceId: string;
-    readonly name: string;
-    readonly models: ReadonlyArray<{ readonly slug: string; readonly name: string }>;
-  }>;
   readonly existing: LinkedThread | null;
 }

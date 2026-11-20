@@ -532,18 +532,6 @@ function ChannelFacts({ channel }: { readonly channel: ChannelView }) {
       {config ? (
         <>
           <Fact label="Relevant">{config.relevanceSummary}</Fact>
-          <Fact label="Templates">
-            {config.delegateTemplates.length === 0
-              ? "None"
-              : config.delegateTemplates.map((template) => (
-                  <details key={template.id}>
-                    <summary className="cursor-pointer">{template.name}</summary>
-                    <pre className="mt-1 overflow-x-auto rounded bg-muted/50 p-2 whitespace-pre-wrap">
-                      {template.prompt}
-                    </pre>
-                  </details>
-                ))}
-          </Fact>
           <Fact label="Projects">
             {channel.projectMatches.length === 0
               ? "None"

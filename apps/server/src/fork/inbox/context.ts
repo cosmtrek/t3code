@@ -15,42 +15,32 @@ function draftRule(contextDir: string, markdown: boolean): string {
   return `When I ask for the reply to the chat ("reply that…", "tell them…", "make it shorter"), write the whole reply to \`${contextDir}/${DRAFT_FILE}\` as ${replyFormat(markdown)}, in the conversation's language, ready to send; if you cannot write there, end your message with \`<draft>…</draft>\` instead. Otherwise leave that file alone.`;
 }
 
-/** Replaces `{contextDir}`, `{note}`, and `{openUrl}`; other braces stay as they are. */
-export function fillTemplate(
-  template: string,
-  values: { readonly contextDir: string; readonly note: string; readonly openUrl: string | null },
-): string {
-  const replacements: Record<string, string> = {
-    contextDir: values.contextDir,
-    note: values.note.trim().length > 0 ? values.note.trim() : "(none)",
-    openUrl: values.openUrl ?? "(not available)",
-  };
-  return template.replace(/\{(contextDir|note|openUrl)\}/g, (_, key: string) => replacements[key]!);
-}
-
 /** Adapters may send an empty name; the thread and its title still need one. */
 export const nameOrUnknown = (name: string) => (name.trim().length > 0 ? name.trim() : "Unknown");
 
 const skippedLine = (skipped: number, where: string) =>
   `${skipped} ${skipped === 1 ? "message" : "messages"} in this conversation could not be read and ${skipped === 1 ? "is" : "are"} missing ${where}.`;
 
+const DEFAULT_REQUEST = "Tell me what you make of it. Do not change anything yet.";
+
 export function firstMessage(input: {
-  readonly template: string;
   readonly contextDir: string;
-  readonly note: string;
+  /** What the user asked for; the default request when blank. */
+  readonly request: string;
   readonly openUrl: string | null;
   readonly skippedMessages: number;
   readonly markdown: boolean;
 }): string {
-  const body = fillTemplate(input.template, input);
-  const parts = [body.trim()];
+  const request = input.request.trim();
+  const parts = [
+    `Read \`${input.contextDir}/${CONTEXT_FILE}\` for the chat messages and any images.`,
+    request.length > 0 ? request : DEFAULT_REQUEST,
+  ];
   if (input.skippedMessages > 0) {
     parts.push(skippedLine(input.skippedMessages, `from ${CONTEXT_FILE}`));
   }
-  if (input.openUrl !== null && !body.includes(input.openUrl)) {
-    parts.push(`Open in app: ${input.openUrl}`);
-  }
-  if (!body.includes(DRAFT_FILE)) parts.push(draftRule(input.contextDir, input.markdown));
+  if (input.openUrl !== null) parts.push(`Open in app: ${input.openUrl}`);
+  parts.push(draftRule(input.contextDir, input.markdown));
   return parts.join("\n\n");
 }
 
