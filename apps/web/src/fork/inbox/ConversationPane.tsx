@@ -48,6 +48,7 @@ import {
   skippedNotice,
   topicsOf,
   withMention,
+  withoutMention,
   type ConversationRow,
   type ReplyMode,
   type Topic,
@@ -968,14 +969,18 @@ function Composer({
   const [activeSuggestion, setActiveSuggestion] = useState(0);
   const [dismissedAt, setDismissedAt] = useState<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const named = (target: ReplyTarget | null, base: string) =>
-    namedInReply(canMention, target, base);
+  /** Answers `next` instead, taking back the mention the current quote reply put in front. */
+  const retarget = (next: ReplyTarget | null) => {
+    const named = canMention && replyTo?.inThread === false ? replyTo.mention : null;
+    const base = named === null ? text : withoutMention(text, named.name);
+    const nextText = namedInReply(canMention, next, base);
+    setReplyTo(next);
+    setText(nextText);
+    setCaret(nextText.length);
+  };
   if (request !== null && request.conversationId === conversation.id && request.nonce !== applied) {
     setApplied(request.nonce);
-    setReplyTo(request.replyTo);
-    const next = named(request.replyTo, text);
-    setText(next);
-    setCaret(next.length);
+    retarget(request.replyTo);
   }
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- moves DOM focus into the reply box when the user picks a message to answer
   useEffect(() => {
@@ -1101,6 +1106,7 @@ function Composer({
         ref={textareaRef}
         aria-label="Reply"
         value={text}
+        mentions={mentions.map((mention) => mention.name)}
         disabled={disabled}
         placeholder={disabled ? "Sending is off" : `Message ${nameOrUnknown(conversation.name)}`}
         onChange={(event) => {
@@ -1155,13 +1161,7 @@ function Composer({
                       type="button"
                       size="xs"
                       variant="ghost-muted"
-                      onClick={() => {
-                        const next = { ...replyTo, inThread: replyTo.inThread !== true };
-                        const nextText = named(next, text);
-                        setReplyTo(next);
-                        setText(nextText);
-                        setCaret(nextText.length);
-                      }}
+                      onClick={() => retarget({ ...replyTo, inThread: replyTo.inThread !== true })}
                     >
                       {replyTo.inThread === true ? "Quote instead" : "Reply in thread"}
                     </Button>
@@ -1171,7 +1171,7 @@ function Composer({
                     size="icon-xs"
                     variant="ghost-muted"
                     aria-label="Send as a new message"
-                    onClick={() => setReplyTo(null)}
+                    onClick={() => retarget(null)}
                   >
                     <XIcon />
                   </Button>

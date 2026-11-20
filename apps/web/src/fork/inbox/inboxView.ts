@@ -190,6 +190,15 @@ export function draftReplyMode(
 export const withMention = (text: string, name: string) =>
   text.includes(`@${name}`) ? text : `@${name} ${text}`;
 
+/** The text without the `@name` that `withMention` put in front. */
+export function withoutMention(text: string, name: string) {
+  const mention = `@${name}`;
+  if (!text.startsWith(mention)) return text;
+  const rest = text.slice(mention.length);
+  if (rest.length === 0) return rest;
+  return rest.startsWith(" ") ? rest.slice(1) : text;
+}
+
 export interface ConversationRow {
   readonly message: InboxMessage;
   /** What the message answers, as the chat app shows it above the message. */

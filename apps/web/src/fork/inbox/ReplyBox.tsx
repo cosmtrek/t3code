@@ -1,12 +1,13 @@
-import type { ComponentProps, KeyboardEvent, ReactNode } from "react";
+import { useRef, type ComponentProps, type KeyboardEvent, type ReactNode } from "react";
 
 import { ComposerSurface } from "../../components/chat/ComposerSurface";
 import { composerRequiresModifier } from "../../composer-logic";
 import { useClientSettings } from "../../hooks/useSettings";
-import { isMacPlatform } from "../../lib/utils";
+import { cn, isMacPlatform } from "../../lib/utils";
 import { Spinner } from "../../components/ui/spinner";
 import { Textarea } from "../../components/ui/textarea";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../../components/ui/tooltip";
+import { mentionParts } from "./inboxView";
 
 /**
  * The inbox's one reply box, shaped like T3 Code's composer: what the reply answers and its files
@@ -19,8 +20,11 @@ export function ReplyBox({
   sending,
   canSend,
   sendLabel = "Send",
+  mentions = [],
   ...textarea
 }: Omit<ComponentProps<typeof Textarea>, "rows" | "unstyled" | "className"> & {
+  /** Names whose `@name` the box colors as the chat app does once it is sent. */
+  readonly mentions?: ReadonlyArray<string>;
   readonly above?: ReactNode;
   /** One line at the bottom-left: an error, or who the reply notifies. */
   readonly status?: ReactNode;
@@ -30,14 +34,58 @@ export function ReplyBox({
   readonly sendLabel?: string;
 }) {
   const sendKey = useSendKey();
+  const mirrorRef = useRef<HTMLDivElement>(null);
+  const text = String(textarea.value ?? "");
+  const parts =
+    mentions.length === 0
+      ? null
+      : mentionParts(
+          text,
+          mentions.map((name) => ({ name, isSelf: false })),
+        );
+  const colored = parts !== null && parts.some((part) => part.mention !== null);
   return (
     // The pane sets the width; the chat column cap would leave it narrower than the messages.
     <ComposerSurface.Shell className="max-w-none">
       <ComposerSurface.Host>
         <div className="relative z-10 flex flex-col">
           {above ? <div className="flex flex-col gap-1.5 px-4 pt-2.5">{above}</div> : null}
-          <div className="px-1 pt-1.5 [&_textarea]:resize-none">
-            <Textarea {...textarea} unstyled rows={1} />
+          {/* Same type as the chat composer, which the unstyled textarea would otherwise not take. */}
+          <div
+            className={cn(
+              "relative mx-1 mt-1.5 font-(family-name:--font-composer,var(--font-sans)) text-(length:--font-size-prompt,var(--text-sm)) leading-relaxed max-sm:pointer-coarse:text-(length:--font-size-prompt-touch) [&_textarea]:resize-none",
+              colored && "[&_textarea]:text-transparent [&_textarea]:caret-foreground",
+            )}
+          >
+            {/* A textarea cannot color part of its text: this copy behind it, in the same box, does. */}
+            {colored ? (
+              <div
+                ref={mirrorRef}
+                aria-hidden
+                className="pointer-events-none absolute inset-0 overflow-hidden px-2.75 py-1.25 whitespace-pre-wrap wrap-anywhere"
+              >
+                {parts.map((part, index) =>
+                  part.mention ? (
+                    // oxlint-disable-next-line react/no-array-index-key -- parts are positional and never reorder
+                    <span key={index} className="text-primary">
+                      {part.text}
+                    </span>
+                  ) : (
+                    part.text
+                  ),
+                )}
+                {"\u200b"}
+              </div>
+            ) : null}
+            <Textarea
+              {...textarea}
+              unstyled
+              rows={1}
+              onScroll={(event) => {
+                if (mirrorRef.current) mirrorRef.current.scrollTop = event.currentTarget.scrollTop;
+                textarea.onScroll?.(event);
+              }}
+            />
           </div>
           <div className="flex min-w-0 items-center gap-1 px-2.5 pb-2.5">
             <div className="min-w-0 flex-1 truncate text-xs">{status}</div>
@@ -46,7 +94,7 @@ export function ReplyBox({
               sending={sending}
               disabled={!canSend || sending}
               label={sendLabel}
-              shortcut={sendKey.label(String(textarea.value ?? ""))}
+              shortcut={sendKey.label(text)}
             />
           </div>
         </div>

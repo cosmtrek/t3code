@@ -24,6 +24,7 @@ import {
   shortLink,
   topicsOf,
   unreadMessageCount,
+  withoutMention,
 } from "./inboxView";
 
 describe("emptyViewTitle", () => {
@@ -293,6 +294,13 @@ describe("mentions", () => {
   it("reads each @ as the longest name after it, once per person", () => {
     const found = mentionsIn("@Zhang Sanfeng, cc@Zhang San @Zhang San @Li @Me @nobody", people);
     expect(found.map((person) => person.userId)).toEqual(["u2", "u1"]);
+  });
+
+  it("takes back only the @name a quote reply put in front", () => {
+    expect(withoutMention("@Zhang San ", "Zhang San")).toBe("");
+    expect(withoutMention("@Zhang San hi", "Zhang San")).toBe("hi");
+    expect(withoutMention("@Zhang Sanfeng hi", "Zhang San")).toBe("@Zhang Sanfeng hi");
+    expect(withoutMention("hi @Zhang San", "Zhang San")).toBe("hi @Zhang San");
   });
 
   it("suggests names for the @ at the caret until one is complete", () => {
