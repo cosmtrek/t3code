@@ -145,6 +145,34 @@ const JUMP_AFTER_PX = 400;
 const isAtBottom = (container: HTMLElement) =>
   container.scrollHeight - container.scrollTop - container.clientHeight < AT_BOTTOM_PX;
 
+/** The message at the top of the view and how far below the top it sat; null is the bottom. */
+type Place = { readonly messageId: string; readonly offset: number } | null;
+// The pane unmounts when the page is left or the narrow layout hides it; it comes back here.
+const places = new Map<string, Place>();
+const placeKey = (environmentId: string, channelId: string, conversationId: string) =>
+  `${environmentId}\u0000${channelId}\u0000${conversationId}`;
+/** Opening a conversation from the list starts at its new messages, not where it was left. */
+export const forgetPlace = (environmentId: string, conversation: InboxConversation) =>
+  places.delete(placeKey(environmentId, conversation.channelId, conversation.id));
+
+function placeOf(container: HTMLElement): Place | undefined {
+  if (isAtBottom(container)) return null;
+  const box = container.getBoundingClientRect();
+  // Probe a little way down in case the top edge falls in the gap between two messages.
+  for (const dy of [1, 12, 24, 48]) {
+    const hit = document
+      .elementFromPoint(box.left + box.width / 2, box.top + dy)
+      ?.closest<HTMLElement>("[data-message-id]");
+    if (hit && container.contains(hit)) {
+      return {
+        messageId: hit.dataset.messageId!,
+        offset: hit.getBoundingClientRect().top - box.top,
+      };
+    }
+  }
+  return undefined;
+}
+
 /** The conversation as a chat, with the reply box under it. */
 export function ConversationPane({
   environmentId,
@@ -378,6 +406,12 @@ function ConversationMessages({
   }>({ loading: false, error: null });
   const loadingOlder = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const key = placeKey(environmentId, conversation.channelId, conversation.id);
+  // Coming back to a conversation keeps the reader's place over the focus it was opened with.
+  const restore = useRef<{ readonly place: Place | undefined; focus: string | null | undefined }>({
+    place: places.get(key),
+    focus: places.has(key) ? focusMessageId : undefined,
+  });
   // Distance from the bottom to keep while older messages are added above.
   const restoreFromBottom = useRef<number | null>(null);
   const atBottom = useRef(true);
@@ -474,6 +508,27 @@ function ConversationMessages({
   useEffect(() => {
     const container = scrollRef.current;
     if (container === null || !loaded) return;
+    const { place } = restore.current;
+    restore.current = { place: undefined, focus: restore.current.focus };
+    if (place !== undefined) {
+      const anchor =
+        place === null
+          ? null
+          : container.querySelector(`[data-message-id="${CSS.escape(place.messageId)}"]`);
+      if (place === null) container.scrollTop = container.scrollHeight;
+      else if (anchor) {
+        container.scrollTop +=
+          anchor.getBoundingClientRect().top - container.getBoundingClientRect().top - place.offset;
+      }
+      if (place === null || anchor) {
+        atBottom.current = isAtBottom(container);
+        return;
+      }
+      // The message was on a page not read again; open as if new.
+      restore.current.focus = undefined;
+    }
+    if (focusMessageId === restore.current.focus) return;
+    restore.current.focus = undefined;
     const target =
       focusShown && focusMessageId !== null
         ? container.querySelector(`[data-message-id="${CSS.escape(focusMessageId)}"]`)
@@ -686,6 +741,8 @@ function ConversationMessages({
         onScroll={(event) => {
           const container = event.currentTarget;
           atBottom.current = isAtBottom(container);
+          const place = placeOf(container);
+          if (place !== undefined) places.set(key, place);
           const viewBottom = container.scrollTop + container.clientHeight;
           setAway({
             far: container.scrollHeight - viewBottom > JUMP_AFTER_PX,
