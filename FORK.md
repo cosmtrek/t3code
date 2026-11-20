@@ -33,6 +33,9 @@ git push --force-with-lease origin r/main
 
 Then run `git rebase r/main` on any personal branch that has not landed yet.
 
+Every sync ends with a release on all three surfaces: the server CLI and macOS desktop
+(`X.Y.Z-r.1`, see Releases) and the Android app (next mobile version, see Android builds).
+
 Sync to an upstream stable tag so `X.Y.Z-r.N` means exactly that release plus the patches (see
 Versions). upstream/main runs ahead of its latest stable tag.
 
@@ -233,12 +236,10 @@ Review this list after every sync, and upstream whatever upstream would take.
 | `T3CODE_APP_NAME` and `T3CODE_APP_ICON` for mobile     | `apps/mobile/app.config.ts`, brand mark  | Yes, as a fork-friendly option |
 | Desktop variant: id, name, data, icon from variables   | `build-desktop-artifact.ts`, desktop app | Yes, as a fork-friendly option |
 | Release workflow (server CLI and macOS desktop)        | `.github/workflows/fork-cli-release.yml` | No                             |
-| agy CLI state stays in the instance profile            | `antigravityAuthSupport.ts`, driver      | Yes                            |
-| Antigravity subagent continuation                      | `AntigravityTurnOutcome.ts`, adapter     | Upstream PR #30083             |
-| agy 1.5.5 subagents and transcripts                    | `AntigravityChildWork.ts`, protocol      | Yes                            |
-| Quota from agy's own sign-in                           | `antigravityUsageLimits.ts`              | Yes                            |
+| SSH hosts download the fork's own `t3` archive         | desktop environment, SSH runner          | Yes, as a fork-friendly option |
+| agy user skills linked where `--app-data-dir` reads    | `antigravityAuthSupport.ts`              | Yes                            |
+| A lost agy checkpoint starts a fresh session           | `AntigravityTurnOutcome.ts`              | Yes (rest of closed #30083)    |
 | agy full access and accept-edits modes                 | Antigravity support, ACP adapter         | Yes                            |
-| agy Auto mode with its own review                      | Antigravity provider, support, adapter   | Yes                            |
 | Resume agy threads started before the profile move     | `antigravityAuthSupport.ts`, driver      | Upstream PR #34430             |
 | Built-in Absolutely theme                              | `themePalettes.ts`, web boot, mobile     | No                             |
 | Inbox and message channels                             | `apps/*/src/fork/`, seams below          | No                             |
@@ -278,8 +279,10 @@ Upstream files the inbox touches. Keep these in one `fork(inbox): wire seams` co
 | `apps/web/src/components/settings/settingsSearch.ts`      | `ForkSettingsPath` in `SettingsPath`; spread the four fork tables    |
 | `apps/web/src/components/settings/SettingsSidebarNav.tsx` | Spread `FORK_SETTINGS_ICONS`                                         |
 | `apps/web/src/components/sidebar/SidebarChrome.tsx`       | `<ForkSidebarItems>` beside Pull requests                            |
+| `apps/web/src/components/sidebar/mainAppLocation.ts`      | `/inbox` is a sidebar utility page (Back, like Pull requests)        |
 | `apps/web/src/routeTree.gen.ts`                           | Generated; never merge by hand                                       |
 | `package.json`                                            | `fork:inbox-seam-check` script                                       |
+| `vite.config.ts`                                          | `apps/web/src/fork/**` skips `no-untranslated-copy` (not translated) |
 
 `settingsSearch.ts` has a fifth table the plan did not list: `SETTINGS_CATEGORY_SCOPES` is a
 `Record<SettingsPath, …>` too, so it spreads `FORK_SETTINGS_CATEGORY_SCOPES`. The sidebar entry
