@@ -50,6 +50,7 @@ import type { DelegationDetail, InboxConversation, InboxDelegation, InboxRespons
 import { useForkResource } from "../useForkResource";
 import {
   ConversationPane,
+  forgetPlace,
   namedInReply,
   replyTargetOf,
   type ReplyTarget,
@@ -330,6 +331,7 @@ function EnvironmentInboxView({
   const selectConversation = (target: InboxConversation) => {
     setConversationId(target.id);
     setOpened({ id: target.id, newSince: target.unread ? target.readThroughAt : null });
+    forgetPlace(environmentId, target);
     setDelegationId(null);
     setHeldId(view === "unread" ? target.id : null);
     readConversation(target);
