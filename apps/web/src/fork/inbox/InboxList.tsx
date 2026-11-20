@@ -3,10 +3,12 @@ import type { EnvironmentId } from "@t3tools/contracts";
 import {
   BellOffIcon,
   BotIcon,
+  CheckIcon,
   EllipsisIcon,
   MailIcon,
   MailOpenIcon,
   MessagesSquareIcon,
+  PencilLineIcon,
   UserIcon,
   UsersIcon,
   Trash2Icon,
@@ -27,7 +29,7 @@ import {
   nameOrUnknown,
   type AgentSignals,
 } from "./inboxView";
-import { ThreadStatus } from "./DelegationPane";
+import { StatusLabel, ThreadStatus } from "./DelegationPane";
 
 const KIND_ICONS: Readonly<
   Record<ConversationKind, { readonly icon: LucideIcon; readonly label: string }>
@@ -387,7 +389,13 @@ export function DelegationOutcome({
   /** Shown when it left neither. */
   readonly idle?: string | null;
 }) {
-  if (delegation.hasDraft) return <span className="shrink-0 text-success">Draft</span>;
-  const label = delegation.lastSentAt !== null ? "Replied" : idle;
-  return label === null ? null : <span className="shrink-0 text-muted-foreground">{label}</span>;
+  if (delegation.hasDraft) {
+    return <StatusLabel icon={PencilLineIcon} label="Draft" className="text-success" />;
+  }
+  if (delegation.lastSentAt !== null) {
+    return <StatusLabel icon={CheckIcon} label="Replied" className="text-muted-foreground" />;
+  }
+  return idle === null ? null : (
+    <StatusLabel icon={BotIcon} label={idle} className="text-muted-foreground" />
+  );
 }

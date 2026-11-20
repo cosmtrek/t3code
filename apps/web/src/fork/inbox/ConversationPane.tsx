@@ -501,7 +501,8 @@ function ConversationMessages({
   );
   const chipsFor = (row: ConversationRow) =>
     row.delegations.length > 0 ? (
-      <span className="flex flex-wrap items-center gap-2 text-xs">
+      // The negative margin lines the ghost buttons' labels up with the bubble's edge.
+      <span className="-mx-[calc(--spacing(2)-1px)] flex flex-wrap items-center gap-1 text-xs">
         {row.delegations.map((delegation) => (
           <DelegationChip
             key={delegation.id}
@@ -748,7 +749,7 @@ function ConversationMessages({
                     rows.slice(index + 1),
                   )}
                   {row.thread.length > 0 ? (
-                    <li className="mt-1.5 flex min-w-0 flex-col gap-3 ps-1">
+                    <li className="-ms-[3px] mt-1 flex min-w-0 flex-col gap-3">
                       <Button
                         size="xs"
                         variant="ghost-muted"
@@ -817,9 +818,6 @@ function DelegationChip({
     delegation.thread !== null && delegation.thread.detachedAt === null ? delegation.thread : null;
   return (
     <Button size="xs" variant="ghost-muted" onClick={() => onSelect(delegation)}>
-      {delegation.agentUnseen ? (
-        <span role="img" aria-label="New result" className="size-1.5 rounded-full bg-primary" />
-      ) : null}
       {live ? (
         <ThreadStatus
           environmentId={environmentId}

@@ -228,7 +228,8 @@ has is `rejected` with a 400 and nothing is sent: the user attaches the file aga
 ### Acknowledgement
 
 When the user delegates, T3 tells the sender it was taken: it posts `/config`'s `ackReaction` to
-the first message of the delegated range or reply thread that is not the user's own.
+the message the user delegated from, or, when that one is the user's own, the first message of
+the delegated range or reply thread that is not.
 
 `POST /reactions` with `{ "conversationId", "messageId", "key" }`. `key` is the chat app's own
 name for the reaction, the same `key` a `Message`'s `reactions` report, such as `"OK"`. Any 2xx
