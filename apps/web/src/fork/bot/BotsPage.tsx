@@ -1,6 +1,12 @@
 import { ThreadId, type EnvironmentId, type ModelSelection } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
-import { BotIcon, EllipsisIcon, PlusIcon, SquareArrowOutUpRightIcon } from "lucide-react";
+import {
+  BotIcon,
+  EllipsisIcon,
+  MessageSquareIcon,
+  PlusIcon,
+  SquareArrowOutUpRightIcon,
+} from "lucide-react";
 import { useState, type ReactNode } from "react";
 
 import ChatMarkdown from "../../components/ChatMarkdown";
@@ -39,7 +45,7 @@ import { DelegateModelPicker } from "../inbox/DelegateDialog";
 import { PaneHeader } from "../inbox/PaneHeader";
 import { ReplyBox, useSendKey } from "../inbox/ReplyBox";
 import { formatSince } from "../presentation";
-import type { BotChatMessage, BotDetail, BotSummary } from "../types";
+import type { BotChatMessage, BotDetail, BotNotebook, BotSummary } from "../types";
 import { useForkResource, type ForkEvent } from "../useForkResource";
 
 const ENVIRONMENT_STORAGE_KEY = "t3code:bots-environment";
@@ -196,7 +202,7 @@ function EnvironmentBots({
                   {candidate.working
                     ? "Working…"
                     : candidate.lastMessage
-                      ? candidate.lastMessage.text
+                      ? candidate.lastMessage.text.replace(/[`*_#>]/g, "")
                       : "New"}
                 </span>
               </span>
@@ -467,11 +473,11 @@ function BotChat({
         </form>
       </section>
       {data ? (
-        <RolePanel
-          key={data.bot.id}
+        <NotebookPanel
           environmentId={environmentId}
           botId={data.bot.id}
           role={data.role}
+          notebook={data.notebook}
         />
       ) : null}
       {deleting && data ? (
@@ -505,7 +511,173 @@ function ChatLine({ message }: { readonly message: BotChatMessage }) {
   return <ChatMarkdown text={message.text} cwd={undefined} className="text-sm" />;
 }
 
-function RolePanel({
+const DAY_NAMES = ["", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+function scheduleLabel(schedule: BotNotebook["routines"][number]["schedule"]) {
+  if (schedule.type === "every") return `Every ${schedule.minutes} min`;
+  const days = schedule.weekdays;
+  return !days || days.length === 0 || days.length === 7
+    ? `Daily ${schedule.time}`
+    : `${days.map((day) => DAY_NAMES[day]).join(", ")} ${schedule.time}`;
+}
+
+function NotebookSection({
+  title,
+  children,
+}: {
+  readonly title: string;
+  readonly children: ReactNode;
+}) {
+  return (
+    <section className="flex flex-col gap-1.5 border-b px-3 py-3 last:border-b-0">
+      <h3 className="text-xs font-medium text-muted-foreground">{title}</h3>
+      {children}
+    </section>
+  );
+}
+
+function NotebookPanel({
+  environmentId,
+  botId,
+  role,
+  notebook,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly botId: string;
+  readonly role: string;
+  readonly notebook: BotNotebook;
+}) {
+  const navigate = useNavigate();
+  const [error, setError] = useState<string | null>(null);
+  const openThread = (threadId: string) =>
+    void navigate({
+      to: "/$environmentId/$threadId",
+      params: { environmentId, threadId: ThreadId.make(threadId) },
+    });
+  const runNow = async (routineId: number) => {
+    setError(null);
+    try {
+      await forkRequest(environmentId, "/bots/routine/run", {
+        method: "POST",
+        body: { botId, routineId },
+      });
+    } catch (cause) {
+      setError(errorText(cause));
+    }
+  };
+  const open = notebook.items.filter((item) => item.status !== "done" && !item.setAside);
+  const goals = notebook.goals.filter((goal) => !goal.done);
+  const itemRows = (goalId: number | null) =>
+    open
+      .filter((item) => item.goalId === goalId)
+      .map((item) => (
+        <div key={item.id} className="flex flex-col gap-0.5">
+          <div className="flex min-w-0 items-baseline gap-1.5 text-sm">
+            <span className="shrink-0 text-xs text-muted-foreground tabular-nums">#{item.id}</span>
+            <span className="min-w-0 flex-1 truncate">{item.title}</span>
+            {item.status === "waiting" ? (
+              <span className="shrink-0 text-xs text-muted-foreground">waiting</span>
+            ) : null}
+          </div>
+          {item.note ? (
+            <p className="ps-6 text-xs text-muted-foreground wrap-anywhere">{item.note}</p>
+          ) : null}
+          {notebook.threads
+            .filter((thread) => thread.itemId === item.id)
+            .map((thread) => (
+              <ThreadLink key={thread.threadId} thread={thread} onOpen={openThread} />
+            ))}
+        </div>
+      ));
+  const loose = itemRows(null);
+  const unlinked = notebook.threads.filter((thread) => thread.itemId === null);
+
+  return (
+    <aside className="flex w-80 shrink-0 flex-col border-l max-xl:hidden">
+      <PaneHeader edge="detail">
+        <h2 className="truncate px-1 text-sm font-medium">Notebook</h2>
+      </PaneHeader>
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+        {error ? <p className="px-3 pt-2 text-xs text-destructive-foreground">{error}</p> : null}
+        <NotebookSection title="Goals and items">
+          {goals.length === 0 && loose.length === 0 ? (
+            <p className="text-xs text-muted-foreground">
+              None yet. Tell the bot what to take care of.
+            </p>
+          ) : null}
+          {goals.map((goal) => (
+            <div key={goal.id} className="flex flex-col gap-1.5 rounded-md border p-2">
+              <span className="text-sm font-medium">{goal.title}</span>
+              {itemRows(goal.id)}
+            </div>
+          ))}
+          {loose}
+          {unlinked.map((thread) => (
+            <ThreadLink key={thread.threadId} thread={thread} onOpen={openThread} />
+          ))}
+        </NotebookSection>
+        <NotebookSection title="Routines">
+          {notebook.routines.length === 0 ? (
+            <p className="text-xs text-muted-foreground">None.</p>
+          ) : (
+            notebook.routines.map((routine) => (
+              <div key={routine.id} className="flex min-w-0 items-center gap-2">
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm">{routine.title}</div>
+                  <div className="truncate text-xs text-muted-foreground">
+                    {scheduleLabel(routine.schedule)}
+                    {routine.nextDueAt
+                      ? ` · next ${new Date(routine.nextDueAt).toLocaleString()}`
+                      : ""}
+                  </div>
+                </div>
+                <Button size="xs" variant="outline" onClick={() => void runNow(routine.id)}>
+                  Run now
+                </Button>
+              </div>
+            ))
+          )}
+        </NotebookSection>
+        <NotebookSection title="Memory">
+          {notebook.memory.length === 0 ? (
+            <p className="text-xs text-muted-foreground">None.</p>
+          ) : (
+            <ul className="flex flex-col gap-1 text-sm">
+              {notebook.memory.map((note) => (
+                <li key={note.id} className="wrap-anywhere">
+                  {note.text}
+                </li>
+              ))}
+            </ul>
+          )}
+        </NotebookSection>
+        <RoleEditor key={botId} environmentId={environmentId} botId={botId} role={role} />
+      </div>
+    </aside>
+  );
+}
+
+function ThreadLink({
+  thread,
+  onOpen,
+}: {
+  readonly thread: BotNotebook["threads"][number];
+  readonly onOpen: (threadId: string) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onOpen(thread.threadId)}
+      className="flex min-w-0 items-center gap-1.5 ps-6 text-left text-xs text-muted-foreground hover:text-foreground"
+    >
+      <MessageSquareIcon className="size-3 shrink-0" />
+      <span className="min-w-0 flex-1 truncate">{thread.title ?? "Untitled thread"}</span>
+      <span className="shrink-0">{thread.follow}</span>
+    </button>
+  );
+}
+
+function RoleEditor({
   environmentId,
   botId,
   role,
@@ -535,31 +707,25 @@ function RolePanel({
   };
 
   return (
-    <aside className="flex w-80 shrink-0 flex-col border-l max-xl:hidden">
-      <PaneHeader edge="detail">
-        <h2 className="truncate px-1 text-sm font-medium">Notebook</h2>
-      </PaneHeader>
-      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-3">
-        <span className="text-xs font-medium text-muted-foreground">Role</span>
-        <Textarea
-          value={value}
-          placeholder="What this bot is responsible for, and its rules."
-          onChange={(event) => setDraft(event.target.value)}
-          className="min-h-40"
-        />
-        {error ? <p className="text-xs text-destructive-foreground">{error}</p> : null}
-        {draft !== null && draft !== role ? (
-          <div className="flex justify-end gap-1.5">
-            <Button size="xs" variant="ghost" onClick={() => setDraft(null)}>
-              Discard
-            </Button>
-            <Button size="xs" disabled={saving} onClick={() => void save()}>
-              Save
-            </Button>
-          </div>
-        ) : null}
-      </div>
-    </aside>
+    <NotebookSection title="Role">
+      <Textarea
+        value={value}
+        placeholder="What this bot is responsible for, and its rules. Only you edit it."
+        onChange={(event) => setDraft(event.target.value)}
+        className="min-h-32"
+      />
+      {error ? <p className="text-xs text-destructive-foreground">{error}</p> : null}
+      {draft !== null && draft !== role ? (
+        <div className="flex justify-end gap-1.5">
+          <Button size="xs" variant="ghost" onClick={() => setDraft(null)}>
+            Discard
+          </Button>
+          <Button size="xs" disabled={saving} onClick={() => void save()}>
+            Save
+          </Button>
+        </div>
+      ) : null}
+    </NotebookSection>
   );
 }
 

@@ -17,6 +17,8 @@ export interface Bot {
   /** Its one work thread, launched on its first turn. */
   readonly workThreadId: string | null;
   readonly workProjectId: string | null;
+  /** The local day of its last turn; a new day starts a fresh provider session. */
+  readonly lastTurnDay: string | null;
 }
 
 export type ChatRole = "user" | "bot" | "error";
@@ -36,6 +38,68 @@ export interface Turn {
   readonly runId: string;
   readonly threadId: string;
   readonly startedAt: string;
+  /** It took a message from the user, so it owes a reply. */
+  readonly answersUser: boolean;
+  /** It posted to the chat itself with `t3bot say`. */
+  readonly said: boolean;
+}
+
+export interface Goal {
+  readonly id: number;
+  readonly title: string;
+  readonly done: boolean;
+}
+
+export type ItemStatus = "open" | "waiting" | "done";
+
+export interface Item {
+  readonly id: number;
+  readonly goalId: number | null;
+  readonly title: string;
+  readonly status: ItemStatus;
+  /** The next step, or what it waits on. */
+  readonly note: string;
+  readonly updatedAt: string;
+  readonly setAside: boolean;
+}
+
+export interface MemoryNote {
+  readonly id: number;
+  readonly text: string;
+}
+
+export type RoutineSchedule =
+  | { readonly type: "daily"; readonly time: string; readonly weekdays?: ReadonlyArray<number> }
+  | { readonly type: "every"; readonly minutes: number };
+
+export interface Routine {
+  readonly id: number;
+  readonly botId: string;
+  readonly title: string;
+  readonly prompt: string;
+  readonly schedule: RoutineSchedule;
+  readonly nextDueAt: string | null;
+}
+
+export type FollowUp = "now" | "attention" | "routine";
+
+export interface OwnedThread {
+  readonly threadId: string;
+  readonly botId: string;
+  readonly projectId: string;
+  readonly itemId: number | null;
+  readonly follow: FollowUp;
+  readonly createdAt: string;
+}
+
+/** Something that happened, waiting for the bot's next turn. */
+export interface QueuedEvent {
+  readonly id: number;
+  readonly botId: string;
+  readonly text: string;
+  /** Starts a turn on its own; otherwise it waits for one that something else starts. */
+  readonly wakes: boolean;
+  readonly createdAt: string;
 }
 
 /** Forward-only; each entry moves `user_version` up by one. */
@@ -64,6 +128,53 @@ const MIGRATIONS: ReadonlyArray<string> = [
      thread_id TEXT NOT NULL,
      started_at TEXT NOT NULL
    );`,
+  `ALTER TABLE bots ADD COLUMN last_turn_day TEXT;
+   ALTER TABLE turns ADD COLUMN answers_user INTEGER NOT NULL DEFAULT 1;
+   ALTER TABLE turns ADD COLUMN said INTEGER NOT NULL DEFAULT 0;
+   CREATE TABLE goals (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     bot_id TEXT NOT NULL,
+     title TEXT NOT NULL,
+     done INTEGER NOT NULL DEFAULT 0
+   );
+   CREATE TABLE items (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     bot_id TEXT NOT NULL,
+     goal_id INTEGER,
+     title TEXT NOT NULL,
+     status TEXT NOT NULL CHECK (status IN ('open', 'waiting', 'done')),
+     note TEXT NOT NULL DEFAULT '',
+     updated_at TEXT NOT NULL,
+     set_aside INTEGER NOT NULL DEFAULT 0
+   );
+   CREATE TABLE memory (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     bot_id TEXT NOT NULL,
+     text TEXT NOT NULL
+   );
+   CREATE TABLE routines (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     bot_id TEXT NOT NULL,
+     title TEXT NOT NULL,
+     prompt TEXT NOT NULL,
+     schedule TEXT NOT NULL,
+     next_due_at TEXT
+   );
+   CREATE TABLE threads (
+     thread_id TEXT PRIMARY KEY,
+     bot_id TEXT NOT NULL,
+     project_id TEXT NOT NULL,
+     item_id INTEGER,
+     follow TEXT NOT NULL CHECK (follow IN ('now', 'attention', 'routine')),
+     created_at TEXT NOT NULL
+   );
+   CREATE TABLE queue (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     bot_id TEXT NOT NULL,
+     text TEXT NOT NULL,
+     wakes INTEGER NOT NULL,
+     created_at TEXT NOT NULL
+   );`,
 ];
 
 type Row = Record<string, NodeSqlite.SQLOutputValue>;
@@ -79,6 +190,7 @@ function toBot(row: Row): Bot {
     createdAt: text(row, "created_at"),
     workThreadId: nullableText(row, "work_thread_id"),
     workProjectId: nullableText(row, "work_project_id"),
+    lastTurnDay: nullableText(row, "last_turn_day"),
   };
 }
 
@@ -99,8 +211,52 @@ function toTurn(row: Row): Turn {
     runId: text(row, "run_id"),
     threadId: text(row, "thread_id"),
     startedAt: text(row, "started_at"),
+    answersUser: Number(row.answers_user) === 1,
+    said: Number(row.said) === 1,
   };
 }
+
+const toGoal = (row: Row): Goal => ({
+  id: Number(row.id),
+  title: text(row, "title"),
+  done: Number(row.done) === 1,
+});
+
+const toItem = (row: Row): Item => ({
+  id: Number(row.id),
+  goalId: row.goal_id === null ? null : Number(row.goal_id),
+  title: text(row, "title"),
+  status: text(row, "status") as ItemStatus,
+  note: text(row, "note"),
+  updatedAt: text(row, "updated_at"),
+  setAside: Number(row.set_aside) === 1,
+});
+
+const toRoutine = (row: Row): Routine => ({
+  id: Number(row.id),
+  botId: text(row, "bot_id"),
+  title: text(row, "title"),
+  prompt: text(row, "prompt"),
+  schedule: JSON.parse(text(row, "schedule")) as RoutineSchedule,
+  nextDueAt: nullableText(row, "next_due_at"),
+});
+
+const toThread = (row: Row): OwnedThread => ({
+  threadId: text(row, "thread_id"),
+  botId: text(row, "bot_id"),
+  projectId: text(row, "project_id"),
+  itemId: row.item_id === null ? null : Number(row.item_id),
+  follow: text(row, "follow") as FollowUp,
+  createdAt: text(row, "created_at"),
+});
+
+const toQueued = (row: Row): QueuedEvent => ({
+  id: Number(row.id),
+  botId: text(row, "bot_id"),
+  text: text(row, "text"),
+  wakes: Number(row.wakes) === 1,
+  createdAt: text(row, "created_at"),
+});
 
 export class BotStore {
   private readonly db: NodeSqlite.DatabaseSync;
@@ -161,10 +317,24 @@ export class BotStore {
 
   deleteBot(id: string) {
     this.transaction(() => {
-      this.db.prepare("DELETE FROM chat WHERE bot_id = ?").run(id);
-      this.db.prepare("DELETE FROM turns WHERE bot_id = ?").run(id);
+      for (const table of [
+        "chat",
+        "turns",
+        "goals",
+        "items",
+        "memory",
+        "routines",
+        "threads",
+        "queue",
+      ]) {
+        this.db.prepare(`DELETE FROM ${table} WHERE bot_id = ?`).run(id);
+      }
       this.db.prepare("DELETE FROM bots WHERE id = ?").run(id);
     });
+  }
+
+  setLastTurnDay(id: string, day: string) {
+    this.db.prepare("UPDATE bots SET last_turn_day = ? WHERE id = ?").run(day, id);
   }
 
   setWorkThread(id: string, threadId: string, projectId: string) {
@@ -215,15 +385,37 @@ export class BotStore {
     return (this.db.prepare("SELECT * FROM turns").all() as Row[]).map(toTurn);
   }
 
-  /** Records the running turn and hands it the messages it answers. */
-  startTurn(turn: Turn, messageIds: ReadonlyArray<string>) {
+  /** Records the running turn, hands it the messages it answers, and takes the queue. */
+  startTurn(
+    turn: Omit<Turn, "said" | "answersUser">,
+    messageIds: ReadonlyArray<string>,
+    eventIds: ReadonlyArray<number>,
+  ) {
     this.transaction(() => {
       this.db
-        .prepare("INSERT INTO turns (bot_id, run_id, thread_id, started_at) VALUES (?, ?, ?, ?)")
-        .run(turn.botId, turn.runId, turn.threadId, turn.startedAt);
-      const mark = this.db.prepare("UPDATE chat SET turn_run_id = ? WHERE id = ? AND bot_id = ?");
-      for (const id of messageIds) mark.run(turn.runId, id, turn.botId);
+        .prepare(
+          "INSERT INTO turns (bot_id, run_id, thread_id, started_at, answers_user) VALUES (?, ?, ?, ?, ?)",
+        )
+        .run(turn.botId, turn.runId, turn.threadId, turn.startedAt, messageIds.length > 0 ? 1 : 0);
+      this.markAnswered(turn.botId, turn.runId, messageIds);
+      const take = this.db.prepare("DELETE FROM queue WHERE id = ? AND bot_id = ?");
+      for (const id of eventIds) take.run(id, turn.botId);
     });
+  }
+
+  /** Gives messages to a running turn, as when one is steered into it. */
+  markAnswered(botId: string, runId: string, messageIds: ReadonlyArray<string>) {
+    const mark = this.db.prepare("UPDATE chat SET turn_run_id = ? WHERE id = ? AND bot_id = ?");
+    for (const id of messageIds) mark.run(runId, id, botId);
+    if (messageIds.length > 0) {
+      this.db
+        .prepare("UPDATE turns SET answers_user = 1 WHERE bot_id = ? AND run_id = ?")
+        .run(botId, runId);
+    }
+  }
+
+  markSaid(botId: string) {
+    this.db.prepare("UPDATE turns SET said = 1 WHERE bot_id = ?").run(botId);
   }
 
   /** Ends the turn and posts what it said, together, so a restart never posts it twice. */
@@ -234,5 +426,222 @@ export class BotStore {
         .run(botId, runId);
       if (Number(ended.changes) > 0 && reply !== null) this.addChat(reply);
     });
+  }
+
+  // Notebook
+
+  listGoals(botId: string): ReadonlyArray<Goal> {
+    return (
+      this.db.prepare("SELECT * FROM goals WHERE bot_id = ? ORDER BY id").all(botId) as Row[]
+    ).map(toGoal);
+  }
+
+  addGoal(botId: string, title: string): number {
+    return Number(
+      this.db.prepare("INSERT INTO goals (bot_id, title) VALUES (?, ?)").run(botId, title)
+        .lastInsertRowid,
+    );
+  }
+
+  updateGoal(
+    botId: string,
+    id: number,
+    patch: { readonly title?: string; readonly done?: boolean },
+  ): boolean {
+    const goal = this.listGoals(botId).find((candidate) => candidate.id === id);
+    if (!goal) return false;
+    this.db
+      .prepare("UPDATE goals SET title = ?, done = ? WHERE id = ? AND bot_id = ?")
+      .run(patch.title ?? goal.title, (patch.done ?? goal.done) ? 1 : 0, id, botId);
+    return true;
+  }
+
+  listItems(botId: string): ReadonlyArray<Item> {
+    return (
+      this.db.prepare("SELECT * FROM items WHERE bot_id = ? ORDER BY id").all(botId) as Row[]
+    ).map(toItem);
+  }
+
+  addItem(
+    botId: string,
+    item: { readonly goalId: number | null; readonly title: string; readonly note: string },
+    at: string,
+  ): number {
+    return Number(
+      this.db
+        .prepare(
+          "INSERT INTO items (bot_id, goal_id, title, status, note, updated_at) VALUES (?, ?, ?, 'open', ?, ?)",
+        )
+        .run(botId, item.goalId, item.title, item.note, at).lastInsertRowid,
+    );
+  }
+
+  /** Any change, or an event on one of its threads, touches it and brings it back from aside. */
+  updateItem(
+    botId: string,
+    id: number,
+    patch: Partial<Pick<Item, "title" | "status" | "note" | "goalId">>,
+    at: string,
+  ): boolean {
+    const item = this.listItems(botId).find((candidate) => candidate.id === id);
+    if (!item) return false;
+    this.db
+      .prepare(
+        "UPDATE items SET title = ?, status = ?, note = ?, goal_id = ?, updated_at = ?, set_aside = 0 WHERE id = ? AND bot_id = ?",
+      )
+      .run(
+        patch.title ?? item.title,
+        patch.status ?? item.status,
+        patch.note ?? item.note,
+        patch.goalId === undefined ? item.goalId : patch.goalId,
+        at,
+        id,
+        botId,
+      );
+    return true;
+  }
+
+  /** Sets aside open items untouched since `before`; returns how many. */
+  setAsideStale(before: string): number {
+    return Number(
+      this.db
+        .prepare(
+          "UPDATE items SET set_aside = 1 WHERE status != 'done' AND set_aside = 0 AND updated_at < ?",
+        )
+        .run(before).changes,
+    );
+  }
+
+  listMemory(botId: string): ReadonlyArray<MemoryNote> {
+    return (
+      this.db.prepare("SELECT * FROM memory WHERE bot_id = ? ORDER BY id").all(botId) as Row[]
+    ).map((row) => ({ id: Number(row.id), text: text(row, "text") }));
+  }
+
+  addMemory(botId: string, value: string): number {
+    return Number(
+      this.db.prepare("INSERT INTO memory (bot_id, text) VALUES (?, ?)").run(botId, value)
+        .lastInsertRowid,
+    );
+  }
+
+  editMemory(botId: string, id: number, value: string): boolean {
+    return (
+      Number(
+        this.db
+          .prepare("UPDATE memory SET text = ? WHERE id = ? AND bot_id = ?")
+          .run(value, id, botId).changes,
+      ) > 0
+    );
+  }
+
+  removeMemory(botId: string, id: number): boolean {
+    return (
+      Number(
+        this.db.prepare("DELETE FROM memory WHERE id = ? AND bot_id = ?").run(id, botId).changes,
+      ) > 0
+    );
+  }
+
+  // Routines
+
+  listRoutines(botId?: string): ReadonlyArray<Routine> {
+    return (
+      (botId === undefined
+        ? this.db.prepare("SELECT * FROM routines ORDER BY id").all()
+        : this.db
+            .prepare("SELECT * FROM routines WHERE bot_id = ? ORDER BY id")
+            .all(botId)) as Row[]
+    ).map(toRoutine);
+  }
+
+  addRoutine(
+    botId: string,
+    routine: Pick<Routine, "title" | "prompt" | "schedule" | "nextDueAt">,
+  ): number {
+    return Number(
+      this.db
+        .prepare(
+          "INSERT INTO routines (bot_id, title, prompt, schedule, next_due_at) VALUES (?, ?, ?, ?, ?)",
+        )
+        .run(
+          botId,
+          routine.title,
+          routine.prompt,
+          JSON.stringify(routine.schedule),
+          routine.nextDueAt,
+        ).lastInsertRowid,
+    );
+  }
+
+  updateRoutine(
+    botId: string,
+    id: number,
+    patch: Partial<Pick<Routine, "title" | "prompt" | "schedule" | "nextDueAt">>,
+  ): boolean {
+    const routine = this.listRoutines(botId).find((candidate) => candidate.id === id);
+    if (!routine) return false;
+    this.db
+      .prepare(
+        "UPDATE routines SET title = ?, prompt = ?, schedule = ?, next_due_at = ? WHERE id = ? AND bot_id = ?",
+      )
+      .run(
+        patch.title ?? routine.title,
+        patch.prompt ?? routine.prompt,
+        JSON.stringify(patch.schedule ?? routine.schedule),
+        patch.nextDueAt === undefined ? routine.nextDueAt : patch.nextDueAt,
+        id,
+        botId,
+      );
+    return true;
+  }
+
+  removeRoutine(botId: string, id: number): boolean {
+    return (
+      Number(
+        this.db.prepare("DELETE FROM routines WHERE id = ? AND bot_id = ?").run(id, botId).changes,
+      ) > 0
+    );
+  }
+
+  // Threads a bot owns
+
+  listThreads(botId?: string): ReadonlyArray<OwnedThread> {
+    return (
+      (botId === undefined
+        ? this.db.prepare("SELECT * FROM threads ORDER BY created_at").all()
+        : this.db
+            .prepare("SELECT * FROM threads WHERE bot_id = ? ORDER BY created_at")
+            .all(botId)) as Row[]
+    ).map(toThread);
+  }
+
+  addThread(thread: OwnedThread) {
+    this.db
+      .prepare(
+        "INSERT INTO threads (thread_id, bot_id, project_id, item_id, follow, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        thread.threadId,
+        thread.botId,
+        thread.projectId,
+        thread.itemId,
+        thread.follow,
+        thread.createdAt,
+      );
+  }
+
+  // Queue
+
+  enqueue(botId: string, value: string, wakes: boolean, at: string) {
+    this.db
+      .prepare("INSERT INTO queue (bot_id, text, wakes, created_at) VALUES (?, ?, ?, ?)")
+      .run(botId, value, wakes ? 1 : 0, at);
+  }
+
+  queued(botId: string): ReadonlyArray<QueuedEvent> {
+    return (
+      this.db.prepare("SELECT * FROM queue WHERE bot_id = ? ORDER BY id").all(botId) as Row[]
+    ).map(toQueued);
   }
 }

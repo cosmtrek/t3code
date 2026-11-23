@@ -13,6 +13,7 @@ import * as Layer from "effect/Layer";
 import * as Semaphore from "effect/Semaphore";
 
 import * as ServerConfig from "../../config.ts";
+import { writeCli } from "./cli.ts";
 import { BotStore } from "./store.ts";
 
 export interface BotEvent {
@@ -22,6 +23,10 @@ export interface BotEvent {
 
 export interface BotRuntimeShape {
   readonly botsDir: string;
+  /** The `t3bot` tool, written by `ensureCli`. */
+  readonly cliPath: string;
+  /** Writes the tool once per server run, so it matches this server. */
+  readonly ensureCli: Effect.Effect<void>;
   /** The store, or null while no bot was ever created. */
   readonly existingStore: () => BotStore | null;
   /** The store, created on first use. */
@@ -32,6 +37,8 @@ export interface BotRuntimeShape {
   readonly turnLock: Semaphore.Semaphore;
   /** Work thread id to bot id, for one lookup per domain event. */
   readonly workThreads: Map<string, string>;
+  /** Threads bots started, by id, to the bot that owns each. */
+  readonly ownedThreads: Map<string, string>;
   readonly publish: (botId: string) => void;
   readonly subscribe: (listener: (event: BotEvent) => void) => () => void;
 }
@@ -49,14 +56,27 @@ const make = Effect.gen(function* () {
   for (const bot of store?.listBots() ?? []) {
     if (bot.workThreadId !== null) workThreads.set(bot.workThreadId, bot.id);
   }
+  const ownedThreads = new Map(
+    (store?.listThreads() ?? []).map((thread) => [thread.threadId, thread.botId] as const),
+  );
   const active = yield* Latch.make((store?.listBots().length ?? 0) > 0);
   const turnLock = yield* Semaphore.make(1);
   const listeners = new Set<(event: BotEvent) => void>();
+  let cliWritten = false;
 
   yield* Effect.addFinalizer(() => Effect.sync(() => store?.close()));
 
   return {
     botsDir,
+    cliPath: NodePath.join(botsDir, "bin", "t3bot"),
+    ensureCli: Effect.suspend(() =>
+      cliWritten
+        ? Effect.void
+        : Effect.promise(() => writeCli(botsDir, config.stateDir)).pipe(
+            Effect.tap(() => Effect.sync(() => (cliWritten = true))),
+            Effect.asVoid,
+          ),
+    ),
     existingStore: () => store,
     store: () => {
       store ??= new BotStore(storePath);
@@ -65,6 +85,7 @@ const make = Effect.gen(function* () {
     active,
     turnLock,
     workThreads,
+    ownedThreads,
     publish: (botId) => {
       for (const listener of listeners) listener({ type: "bots", botId });
     },

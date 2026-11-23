@@ -7,8 +7,8 @@ import * as Layer from "effect/Layer";
 
 import { ThreadManagementService } from "../orchestration-v2/ThreadManagementService.ts";
 import * as BotRuntime from "./bot/BotRuntime.ts";
-import { followWorkThreads } from "./bot/events.ts";
-import { reconcile } from "./bot/operations.ts";
+import { followThreads } from "./bot/events.ts";
+import { fireDueRoutines, reconcile } from "./bot/operations.ts";
 import { routesLayer } from "./http.ts";
 import * as InboxRuntime from "./inbox/InboxRuntime.ts";
 import { followLinkedThreads } from "./inbox/linkedThreads.ts";
@@ -36,8 +36,16 @@ const botsLayer = Layer.effectDiscard(
         // Follow first, then catch up, so a run that ends in between is not missed.
         Effect.all(
           [
-            followWorkThreads(threads.streamDomainEvents),
+            followThreads(threads.streamDomainEvents),
             Effect.yieldNow.pipe(Effect.andThen(reconcile())),
+            // Routines are checked twice a minute against their stored due times.
+            Effect.suspend(() => fireDueRoutines()).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("Bot routines failed to fire.", { cause }),
+              ),
+              Effect.andThen(Effect.sleep("30 seconds")),
+              Effect.forever,
+            ),
           ],
           { concurrency: "unbounded", discard: true },
         ),

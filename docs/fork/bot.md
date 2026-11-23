@@ -115,7 +115,7 @@ Two bridges connect bots and the inbox, so each signal still has one place:
 
 **Wake.** The service wakes a bot when:
 
-- the user writes in its chat, or edits its notebook;
+- the user writes in its chat (an edit to its role waits for the next wake);
 - one of its routines comes due;
 - a thread it owns finishes, fails, or asks for an answer or approval, or a pull request one of
   its threads opened changes;

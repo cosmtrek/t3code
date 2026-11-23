@@ -72,7 +72,7 @@ Upstream modules are imported, never edited: `ThreadManagementService`, `ThreadM
 | `packet.ts`    | Pure: builds the wake packet from notebook, recent chat, and the event digest        |
 | `gate.ts`      | Pure: permission and ownership decision for one action                               |
 | `actions.ts`   | Runs an allowed action through the service methods above or the inbox's `send`       |
-| `routines.ts`  | One timer per bot for its next routine, from `nextScheduledRunAt`                    |
+| `routines.ts`  | Pure: next due time in local time; a 30-second check fires what is due               |
 | `http.ts`      | Routes for the UI and for the CLI; decode, one operation, map errors                 |
 | `cli.ts`       | The `t3bot` tool CLI source, and writing it to `bots/bin/` at startup                |
 
@@ -127,7 +127,8 @@ bot's `queue`. Nothing here starts a turn; `wake.ts` decides.
 | a message from the user on a bot's thread (see Ownership)                          | ownership moves to the user; no wake                                          |
 | the user presses Hand back                                                         | `thread.returned` (always wakes)                                              |
 | a hub event naming a followed conversation                                         | read new messages past `followed`, skip `isSelf` authors, then `chat.message` |
-| a user message in the bot's chat, a notebook edit                                  | `user.message`, `notebook.edited` (always wake)                               |
+| a user message in the bot's chat                                                   | `user.message` (always wakes)                                                 |
+| the user edits the bot's role                                                      | `notebook.edited` (waits for the next wake)                                   |
 | a routine timer, or Run now on the Bots page                                       | `routine.due` with its due time (always wakes)                                |
 | a question with an action passing its expiry                                       | `question.expired` (waits for the next wake)                                  |
 
@@ -185,10 +186,11 @@ was down are not delivered. The queue, the running turn, and pending questions a
    message id chosen by the service so a retried dispatch is the same message.
 3. The turn's `run.updated` to a terminal status sets the bot idle and clears `turns`. If events
    queued meanwhile, go to 2.
-4. If the turn answered a `user.message`, including a steered one, and called neither
-   `t3bot say` nor `t3bot ask`, the service posts the turn's last assistant message to the chat,
-   so a forgetful model still answers without repeating a question card. A turn with no user
-   message posts only what it `say`s, so a wake with nothing new stays silent.
+4. The turn's last assistant message is its reply and is posted to the chat, unless the turn
+   already posted with `say` or `ask`, or ended with exactly `NO_REPLY`. A wake with nothing
+   new ends with `NO_REPLY` and stays silent. Making the reply the default, rather than asking
+   for `say`, came from trying it: models report a finished thread in their last message and
+   forget `say`.
 5. A failed turn is retried once with the same packet; a second failure posts an error to the
    bot's chat and leaves the queue for the next wake.
 
@@ -231,7 +233,7 @@ You are {name}. {role.md}
 How to act: only through `{bots/bin/t3bot} --bot {id}` (`help` lists commands). Write down
 anything you must remember with the notebook commands before you stop; your conversation here is
 reset often. A thread that waits on an approval is for the user: tell them with `say`.
-Post with `say` only what is new or needs the user; when nothing is, stop without posting.
+Your last message is posted to the user; end with exactly NO_REPLY when nothing is worth it.
 Memory is one fact per line: rewrite a note that changed, remove one that no longer holds.
 Skills: {name}: {path}/SKILL.md — read one when it applies.
 

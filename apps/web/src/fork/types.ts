@@ -323,4 +323,38 @@ export interface BotDetail {
   readonly working: boolean;
   /** Oldest first. */
   readonly chat: ReadonlyArray<BotChatMessage>;
+  readonly notebook: BotNotebook;
+}
+
+export interface BotNotebook {
+  readonly goals: ReadonlyArray<{
+    readonly id: number;
+    readonly title: string;
+    readonly done: boolean;
+  }>;
+  readonly items: ReadonlyArray<{
+    readonly id: number;
+    readonly goalId: number | null;
+    readonly title: string;
+    readonly status: "open" | "waiting" | "done";
+    readonly note: string;
+    readonly updatedAt: string;
+    readonly setAside: boolean;
+  }>;
+  readonly threads: ReadonlyArray<{
+    readonly threadId: string;
+    readonly itemId: number | null;
+    readonly follow: "now" | "attention" | "routine";
+    readonly title: string | null;
+  }>;
+  readonly routines: ReadonlyArray<{
+    readonly id: number;
+    readonly title: string;
+    readonly prompt: string;
+    readonly schedule:
+      | { readonly type: "daily"; readonly time: string; readonly weekdays?: ReadonlyArray<number> }
+      | { readonly type: "every"; readonly minutes: number };
+    readonly nextDueAt: string | null;
+  }>;
+  readonly memory: ReadonlyArray<{ readonly id: number; readonly text: string }>;
 }

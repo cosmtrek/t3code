@@ -25,6 +25,7 @@ import { authenticateMediaRequest } from "../auth/http.ts";
 import { requestUrl } from "../requestUrl.ts";
 import { BotRuntime, type BotEvent, type BotRuntimeShape } from "./bot/BotRuntime.ts";
 import * as Bots from "./bot/operations.ts";
+import { authenticateTool, runTool } from "./bot/tools.ts";
 import type { HubEvent } from "./channels/hub.ts";
 import { InboxRuntime, type InboxRuntimeShape } from "./inbox/InboxRuntime.ts";
 import * as Inbox from "./inbox/operations.ts";
@@ -175,6 +176,22 @@ const eventsRoute = (runtime: InboxRuntimeShape, bots: BotRuntimeShape) =>
         },
       );
     }),
+  );
+
+/** The `t3bot` CLI in a bot's work thread: no session, the bot's own token instead. */
+const toolRoute = (bots: BotRuntimeShape) =>
+  HttpRouter.add(
+    "POST",
+    `${BOTS}/tool`,
+    Effect.gen(function* () {
+      const request = yield* HttpServerRequest.HttpServerRequest;
+      const input = yield* body;
+      const tool = yield* authenticateTool(request.headers["authorization"], input);
+      return ok({ output: yield* runTool(tool) });
+    }).pipe(
+      Effect.provideService(BotRuntime, bots),
+      Effect.catchTags({ ForkHttpError: (error) => Effect.succeed(errorResponse(error)) }),
+    ),
   );
 
 /** The ASCII fallback keeps old clients working; `filename*` carries the real name. */
@@ -346,6 +363,13 @@ const routes = (runtime: InboxRuntimeShape, bots: BotRuntimeShape) => {
       AuthOrchestrationOperateScope,
       body.pipe(Effect.flatMap(Bots.sendMessage)),
     ),
+    route(
+      "POST",
+      `${BOTS}/routine/run`,
+      AuthOrchestrationOperateScope,
+      body.pipe(Effect.flatMap(Bots.runRoutineNow)),
+    ),
+    toolRoute(bots),
     eventsRoute(runtime, bots),
   );
 };
