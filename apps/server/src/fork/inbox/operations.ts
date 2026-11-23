@@ -20,6 +20,7 @@ import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 
@@ -642,6 +643,9 @@ const badgeCount = (listing: ChannelListing) =>
     conversationCountsTowardBadge(conversation.kind, conversation),
   ).length + listing.delegations.filter((delegation) => delegation.agentUnseen).length;
 
+/** How long the overview waits on a channel's listing before answering without its count. */
+const OVERVIEW_WAIT = "500 millis";
+
 /** Enabled channels with their state; the sidebar badge sums `unreadCount`. */
 export const overview = Effect.fn("ForkInbox.overview")(function* () {
   const { hub } = yield* InboxRuntime;
@@ -651,14 +655,27 @@ export const overview = Effect.fn("ForkInbox.overview")(function* () {
     (channel) =>
       Effect.gen(function* () {
         const access = channelAccess(channel.status);
-        const listing = access.read
+        const read = access.read
           ? yield* readChannel(channel.id).pipe(
               Effect.map((result) => ({ ok: true as const, result })),
               Effect.catch((error: ForkHttpError) =>
                 Effect.succeed({ ok: false as const, error: error.detail }),
               ),
+              Effect.timeoutOption(OVERVIEW_WAIT),
             )
-          : null;
+          : Option.none();
+        if (access.read && Option.isNone(read)) {
+          // The read goes on; clients refetch the count once it lands.
+          yield* Effect.forkDetach(
+            readChannel(channel.id).pipe(
+              Effect.andThen(
+                Effect.sync(() => hub.publish({ type: "counts", channelId: channel.id })),
+              ),
+              Effect.ignore,
+            ),
+          );
+        }
+        const listing = Option.getOrNull(read);
         return {
           id: channel.id,
           name: channel.config?.displayName ?? channel.name,

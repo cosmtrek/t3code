@@ -14,6 +14,8 @@ export interface EnvironmentInbox {
 }
 
 const REFRESH_DEBOUNCE_MS = 1_000;
+/** A read that failed (still connecting, server restarting) is tried again; no event may follow. */
+const RETRY_MS = [2_000, 5_000, 10_000] as const;
 
 /**
  * Each connected environment's enabled channels. Environments without the inbox (other builds)
@@ -42,6 +44,17 @@ export function useInboxOverviews(
     const timers = new Map<EnvironmentId, ReturnType<typeof setTimeout>>();
     // A load asked for mid-read runs once after it, so overlapping reads do not pile up.
     const running = new Map<EnvironmentId, { again: boolean }>();
+    const failures = new Map<EnvironmentId, number>();
+    const schedule = (target: (typeof targets)[number], delay: number) => {
+      if (timers.has(target.id)) return;
+      timers.set(
+        target.id,
+        setTimeout(() => {
+          timers.delete(target.id);
+          load(target);
+        }, delay),
+      );
+    };
     const load = (target: (typeof targets)[number]) => {
       const inFlight = running.get(target.id);
       if (inFlight) {
@@ -54,6 +67,7 @@ export function useInboxOverviews(
         .then(
           (overview) => {
             if (cancelled) return;
+            failures.delete(target.id);
             setOverviews((current) => {
               const next = new Map(current);
               if (overview.channels.length === 0) next.delete(target.id);
@@ -72,8 +86,15 @@ export function useInboxOverviews(
             });
           },
           (error: unknown) => {
+            if (cancelled) return;
             // Only a server without the inbox drops out; a blip keeps what was last read.
-            if (cancelled || !(error instanceof ForkApiError) || error.status !== 404) return;
+            if (!(error instanceof ForkApiError) || error.status === 0 || error.status >= 500) {
+              const failed = failures.get(target.id) ?? 0;
+              failures.set(target.id, failed + 1);
+              schedule(target, RETRY_MS[failed] ?? 30_000);
+              return;
+            }
+            if (error.status !== 404) return;
             setOverviews((current) => {
               if (!current.has(target.id)) return current;
               const next = new Map(current);
@@ -90,14 +111,8 @@ export function useInboxOverviews(
     const stops = targets.map((target) => {
       load(target);
       return subscribeToForkEvents(target.id, (event) => {
-        if ((event.type === "sync" && !followSync) || timers.has(target.id)) return;
-        timers.set(
-          target.id,
-          setTimeout(() => {
-            timers.delete(target.id);
-            load(target);
-          }, REFRESH_DEBOUNCE_MS),
-        );
+        if (event.type === "sync" && !followSync) return;
+        schedule(target, REFRESH_DEBOUNCE_MS);
       });
     });
     return () => {

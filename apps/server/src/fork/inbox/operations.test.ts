@@ -12,6 +12,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as FileSystem from "effect/FileSystem";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import { vi } from "vite-plus/test";
 
 import * as ServerConfig from "../../config.ts";
@@ -173,6 +174,8 @@ interface Harness {
   readonly posted: unknown[];
   /** The size of every file posted to the adapter. */
   readonly uploaded: number[];
+  /** While set, conversation listings wait for it. */
+  holdListings: Promise<void> | null;
   readonly runtime: InboxRuntime["Service"];
   readonly shells: Map<string, OrchestrationV2ThreadShell | null>;
   readonly layer: Layer.Layer<
@@ -196,11 +199,15 @@ async function harness(
   const requests: string[] = [];
   const posted: unknown[] = [];
   const uploaded: number[] = [];
+  const control: { holdListings: Promise<void> | null } = { holdListings: null };
   const hub = new ChannelHub({
     configPath: NodePath.join(dir, "channels.json"),
     transportFor: () => ({
       request: async (request) => {
         requests.push(request.path);
+        if (control.holdListings !== null && request.path.startsWith("/conversations?")) {
+          await control.holdListings;
+        }
         if (request.bytes !== undefined) uploaded.push(request.bytes.byteLength);
         else if (request.method === "POST") posted.push(request.body);
         return handle(request);
@@ -247,6 +254,12 @@ async function harness(
     requests,
     posted,
     uploaded,
+    get holdListings() {
+      return control.holdListings;
+    },
+    set holdListings(hold) {
+      control.holdListings = hold;
+    },
     runtime,
     shells,
     layer,
@@ -508,6 +521,38 @@ describe("inbox listing", () => {
       const result = yield* listOf(h);
       expect(reads).toHaveBeenCalledTimes(2);
       expect(result.conversations[0]).toMatchObject({ unread: false });
+    }),
+  );
+
+  it.effect("answers the overview before a slow listing, then announces the count", () =>
+    Effect.gen(function* () {
+      const h = yield* Effect.promise(() =>
+        harness(() => [{ id: "c", kind: "dm", messages: [{ id: "m1", minute: 1, author: THEM }] }]),
+      );
+      let release = () => {};
+      h.holdListings = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const announced = yield* Deferred.make<void>();
+      const stop = h.runtime.hub.subscribe((event) => {
+        if (event.type === "counts" && event.channelId === h.channelId) {
+          Deferred.doneUnsafe(announced, Effect.void);
+        }
+      });
+      const overview = yield* Inbox.overview().pipe(Effect.provide(h.layer), Effect.forkChild);
+      yield* TestClock.adjust("1 second");
+      const early = yield* Fiber.join(overview);
+      expect(early.channels.find((channel) => channel.id === h.channelId)?.unreadCount).toBeNull();
+      release();
+      yield* Deferred.await(announced);
+      stop();
+      const listings = h.requests.filter((path) => path.startsWith("/conversations?")).length;
+      const later = yield* Inbox.overview().pipe(Effect.provide(h.layer));
+      expect(later.channels.find((channel) => channel.id === h.channelId)?.unreadCount).toBe(1);
+      // The announcement reuses the read that landed instead of starting another.
+      expect(h.requests.filter((path) => path.startsWith("/conversations?"))).toHaveLength(
+        listings,
+      );
     }),
   );
 

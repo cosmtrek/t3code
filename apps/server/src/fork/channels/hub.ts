@@ -99,7 +99,9 @@ export type HubEvent =
   | { readonly type: "channels" }
   | { readonly type: "inbox"; readonly channelId: string }
   /** Only `lastSyncAt` or the latency moved: nothing a list shows, just "synced x ago". */
-  | { readonly type: "sync"; readonly channelId: string };
+  | { readonly type: "sync"; readonly channelId: string }
+  /** A listing the overview stopped waiting for has landed: its counts can be read now. */
+  | { readonly type: "counts"; readonly channelId: string };
 
 export class ChannelUnavailableError extends Error {
   readonly channelId: string;

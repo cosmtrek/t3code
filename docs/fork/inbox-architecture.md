@@ -102,21 +102,26 @@ Nothing pushes data to the browser. Every source below only says that a channel 
 `{ type: "inbox", channelId }` on `/api/fork/inbox/events`. The client waits 250 ms, then fetches
 again.
 
-| Source                                                              | Raised by                    |
-| ------------------------------------------------------------------- | ---------------------------- |
-| Adapter `/events` (any event, or a reconnect)                       | `ChannelHub.onEvent`         |
-| Channel status or health changed                                    | `ChannelHub.check`           |
-| Only `lastSyncAt` moved (sent as `{ type: "sync" }`)                | `ChannelHub.check`           |
-| A thread wrote to its context folder (300 ms debounce)              | `fs.watch` in `InboxRuntime` |
-| A linked thread's run status changed, or it was archived or deleted | `linkedThreads.ts`           |
-| Save, remove, delegate, send, read, seen, or read all               | the operation itself         |
+| Source                                                                   | Raised by                    |
+| ------------------------------------------------------------------------ | ---------------------------- |
+| Adapter `/events` (any event, or a reconnect)                            | `ChannelHub.onEvent`         |
+| Channel status or health changed                                         | `ChannelHub.check`           |
+| Only `lastSyncAt` moved (sent as `{ type: "sync" }`)                     | `ChannelHub.check`           |
+| A listing the overview stopped waiting for landed (`{ type: "counts" }`) | `Inbox.overview`             |
+| A thread wrote to its context folder (300 ms debounce)                   | `fs.watch` in `InboxRuntime` |
+| A linked thread's run status changed, or it was archived or deleted      | `linkedThreads.ts`           |
+| Save, remove, delegate, send, read, seen, or read all                    | the operation itself         |
 
 State is derived on fetch. Requests for one channel share a derivation until the hub's
-`revision` for it moves (any signal above except `sync`) or it is 10 s old, so a missed signal is
+`revision` for it moves (any signal above except `sync` and `counts`) or it is 10 s old, so a missed signal is
 fixed by the next one, or by the client's 60 s poll while the page is visible. Wait times are not
 sent: the client works them out from `lastMessageAt`, so an unchanged list keeps its ETag and the
 browser's revalidation gets a 304. `inbox.sqlite` stores only what cannot be derived: how far
 each conversation was read, the delegations, and links between delegations and threads.
+
+The overview waits 500 ms for each channel's listing. A slower one, such as a cold read from the
+adapter, answers with `unreadCount: null` so the sidebar entry does not wait on it; `counts`
+follows once the read lands, and the refetch reuses it.
 
 ## Two layers
 
