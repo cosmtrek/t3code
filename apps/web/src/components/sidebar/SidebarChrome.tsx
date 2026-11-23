@@ -1,4 +1,10 @@
-import { ArrowLeftIcon, ArrowRightIcon, ChartNoAxesColumnIcon, SettingsIcon } from "lucide-react";
+import {
+  ArrowLeftIcon,
+  ArrowRightIcon,
+  ChartNoAxesColumnIcon,
+  RefreshCwIcon,
+  SettingsIcon,
+} from "lucide-react";
 import type { ReactNode } from "react";
 import { T, useGT } from "gt-react";
 import { memo } from "react";
@@ -14,6 +20,7 @@ import {
 } from "../../navigationHistory";
 import { primaryServerKeybindingsAtom } from "../../state/server";
 import { cn } from "../../lib/utils";
+import { isElectron } from "../../env";
 import { useIssuesSupported, usePullRequestsSupported } from "../../state/environments";
 import { T3Wordmark } from "../T3Wordmark";
 import {
@@ -24,6 +31,7 @@ import {
 } from "../SidebarStageBackdrop";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/menu";
 import {
   SidebarFooter,
   SidebarMenu,
@@ -258,10 +266,13 @@ const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
   };
 
   const handleUsageClick = () => {
-    if (isMobile) {
-      setOpenMobile(false);
-    }
+    closeMobileSidebar();
     void navigate({ to: "/usage" });
+  };
+  // The manual check lives on the About page; the sidebar only shows an update once there is one.
+  const handleUpdatesClick = () => {
+    closeMobileSidebar();
+    void navigate({ to: "/settings/about" });
   };
 
   const handleBackClick = () => {
@@ -282,11 +293,7 @@ const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
         </SidebarMenuItem>
       ) : (
         <>
-          <SidebarUtilityItem
-            icon={<SettingsIcon />}
-            label={gt("Settings")}
-            onClick={handleSettingsClick}
-          />
+          <ForkSidebarItems onNavigate={closeMobileSidebar} />
           {pullRequestsSupported ? (
             <SidebarUtilityItem
               icon={<PullRequestGlyph.pullRequest />}
@@ -301,16 +308,48 @@ const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
               onClick={handleIssuesClick}
             />
           ) : null}
-          <ForkSidebarItems onNavigate={closeMobileSidebar} />
-          <SidebarUtilityItem
-            icon={<ChartNoAxesColumnIcon />}
-            label={gt("Usage")}
-            onClick={handleUsageClick}
-          />
         </>
       )}
       <SidebarThreadUndoNotice />
+      <SidebarMenuItem aria-hidden className="ml-auto" />
       <SidebarUpdatePill />
+      {isOnUtilityPage ? null : (
+        <SidebarMenuItem className="shrink-0">
+          <Menu>
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <MenuTrigger
+                    render={<SidebarMenuButton aria-label={gt("Settings")} size="icon" />}
+                  >
+                    <SettingsIcon />
+                  </MenuTrigger>
+                }
+              />
+              <TooltipPopup side="top">{gt("Settings")}</TooltipPopup>
+            </Tooltip>
+            <MenuPopup align="end" side="top">
+              <MenuItem onClick={handleSettingsClick}>
+                <SettingsIcon />
+                {gt("Settings")}
+              </MenuItem>
+              <MenuItem onClick={handleUsageClick}>
+                <ChartNoAxesColumnIcon />
+                {gt("Usage")}
+              </MenuItem>
+              {isElectron ? (
+                <>
+                  <MenuSeparator />
+                  <MenuItem onClick={handleUpdatesClick}>
+                    <RefreshCwIcon />
+                    {gt("Check for updates")}
+                  </MenuItem>
+                </>
+              ) : null}
+            </MenuPopup>
+          </Menu>
+        </SidebarMenuItem>
+      )}
     </SidebarMenu>
   );
 });

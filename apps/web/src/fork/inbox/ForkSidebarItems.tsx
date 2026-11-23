@@ -1,5 +1,5 @@
 import { useNavigate } from "@tanstack/react-router";
-import { BotIcon, InboxIcon } from "lucide-react";
+import { BotMessageSquareIcon, InboxIcon } from "lucide-react";
 
 import { SidebarMenuButton, SidebarMenuItem } from "../../components/ui/sidebar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../../components/ui/tooltip";
@@ -30,7 +30,7 @@ function BotsItem({ onNavigate }: { readonly onNavigate: () => void }) {
               }}
               size="icon"
             >
-              <BotIcon />
+              <BotMessageSquareIcon />
             </SidebarMenuButton>
           }
         />
