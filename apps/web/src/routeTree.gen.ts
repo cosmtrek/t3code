@@ -24,6 +24,7 @@ import { Route as ChatPullRequestsRouteImport } from './routes/_chat.pull-reques
 import { Route as ChatNewRouteImport } from './routes/_chat.new'
 import { Route as ChatIssuesRouteImport } from './routes/_chat.issues'
 import { Route as ChatInboxRouteImport } from './routes/_chat.inbox'
+import { Route as ChatBotsRouteImport } from './routes/_chat.bots'
 import { Route as ThreadsEnvironmentIdThreadIdRouteImport } from './routes/threads.$environmentId.$threadId'
 import { Route as ChatSettingsWorktreesRouteImport } from './routes/_chat.settings.worktrees'
 import { Route as ChatSettingsVoiceRouteImport } from './routes/_chat.settings.voice'
@@ -128,6 +129,11 @@ const ChatIssuesRoute = ChatIssuesRouteImport.update({
 const ChatInboxRoute = ChatInboxRouteImport.update({
   id: '/inbox',
   path: '/inbox',
+  getParentRoute: () => ChatRoute,
+} as any)
+const ChatBotsRoute = ChatBotsRouteImport.update({
+  id: '/bots',
+  path: '/bots',
   getParentRoute: () => ChatRoute,
 } as any)
 const ThreadsEnvironmentIdThreadIdRoute =
@@ -300,6 +306,7 @@ export interface FileRoutesByFullPath {
   '/guest': typeof GuestRoute
   '/pair': typeof PairRoute
   '/welcome': typeof WelcomeRoute
+  '/bots': typeof ChatBotsRoute
   '/inbox': typeof ChatInboxRoute
   '/issues': typeof ChatIssuesRoute
   '/new': typeof ChatNewRoute
@@ -346,6 +353,7 @@ export interface FileRoutesByTo {
   '/guest': typeof GuestRoute
   '/pair': typeof PairRoute
   '/welcome': typeof WelcomeRoute
+  '/bots': typeof ChatBotsRoute
   '/inbox': typeof ChatInboxRoute
   '/issues': typeof ChatIssuesRoute
   '/new': typeof ChatNewRoute
@@ -395,6 +403,7 @@ export interface FileRoutesById {
   '/guest': typeof GuestRoute
   '/pair': typeof PairRoute
   '/welcome': typeof WelcomeRoute
+  '/_chat/bots': typeof ChatBotsRoute
   '/_chat/inbox': typeof ChatInboxRoute
   '/_chat/issues': typeof ChatIssuesRoute
   '/_chat/new': typeof ChatNewRoute
@@ -445,6 +454,7 @@ export interface FileRouteTypes {
     | '/guest'
     | '/pair'
     | '/welcome'
+    | '/bots'
     | '/inbox'
     | '/issues'
     | '/new'
@@ -491,6 +501,7 @@ export interface FileRouteTypes {
     | '/guest'
     | '/pair'
     | '/welcome'
+    | '/bots'
     | '/inbox'
     | '/issues'
     | '/new'
@@ -539,6 +550,7 @@ export interface FileRouteTypes {
     | '/guest'
     | '/pair'
     | '/welcome'
+    | '/_chat/bots'
     | '/_chat/inbox'
     | '/_chat/issues'
     | '/_chat/new'
@@ -697,6 +709,13 @@ declare module '@tanstack/react-router' {
       path: '/inbox'
       fullPath: '/inbox'
       preLoaderRoute: typeof ChatInboxRouteImport
+      parentRoute: typeof ChatRoute
+    }
+    '/_chat/bots': {
+      id: '/_chat/bots'
+      path: '/bots'
+      fullPath: '/bots'
+      preLoaderRoute: typeof ChatBotsRouteImport
       parentRoute: typeof ChatRoute
     }
     '/threads/$environmentId/$threadId': {
@@ -986,6 +1005,7 @@ const ChatSettingsRouteWithChildren = ChatSettingsRoute._addFileChildren(
 )
 
 interface ChatRouteChildren {
+  ChatBotsRoute: typeof ChatBotsRoute
   ChatInboxRoute: typeof ChatInboxRoute
   ChatIssuesRoute: typeof ChatIssuesRoute
   ChatNewRoute: typeof ChatNewRoute
@@ -998,6 +1018,7 @@ interface ChatRouteChildren {
 }
 
 const ChatRouteChildren: ChatRouteChildren = {
+  ChatBotsRoute: ChatBotsRoute,
   ChatInboxRoute: ChatInboxRoute,
   ChatIssuesRoute: ChatIssuesRoute,
   ChatNewRoute: ChatNewRoute,
