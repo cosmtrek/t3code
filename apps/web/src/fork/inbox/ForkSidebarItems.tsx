@@ -1,12 +1,46 @@
 import { useNavigate } from "@tanstack/react-router";
-import { InboxIcon } from "lucide-react";
+import { BotIcon, InboxIcon } from "lucide-react";
 
 import { SidebarMenuButton, SidebarMenuItem } from "../../components/ui/sidebar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../../components/ui/tooltip";
 import { useInboxOverviews } from "./useInboxOverviews";
 
-/** The Inbox entry in the sidebar footer, shown once an environment has an enabled channel. */
+/** The fork's entries in the sidebar footer: Bots always, Inbox once a channel is enabled. */
 export function ForkSidebarItems({ onNavigate }: { readonly onNavigate: () => void }) {
+  return (
+    <>
+      <BotsItem onNavigate={onNavigate} />
+      <InboxItem onNavigate={onNavigate} />
+    </>
+  );
+}
+
+function BotsItem({ onNavigate }: { readonly onNavigate: () => void }) {
+  const navigate = useNavigate();
+  return (
+    <SidebarMenuItem className="relative shrink-0">
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <SidebarMenuButton
+              aria-label="Bots"
+              onClick={() => {
+                onNavigate();
+                void navigate({ to: "/bots" });
+              }}
+              size="icon"
+            >
+              <BotIcon />
+            </SidebarMenuButton>
+          }
+        />
+        <TooltipPopup side="top">Bots</TooltipPopup>
+      </Tooltip>
+    </SidebarMenuItem>
+  );
+}
+
+function InboxItem({ onNavigate }: { readonly onNavigate: () => void }) {
   const navigate = useNavigate();
   const inboxes = useInboxOverviews();
   if (inboxes.length === 0) return null;

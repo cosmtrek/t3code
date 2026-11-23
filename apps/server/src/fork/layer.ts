@@ -6,6 +6,9 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
 import { ThreadManagementService } from "../orchestration-v2/ThreadManagementService.ts";
+import * as BotRuntime from "./bot/BotRuntime.ts";
+import { followWorkThreads } from "./bot/events.ts";
+import { reconcile } from "./bot/operations.ts";
 import { routesLayer } from "./http.ts";
 import * as InboxRuntime from "./inbox/InboxRuntime.ts";
 import { followLinkedThreads } from "./inbox/linkedThreads.ts";
@@ -23,6 +26,30 @@ const linkedThreadsLayer = Layer.effectDiscard(
   }),
 );
 
-export const layer = Layer.mergeAll(routesLayer, linkedThreadsLayer).pipe(
-  Layer.provide(InboxRuntime.layer),
+const botsLayer = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const threads = yield* ThreadManagementService;
+    const runtime = yield* BotRuntime.BotRuntime;
+    // Nothing runs until a bot exists.
+    yield* runtime.active.await.pipe(
+      Effect.andThen(
+        // Follow first, then catch up, so a run that ends in between is not missed.
+        Effect.all(
+          [
+            followWorkThreads(threads.streamDomainEvents),
+            Effect.yieldNow.pipe(Effect.andThen(reconcile())),
+          ],
+          { concurrency: "unbounded", discard: true },
+        ),
+      ),
+      Effect.catchCause((cause) =>
+        Effect.logWarning("Bots stopped following their threads.", { cause }),
+      ),
+      Effect.forkScoped,
+    );
+  }),
+);
+
+export const layer = Layer.mergeAll(routesLayer, linkedThreadsLayer, botsLayer).pipe(
+  Layer.provide(Layer.merge(InboxRuntime.layer, BotRuntime.layer)),
 );

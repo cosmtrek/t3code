@@ -23,6 +23,8 @@ import * as HttpIncomingMessage from "effect/http/HttpIncomingMessage";
 
 import { authenticateMediaRequest } from "../auth/http.ts";
 import { requestUrl } from "../requestUrl.ts";
+import { BotRuntime, type BotEvent, type BotRuntimeShape } from "./bot/BotRuntime.ts";
+import * as Bots from "./bot/operations.ts";
 import type { HubEvent } from "./channels/hub.ts";
 import { InboxRuntime, type InboxRuntimeShape } from "./inbox/InboxRuntime.ts";
 import * as Inbox from "./inbox/operations.ts";
@@ -30,6 +32,7 @@ import * as Inbox from "./inbox/operations.ts";
 const FORK_ROUTE_PREFIX = "/api/fork";
 const CHANNELS = `${FORK_ROUTE_PREFIX}/channels`;
 const INBOX = `${FORK_ROUTE_PREFIX}/inbox`;
+const BOTS = `${FORK_ROUTE_PREFIX}/bots`;
 
 const NO_STORE = { "cache-control": "no-store" };
 const JSON_MAX_BODY_BYTES = 256 * 1024;
@@ -104,7 +107,7 @@ const fileBody = Effect.gen(function* () {
 });
 
 const makeRoute =
-  (runtime: InboxRuntimeShape) =>
+  (runtime: InboxRuntimeShape, bots: BotRuntimeShape) =>
   <A, R>(
     method: "GET" | "POST",
     path: HttpRouter.PathInput,
@@ -119,6 +122,7 @@ const makeRoute =
         const request = yield* HttpServerRequest.HttpServerRequest;
         return yield* handle.pipe(
           Effect.provideService(InboxRuntime, runtime),
+          Effect.provideService(BotRuntime, bots),
           Effect.map((value) =>
             HttpServerResponse.isHttpServerResponse(value)
               ? value
@@ -138,15 +142,24 @@ const channelIdOf = (input: unknown) =>
         new Inbox.ForkHttpError({ status: 400, code: "bad_request", detail: "Name a channel." }),
       );
 
-const eventsRoute = (runtime: InboxRuntimeShape) =>
+/** One stream for every fork view: inbox and channel changes, and which bot changed. */
+const eventsRoute = (runtime: InboxRuntimeShape, bots: BotRuntimeShape) =>
   HttpRouter.add(
     "GET",
     `${INBOX}/events`,
     Effect.gen(function* () {
       yield* authenticateMediaRequest(AuthOrchestrationReadScope);
-      const events = Stream.callback<HubEvent>((queue) =>
+      const events = Stream.callback<HubEvent | BotEvent>((queue) =>
         Effect.acquireRelease(
-          Effect.sync(() => runtime.subscribe((event) => Queue.offerUnsafe(queue, event))),
+          Effect.sync(() => {
+            const offer = (event: HubEvent | BotEvent) => Queue.offerUnsafe(queue, event);
+            const stopInbox = runtime.subscribe(offer);
+            const stopBots = bots.subscribe(offer);
+            return () => {
+              stopInbox();
+              stopBots();
+            };
+          }),
           (unsubscribe) => Effect.sync(unsubscribe),
         ),
       ).pipe(Stream.map((event) => `data: ${JSON.stringify(event)}\n\n`));
@@ -190,8 +203,8 @@ const mediaRoute = (route: ReturnType<typeof makeRoute>) =>
     }),
   );
 
-const routes = (runtime: InboxRuntimeShape) => {
-  const route = makeRoute(runtime);
+const routes = (runtime: InboxRuntimeShape, bots: BotRuntimeShape) => {
+  const route = makeRoute(runtime, bots);
   return Layer.mergeAll(
     route("GET", CHANNELS, AuthOrchestrationReadScope, Inbox.listChannels()),
     route(
@@ -302,12 +315,43 @@ const routes = (runtime: InboxRuntimeShape) => {
       ),
     ),
     mediaRoute(route),
-    eventsRoute(runtime),
+    route("GET", BOTS, AuthOrchestrationReadScope, Bots.listBots()),
+    route(
+      "GET",
+      `${BOTS}/bot`,
+      AuthOrchestrationReadScope,
+      query.pipe(Effect.flatMap(Bots.readBot)),
+    ),
+    route(
+      "POST",
+      `${BOTS}/create`,
+      AuthOrchestrationOperateScope,
+      body.pipe(Effect.flatMap(Bots.createBot)),
+    ),
+    route(
+      "POST",
+      `${BOTS}/role`,
+      AuthOrchestrationOperateScope,
+      body.pipe(Effect.flatMap(Bots.saveRole)),
+    ),
+    route(
+      "POST",
+      `${BOTS}/delete`,
+      AuthOrchestrationOperateScope,
+      body.pipe(Effect.flatMap(Bots.deleteBot)),
+    ),
+    route(
+      "POST",
+      `${BOTS}/send`,
+      AuthOrchestrationOperateScope,
+      body.pipe(Effect.flatMap(Bots.sendMessage)),
+    ),
+    eventsRoute(runtime, bots),
   );
 };
 
 export const routesLayer = Layer.unwrap(
   Effect.gen(function* () {
-    return routes(yield* InboxRuntime);
+    return routes(yield* InboxRuntime, yield* BotRuntime);
   }),
 );

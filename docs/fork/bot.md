@@ -57,15 +57,15 @@ turns what the user says into its notebook, and the user can read and edit that 
 Each bot keeps one notebook, the single source of what it knows and does. The user can open and
 edit every part of it on the Bots page.
 
-| Part      | Holds                                                                                         |
-| --------- | --------------------------------------------------------------------------------------------- |
-| Role      | Who it is and how to behave, in the user's terms, including its rules                        |
-| Goals     | The lasting outcomes it is responsible for ("fork releases stay healthy")                     |
-| Scope     | Projects it may work in and read, chat conversations it follows                               |
-| Routines  | Its own scheduled tasks ("09:00 daily: open PRs and CI"), which it creates and edits itself   |
-| Items     | Concrete work toward a goal: one line each with status, next step, linked threads, and what it waits on |
-| Memory    | Lasting notes, one fact per line, at most 4 KB: preferences, project conventions, past mistakes |
-| Skills    | Skill folders (`SKILL.md`) made available to its turns, chosen by the user                    |
+| Part     | Holds                                                                                                   |
+| -------- | ------------------------------------------------------------------------------------------------------- |
+| Role     | Who it is and how to behave, in the user's terms, including its rules                                   |
+| Goals    | The lasting outcomes it is responsible for ("fork releases stay healthy")                               |
+| Scope    | Projects it may work in and read, chat conversations it follows                                         |
+| Routines | Its own scheduled tasks ("09:00 daily: open PRs and CI"), which it creates and edits itself             |
+| Items    | Concrete work toward a goal: one line each with status, next step, linked threads, and what it waits on |
+| Memory   | Lasting notes, one fact per line, at most 4 KB: preferences, project conventions, past mistakes         |
+| Skills   | Skill folders (`SKILL.md`) made available to its turns, chosen by the user                              |
 
 Role, goals, routines, and items are written by the bot from the conversation and corrected by the user
 either by telling the bot or by editing the file. An item that waits on someone outside the bot is
@@ -130,11 +130,11 @@ into that turn; every other event that arrives meanwhile is coalesced into the n
 **Its own thread events do not all wake it either.** The service queues them; whether one
 wakes the bot now is set per item when the bot starts or adopts a thread:
 
-| Follow-up  | Wakes the bot                                                   | Fits                       |
-| ---------- | --------------------------------------------------------------- | -------------------------- |
-| `now`      | as soon as the thread stops                                     | a step the next one waits on |
-| `attention` (default) | only when it fails or asks for an answer or approval; finishes wait for the next routine or chat | long work, batches |
-| `routine`  | never on its own; the next routine reads the queue              | background checks          |
+| Follow-up             | Wakes the bot                                                                                    | Fits                         |
+| --------------------- | ------------------------------------------------------------------------------------------------ | ---------------------------- |
+| `now`                 | as soon as the thread stops                                                                      | a step the next one waits on |
+| `attention` (default) | only when it fails or asks for an answer or approval; finishes wait for the next routine or chat | long work, batches           |
+| `routine`             | never on its own; the next routine reads the queue                                               | background checks            |
 
 A thread that needs an answer always wakes the bot, since it is blocked until someone replies.
 Queued events go into the next wake packet as one digest, so ten finished threads cost one turn.
@@ -147,10 +147,10 @@ still 09:00.
 
 **Act.** The bot acts only through the `t3bot` tools, which call the bot service:
 
-| Area     | Tools                                                                                  |
-| -------- | -------------------------------------------------------------------------------------- |
-| Notebook | read and edit role, goals, routines, items, memory                                     |
-| Threads  | read threads in scope; start a thread; message, interrupt, or settle a thread it owns  |
+| Area     | Tools                                                                                                  |
+| -------- | ------------------------------------------------------------------------------------------------------ |
+| Notebook | read and edit role, goals, routines, items, memory                                                     |
+| Threads  | read threads in scope; start a thread; message, interrupt, or settle a thread it owns                  |
 | Chat     | reply to or ask the user; read a followed conversation; send there (the approval card shows the draft) |
 
 ## Context length
@@ -224,7 +224,7 @@ database changes, a few seams.
   target in the inbox's delegate dialog, and a follow action in the conversation header. The
   chat view reuses the inbox's message list and `ReplyBox`. Permissions, budget, and pause live on
   the same page.
-- Tools: the `t3bot` CLI becomes the bot's tool surface, calling `/api/fork/bot/*` with a per-bot
+- Tools: the `t3bot` CLI becomes the bot's tool surface, calling `/api/fork/bots/*` with a per-bot
   token; the service checks every call against that bot.
 - State: `<stateDir>/bots/` (`bots.sqlite` for chats, owned threads, and sent-message ids; per bot
   a notebook folder).

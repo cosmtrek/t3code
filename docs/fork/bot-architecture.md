@@ -20,7 +20,7 @@ flowchart TB
     subgraph fork[apps/server/src/fork]
       inbox[inbox operations · ChannelHub]
       bot[bot/BotRuntime<br/>registry · wake queue · notebook · gate]
-      routes["/api/fork/bot/* (UI + tools)"]
+      routes["/api/fork/bots/* (UI + tools)"]
       state["&lt;stateDir&gt;/bots/"]
       routes --> bot <--> state
       bot --> inbox
@@ -41,13 +41,13 @@ flowchart TB
 
 ## Upstream footprint
 
-| Upstream file                                        | Change                                       | New?          |
-| ---------------------------------------------------- | -------------------------------------------- | ------------- |
-| `apps/server/src/server.ts`                          | none: bots merge into `fork/layer.ts`        | existing seam |
-| `apps/web/src/components/sidebar/SidebarChrome.tsx`  | none: Bots joins `<ForkSidebarItems>`        | existing seam |
-| `apps/web/src/components/sidebar/mainAppLocation.ts` | `/bots` is a sidebar utility page, one line  | extends seam  |
-| `apps/web/src/routes/_chat.bots.tsx`                 | new thin route file                          | new file      |
-| `apps/web/src/routeTree.gen.ts`                      | regenerated                                  | generated     |
+| Upstream file                                        | Change                                      | New?          |
+| ---------------------------------------------------- | ------------------------------------------- | ------------- |
+| `apps/server/src/server.ts`                          | none: bots merge into `fork/layer.ts`       | existing seam |
+| `apps/web/src/components/sidebar/SidebarChrome.tsx`  | none: Bots joins `<ForkSidebarItems>`       | existing seam |
+| `apps/web/src/components/sidebar/mainAppLocation.ts` | `/bots` is a sidebar utility page, one line | extends seam  |
+| `apps/web/src/routes/_chat.bots.tsx`                 | new thin route file                         | new file      |
+| `apps/web/src/routeTree.gen.ts`                      | regenerated                                 | generated     |
 
 Bots have no Settings page and no component in the thread view: permissions, budget, pause, and
 Hand back all live on the Bots page, so neither needs another route or a slot in upstream views.
@@ -62,19 +62,19 @@ Upstream modules are imported, never edited: `ThreadManagementService`, `ThreadM
 
 `apps/server/src/fork/bot/`, provided by `fork/layer.ts` beside the inbox:
 
-| File          | Does                                                                                   |
-| ------------- | -------------------------------------------------------------------------------------- |
-| `store.ts`    | `bots.sqlite`: bots, goals, items, routines, memory, chat, threads, questions, queue    |
-| `notebook.ts` | `role.md` per bot; renders the notebook for the wake packet                            |
-| `events.ts`   | Follows `streamDomainEvents` and `ChannelHub`; turns them into queued bot events        |
-| `reconcile.ts`| On startup, reads every bot-owned thread's shell and queues what was missed            |
-| `wake.ts`     | Per-bot queue, coalescing, one turn at a time, budget, pause, work-thread rotation     |
-| `packet.ts`   | Pure: builds the wake packet from notebook, recent chat, and the event digest           |
-| `gate.ts`     | Pure: permission and ownership decision for one action                                  |
-| `actions.ts`  | Runs an allowed action through the service methods above or the inbox's `send`          |
-| `routines.ts` | One timer per bot for its next routine, from `nextScheduledRunAt`                       |
-| `http.ts`     | Routes for the UI and for the CLI; decode, one operation, map errors                    |
-| `cli.ts`      | The `t3bot` tool CLI source, and writing it to `bots/bin/` at startup                   |
+| File           | Does                                                                                 |
+| -------------- | ------------------------------------------------------------------------------------ |
+| `store.ts`     | `bots.sqlite`: bots, goals, items, routines, memory, chat, threads, questions, queue |
+| `notebook.ts`  | `role.md` per bot; renders the notebook for the wake packet                          |
+| `events.ts`    | Follows `streamDomainEvents` and `ChannelHub`; turns them into queued bot events     |
+| `reconcile.ts` | On startup, reads every bot-owned thread's shell and queues what was missed          |
+| `wake.ts`      | Per-bot queue, coalescing, one turn at a time, budget, pause, work-thread rotation   |
+| `packet.ts`    | Pure: builds the wake packet from notebook, recent chat, and the event digest        |
+| `gate.ts`      | Pure: permission and ownership decision for one action                               |
+| `actions.ts`   | Runs an allowed action through the service methods above or the inbox's `send`       |
+| `routines.ts`  | One timer per bot for its next routine, from `nextScheduledRunAt`                    |
+| `http.ts`      | Routes for the UI and for the CLI; decode, one operation, map errors                 |
+| `cli.ts`       | The `t3bot` tool CLI source, and writing it to `bots/bin/` at startup                |
 
 ### On an installed T3
 
@@ -119,17 +119,17 @@ user edit queues a `notebook.edited` event so the next turn sees it.
 `events.ts` reduces everything to one internal type, `BotEvent`, and writes it to the owning
 bot's `queue`. Nothing here starts a turn; `wake.ts` decides.
 
-| Source                                                         | Becomes                                   |
-| -------------------------------------------------------------- | ----------------------------------------- |
-| `run.updated` to a terminal status on a bot's worker thread    | `thread.stopped` (completed, failed, interrupted) |
-| a pending approval or user-input request on a bot's thread     | `thread.needs` (always wakes)             |
-| `thread.pull-request-synced`, `thread.pull-request-link-updated` on a bot's thread | `thread.pr` (by follow-up mode) |
-| a message from the user on a bot's thread (see Ownership)      | ownership moves to the user; no wake      |
-| the user presses Hand back                                     | `thread.returned` (always wakes)          |
-| a hub event naming a followed conversation                     | read new messages past `followed`, skip `isSelf` authors, then `chat.message` |
-| a user message in the bot's chat, a notebook edit              | `user.message`, `notebook.edited` (always wake) |
-| a routine timer, or Run now on the Bots page                   | `routine.due` with its due time (always wakes) |
-| a question with an action passing its expiry                   | `question.expired` (waits for the next wake) |
+| Source                                                                             | Becomes                                                                       |
+| ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `run.updated` to a terminal status on a bot's worker thread                        | `thread.stopped` (completed, failed, interrupted)                             |
+| a pending approval or user-input request on a bot's thread                         | `thread.needs` (always wakes)                                                 |
+| `thread.pull-request-synced`, `thread.pull-request-link-updated` on a bot's thread | `thread.pr` (by follow-up mode)                                               |
+| a message from the user on a bot's thread (see Ownership)                          | ownership moves to the user; no wake                                          |
+| the user presses Hand back                                                         | `thread.returned` (always wakes)                                              |
+| a hub event naming a followed conversation                                         | read new messages past `followed`, skip `isSelf` authors, then `chat.message` |
+| a user message in the bot's chat, a notebook edit                                  | `user.message`, `notebook.edited` (always wake)                               |
+| a routine timer, or Run now on the Bots page                                       | `routine.due` with its due time (always wakes)                                |
+| a question with an action passing its expiry                                       | `question.expired` (waits for the next wake)                                  |
 
 Events for threads that no bot owns are dropped at the first lookup, so a busy environment costs
 one map lookup per event. Message streaming events are filtered out before that, as the inbox
@@ -257,7 +257,7 @@ small Node script that runs with the server's own Node (`process.execPath`, with
 `ELECTRON_RUN_AS_NODE=1` in desktop). The wake packet gives its absolute path. Each run reads the
 server's current port from `<stateDir>/server-runtime.json`, because desktop binds a dynamic port
 that is not known when the fork layer is built. So the CLI always matches the running server and
-needs no configuration. It calls `/api/fork/bot/*` with `Authorization: Bearer <bots/<id>/token>`.
+needs no configuration. It calls `/api/fork/bots/*` with `Authorization: Bearer <bots/<id>/token>`.
 
 ```text
 t3bot say <text>                        reply in the chat with the user
@@ -287,17 +287,17 @@ design avoids.
 `gate.ts` returns `allow`, `ask`, or `deny` for (bot, action, target). Only actions the service
 performs are gated, because those are the only ones it can stop:
 
-| Action                                        | Default |
-| --------------------------------------------- | ------- |
-| reads in scope, `say`, goals, items, routines, memory | allow |
-| edit its role                                 | ask     |
-| start a thread in `auto` mode, within budget  | allow   |
-| start a thread in `full-access` mode          | ask     |
-| send, interrupt, settle its own threads       | allow   |
-| send in a followed conversation               | ask     |
-| anything over budget                          | ask     |
-| message a thread it does not own              | deny    |
-| change its own permissions                    | deny    |
+| Action                                                | Default |
+| ----------------------------------------------------- | ------- |
+| reads in scope, `say`, goals, items, routines, memory | allow   |
+| edit its role                                         | ask     |
+| start a thread in `auto` mode, within budget          | allow   |
+| start a thread in `full-access` mode                  | ask     |
+| send, interrupt, settle its own threads               | allow   |
+| send in a followed conversation                       | ask     |
+| anything over budget                                  | ask     |
+| message a thread it does not own                      | deny    |
+| change its own permissions                            | deny    |
 
 `ask` stores the exact action in `questions` and shows it as a card in the bot's chat. Approving
 claims the question once, checks ownership, scope, and budget again, runs that stored action (not
@@ -336,8 +336,8 @@ chat app has no bot member, so a bot cannot be mentioned anywhere else.
   unaware of bots, as it stays unaware of the inbox.
 - **Inbox bridges**: a bot target in the delegate dialog (creates an item with the messages'
   link), and a follow action in the conversation header (adds to `followed`).
-- **Live updates**: one SSE stream, `/api/fork/bot/events`, that only says a bot changed; the
-  client refetches, as the inbox does.
+- **Live updates**: the fork's one SSE stream (`/api/fork/inbox/events`) also carries
+  `{ type: "bots", botId }`, which only says a bot changed; the client refetches, as the inbox does.
 
 Mobile has no Bots UI in v1. Bot threads and their approval requests still show in mobile like
 any thread.

@@ -152,7 +152,11 @@ export async function forkRequest<T>(
 /** Follows the environment's fork events; reconnects with a fresh ticket when the stream drops. */
 export function subscribeForkEvents(
   environmentId: EnvironmentId,
-  onEvent: (event: { readonly type: string; readonly channelId?: string }) => void,
+  onEvent: (event: {
+    readonly type: string;
+    readonly channelId?: string;
+    readonly botId?: string;
+  }) => void,
 ): () => void {
   let closed = false;
   let source: EventSource | null = null;

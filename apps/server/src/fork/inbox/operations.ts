@@ -984,7 +984,7 @@ export const markAllRead = Effect.fn("ForkInbox.markAllRead")(function* (body: u
 type Providers = Effect.Success<ProviderRegistry.ProviderRegistry["Service"]["getProviders"]>;
 
 /** With no default set, a new thread takes the first ready provider's default model. */
-function firstProviderDefault(providers: Providers): ModelSelection | null {
+export function firstProviderDefault(providers: Providers): ModelSelection | null {
   const provider = providers.find(
     (candidate) =>
       candidate.enabled &&

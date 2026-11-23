@@ -293,3 +293,34 @@ export interface DelegateOptions {
   readonly defaultWorkspaceStrategy: WorkspaceStrategy;
   readonly existing: LinkedThread | null;
 }
+
+/** Responses of `/api/fork/bots/*`, mirrored from apps/server/src/fork/bot. */
+export interface BotSummary {
+  readonly id: string;
+  readonly name: string;
+  readonly modelSelection: ModelSelection;
+  readonly working: boolean;
+  readonly lastMessage: Pick<BotChatMessage, "role" | "text" | "createdAt"> | null;
+}
+
+export interface BotChatMessage {
+  readonly id: string;
+  readonly role: "user" | "bot" | "error";
+  readonly text: string;
+  readonly createdAt: string;
+  /** For a user message: the turn that took it; null while it waits for one. */
+  readonly turnRunId: string | null;
+}
+
+export interface BotDetail {
+  readonly bot: {
+    readonly id: string;
+    readonly name: string;
+    readonly modelSelection: ModelSelection;
+    readonly workThreadId: string | null;
+  };
+  readonly role: string;
+  readonly working: boolean;
+  /** Oldest first. */
+  readonly chat: ReadonlyArray<BotChatMessage>;
+}

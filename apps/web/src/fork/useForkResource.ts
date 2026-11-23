@@ -6,6 +6,7 @@ import { ForkApiError, forkRequest, subscribeForkEvents } from "./forkApiAccess"
 export interface ForkEvent {
   readonly type: string;
   readonly channelId?: string;
+  readonly botId?: string;
 }
 
 type Listener = (event: ForkEvent) => void;

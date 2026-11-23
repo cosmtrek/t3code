@@ -481,7 +481,7 @@ export function DelegateDialog({
 }
 
 /** T3 Code's own model picker, with the model's effort levels docked beside it as in the composer. */
-function DelegateModelPicker({
+export function DelegateModelPicker({
   environmentId,
   projectId,
   selection,
