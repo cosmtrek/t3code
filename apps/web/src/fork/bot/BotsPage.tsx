@@ -8,10 +8,16 @@ import {
 import { useNavigate } from "@tanstack/react-router";
 import {
   BotIcon,
+  CheckIcon,
+  CopyIcon,
   EllipsisIcon,
   FileTextIcon,
+  GoalIcon,
   MessageSquareIcon,
+  PanelRightCloseIcon,
+  PanelRightOpenIcon,
   PauseIcon,
+  PencilIcon,
   PlayIcon,
   PlusIcon,
   ShieldIcon,
@@ -53,13 +59,16 @@ import {
 import { SidebarInset } from "../../components/ui/sidebar";
 import { Spinner } from "../../components/ui/spinner";
 import { Textarea } from "../../components/ui/textarea";
+import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { useEnvironmentSettings } from "../../hooks/useSettings";
+import { useMediaQuery } from "../../hooks/useMediaQuery";
 import { cn } from "../../lib/utils";
 import { providerInstanceEntriesFor } from "../../providerInstances";
 import { useEnvironments } from "../../state/environments";
 import { EMPTY_SERVER_PROVIDERS, serverEnvironment } from "../../state/server";
 import { ForkApiError, forkRequest } from "../forkApiAccess";
 import { DelegateModelPicker } from "../inbox/DelegateDialog";
+import { IconAction } from "../inbox/IconAction";
 import { PaneHeader } from "../inbox/PaneHeader";
 import { ReplyBox, useSendKey } from "../inbox/ReplyBox";
 import { formatSince } from "../presentation";
@@ -77,6 +86,7 @@ import { useForkResource, type ForkEvent } from "../useForkResource";
 
 const ENVIRONMENT_STORAGE_KEY = "t3code:bots-environment";
 const BOT_STORAGE_KEY = "t3code:bots-selected";
+const NOTEBOOK_STORAGE_KEY = "t3code:bots-notebook";
 
 const readStored = (key: string) => {
   try {
@@ -196,7 +206,7 @@ function EnvironmentBots({
   const unsupported = listing.error?.status === 404;
 
   return (
-    <div className="flex min-h-0 flex-1">
+    <div className="relative flex min-h-0 flex-1">
       <aside className="flex w-60 shrink-0 flex-col border-r max-md:hidden">
         <PaneHeader edge="list">
           <h1 className="min-w-0 flex-1 truncate px-1 text-sm font-medium">Bots</h1>
@@ -410,6 +420,18 @@ function BotChat({
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [editingSettings, setEditingSettings] = useState(false);
+  // Wide screens remember the choice; narrow ones float it over the chat, closed until asked.
+  const wide = useMediaQuery("xl");
+  const [notebookHidden, setNotebookHidden] = useState(
+    () => readStored(NOTEBOOK_STORAGE_KEY) === "hidden",
+  );
+  const [notebookFloating, setNotebookFloating] = useState(false);
+  const notebookOpen = wide ? !notebookHidden : notebookFloating;
+  const setNotebookOpen = (next: boolean) => {
+    if (!wide) return setNotebookFloating(next);
+    setNotebookHidden(!next);
+    store(NOTEBOOK_STORAGE_KEY, next ? "shown" : "hidden");
+  };
   const data = detail.data;
   const workThreadId = data?.bot.workThreadId ?? null;
 
@@ -475,6 +497,10 @@ function BotChat({
                 <SquareArrowOutUpRightIcon />
                 Open work thread
               </MenuItem>
+              <MenuItem onClick={() => setNotebookOpen(!notebookOpen)}>
+                {notebookOpen ? <PanelRightCloseIcon /> : <PanelRightOpenIcon />}
+                {notebookOpen ? "Hide profile" : "Show profile"}
+              </MenuItem>
               <MenuItem disabled={!data} onClick={() => void setPaused(!data?.bot.paused)}>
                 {data?.bot.paused ? <PlayIcon /> : <PauseIcon />}
                 {data?.bot.paused ? "Resume" : "Pause"}
@@ -533,7 +559,14 @@ function BotChat({
           />
         </form>
       </section>
-      {data ? <NotebookPanel environmentId={environmentId} detail={data} /> : null}
+      {data && notebookOpen ? (
+        <NotebookPanel
+          environmentId={environmentId}
+          detail={data}
+          overlay={!wide}
+          onHide={() => setNotebookOpen(false)}
+        />
+      ) : null}
       {editingSettings && data ? (
         <SettingsDialog
           key={data.bot.id}
@@ -587,27 +620,59 @@ function scheduleLabel(schedule: BotNotebook["routines"][number]["schedule"]) {
     : `${days.map((day) => DAY_NAMES[day]).join(", ")} ${schedule.time}`;
 }
 
+/** An empty section is just its dimmed title, so the sections with content stand out. */
 function NotebookSection({
   title,
+  empty = false,
+  action,
   children,
 }: {
   readonly title: string;
-  readonly children: ReactNode;
+  readonly empty?: boolean;
+  readonly action?: ReactNode;
+  readonly children?: ReactNode;
 }) {
   return (
     <section className="flex flex-col gap-1.5 border-b px-3 py-3 last:border-b-0">
-      <h3 className="text-xs font-medium text-muted-foreground">{title}</h3>
-      {children}
+      <div className="flex h-6 items-center gap-2">
+        <h3
+          className={cn(
+            "flex-1 text-xs font-medium text-muted-foreground",
+            empty && "text-muted-foreground/50",
+          )}
+        >
+          {title}
+        </h3>
+        {action}
+      </div>
+      {empty ? null : children}
     </section>
+  );
+}
+
+function CopyPathButton({ path }: { readonly path: string }) {
+  const { copyToClipboard, isCopied } = useCopyToClipboard<null>();
+  return (
+    <IconAction
+      label={isCopied ? "Copied" : `Copy notes folder: ${path}`}
+      onClick={() => copyToClipboard(path, null)}
+    >
+      {isCopied ? <CheckIcon /> : <CopyIcon />}
+    </IconAction>
   );
 }
 
 function NotebookPanel({
   environmentId,
   detail,
+  overlay,
+  onHide,
 }: {
   readonly environmentId: EnvironmentId;
   readonly detail: BotDetail;
+  /** Narrow screens: float over the chat instead of taking a column. */
+  readonly overlay: boolean;
+  readonly onHide: () => void;
 }) {
   const navigate = useNavigate();
   const { notebook, role } = detail;
@@ -639,57 +704,72 @@ function NotebookPanel({
   const open = notebook.items.filter((item) => item.status !== "done" && !item.setAside);
   const setAside = notebook.items.filter((item) => item.status !== "done" && item.setAside);
   const goals = notebook.goals.filter((goal) => !goal.done);
-  const itemRows = (goalId: number | null) =>
-    open
-      .filter((item) => item.goalId === goalId)
-      .map((item) => (
-        <div key={item.id} className="flex flex-col gap-0.5">
-          <div className="flex min-w-0 items-baseline gap-1.5 text-sm">
-            <span className="shrink-0 text-xs text-muted-foreground tabular-nums">#{item.id}</span>
-            <span className="min-w-0 flex-1 truncate">{item.title}</span>
-            {item.status === "waiting" ? (
-              <span className="shrink-0 text-xs text-muted-foreground">waiting</span>
-            ) : null}
-          </div>
-          {item.note ? (
-            <p className="ps-6 text-xs text-muted-foreground wrap-anywhere">{item.note}</p>
-          ) : null}
-          {notebook.threads
-            .filter((thread) => thread.itemId === item.id)
-            .map((thread) => (
-              <ThreadLink
-                key={thread.threadId}
-                thread={thread}
-                onOpen={openThread}
-                onHandBack={handBack}
-                busy={pending !== null}
-              />
-            ))}
-        </div>
-      ));
-  const loose = itemRows(null);
+  const goalTitle = (goalId: number | null) =>
+    goalId === null ? null : (notebook.goals.find((goal) => goal.id === goalId)?.title ?? null);
   const unlinked = notebook.threads.filter((thread) => thread.itemId === null);
 
   return (
-    <aside className="flex w-80 shrink-0 flex-col border-l max-xl:hidden">
+    <aside
+      className={cn(
+        "flex w-80 shrink-0 flex-col border-l bg-background",
+        overlay && "absolute inset-y-0 right-0 z-20 shadow-lg",
+      )}
+    >
       <PaneHeader edge="detail">
-        <h2 className="truncate px-1 text-sm font-medium">Notebook</h2>
+        <h2 className="min-w-0 flex-1 truncate px-1 text-sm font-medium">Profile</h2>
+        <IconAction label="Hide profile" onClick={onHide}>
+          <PanelRightCloseIcon />
+        </IconAction>
       </PaneHeader>
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
         {error ? <p className="px-3 pt-2 text-xs text-destructive-foreground">{error}</p> : null}
-        <NotebookSection title="Goals and items">
-          {goals.length === 0 && loose.length === 0 ? (
-            <p className="text-xs text-muted-foreground">
-              None yet. Tell the bot what to take care of.
-            </p>
-          ) : null}
-          {goals.map((goal) => (
-            <div key={goal.id} className="flex flex-col gap-1.5 rounded-md border p-2">
-              <span className="text-sm font-medium">{goal.title}</span>
-              {itemRows(goal.id)}
-            </div>
-          ))}
-          {loose}
+        <RoleEditor key={botId} environmentId={environmentId} botId={botId} role={role} />
+        <NotebookSection title="Goals" empty={goals.length === 0}>
+          <ul className="flex flex-col gap-1 text-sm">
+            {goals.map((goal) => (
+              <li key={goal.id} className="wrap-anywhere">
+                {goal.title}
+              </li>
+            ))}
+          </ul>
+        </NotebookSection>
+        <NotebookSection title="Work" empty={open.length === 0 && unlinked.length === 0}>
+          {open.map((item) => {
+            const goal = goalTitle(item.goalId);
+            return (
+              <div key={item.id} className="flex flex-col gap-0.5">
+                <div className="flex min-w-0 items-baseline gap-1.5 text-sm">
+                  <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
+                    #{item.id}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate">{item.title}</span>
+                  {item.status === "waiting" ? (
+                    <span className="shrink-0 text-xs text-muted-foreground">waiting</span>
+                  ) : null}
+                </div>
+                {goal ? (
+                  <p className="flex min-w-0 items-center gap-1 ps-6 text-xs text-muted-foreground">
+                    <GoalIcon className="size-3 shrink-0" />
+                    <span className="truncate">{goal}</span>
+                  </p>
+                ) : null}
+                {item.note ? (
+                  <p className="ps-6 text-xs text-muted-foreground wrap-anywhere">{item.note}</p>
+                ) : null}
+                {notebook.threads
+                  .filter((thread) => thread.itemId === item.id)
+                  .map((thread) => (
+                    <ThreadLink
+                      key={thread.threadId}
+                      thread={thread}
+                      onOpen={openThread}
+                      onHandBack={handBack}
+                      busy={pending !== null}
+                    />
+                  ))}
+              </div>
+            );
+          })}
           {unlinked.map((thread) => (
             <ThreadLink
               key={thread.threadId}
@@ -722,102 +802,86 @@ function NotebookPanel({
             ))}
           </NotebookSection>
         ) : null}
-        <NotebookSection title="Routines">
-          {notebook.routines.length === 0 ? (
-            <p className="text-xs text-muted-foreground">None.</p>
-          ) : (
-            notebook.routines.map((routine) => (
-              <div key={routine.id} className="flex min-w-0 items-center gap-2">
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm">{routine.title}</div>
-                  <div className="truncate text-xs text-muted-foreground">
-                    {scheduleLabel(routine.schedule)}
-                    {routine.nextDueAt
-                      ? ` · next ${new Date(routine.nextDueAt).toLocaleString()}`
-                      : ""}
-                  </div>
+        <NotebookSection title="Routines" empty={notebook.routines.length === 0}>
+          {notebook.routines.map((routine) => (
+            <div key={routine.id} className="flex min-w-0 items-center gap-2">
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-sm">{routine.title}</div>
+                <div className="truncate text-xs text-muted-foreground">
+                  {scheduleLabel(routine.schedule)}
+                  {routine.nextDueAt
+                    ? ` · next ${new Date(routine.nextDueAt).toLocaleString()}`
+                    : ""}
                 </div>
-                <Button
-                  size="xs"
-                  variant="outline"
-                  disabled={pending !== null}
-                  onClick={() => runNow(routine.id)}
-                >
-                  Run now
-                </Button>
               </div>
-            ))
-          )}
-        </NotebookSection>
-        <NotebookSection title="Notes">
-          {detail.notes.length === 0 ? (
-            <p className="text-xs text-muted-foreground">None.</p>
-          ) : (
-            detail.notes.map((note) => (
-              <button
-                key={note.name}
-                type="button"
-                onClick={() => setOpenFile({ kind: "note", name: note.name, title: note.name })}
-                className="flex min-w-0 items-center gap-1.5 text-left text-sm hover:text-foreground"
+              <Button
+                size="xs"
+                variant="outline"
+                disabled={pending !== null}
+                onClick={() => runNow(routine.id)}
               >
-                <FileTextIcon className="size-3.5 shrink-0 text-muted-foreground" />
-                <span className="min-w-0 flex-1 truncate">{note.name}</span>
-                <span className="shrink-0 text-xs text-muted-foreground">
-                  {formatSince(note.updatedAt)}
-                </span>
-              </button>
-            ))
-          )}
-          <p className="text-xs text-muted-foreground wrap-anywhere">{detail.notesPath}</p>
+                Run now
+              </Button>
+            </div>
+          ))}
         </NotebookSection>
-        <NotebookSection title="Skills">
-          {detail.skills.length === 0 ? (
-            <p className="text-xs text-muted-foreground">
-              None yet. The bot writes one when it works out something it will repeat.
-            </p>
-          ) : (
-            detail.skills.map((skill) => (
-              <button
-                key={skill.path}
-                type="button"
-                onClick={() =>
-                  setOpenFile({
-                    kind: skill.shared ? "shared-skill" : "skill",
-                    name: skill.folder,
-                    title: skill.name,
-                  })
-                }
-                className="flex min-w-0 flex-col text-left hover:text-foreground"
-              >
-                <span className="flex min-w-0 items-center gap-1.5 text-sm">
-                  <span className="min-w-0 flex-1 truncate">{skill.name}</span>
-                  {skill.shared ? (
-                    <span className="shrink-0 text-xs text-muted-foreground">shared</span>
-                  ) : null}
-                </span>
-                {skill.description ? (
-                  <span className="line-clamp-2 text-xs text-muted-foreground">
-                    {skill.description}
-                  </span>
-                ) : null}
-              </button>
-            ))
-          )}
-        </NotebookSection>
-        <NotebookSection title="Memory">
-          {notebook.memory.length === 0 ? (
-            <p className="text-xs text-muted-foreground">None.</p>
-          ) : (
-            <ul className="flex flex-col gap-1 text-sm">
+        <NotebookSection
+          title="Memory"
+          empty={notebook.memory.length === 0 && detail.notes.length === 0}
+          action={<CopyPathButton path={detail.notesPath} />}
+        >
+          {notebook.memory.length > 0 ? (
+            <ul className="flex flex-col gap-1.5 text-sm">
               {notebook.memory.map((note) => (
                 <li key={note.id} className="wrap-anywhere">
                   {note.text}
                 </li>
               ))}
             </ul>
-          )}
+          ) : null}
+          {detail.notes.map((note) => (
+            <button
+              key={note.name}
+              type="button"
+              onClick={() => setOpenFile({ kind: "note", name: note.name, title: note.name })}
+              className="flex min-w-0 items-center gap-1.5 text-left text-sm hover:text-foreground"
+            >
+              <FileTextIcon className="size-3.5 shrink-0 text-muted-foreground" />
+              <span className="min-w-0 flex-1 truncate">{note.name}</span>
+              <span className="shrink-0 text-xs text-muted-foreground">
+                {formatSince(note.updatedAt)}
+              </span>
+            </button>
+          ))}
         </NotebookSection>
-        <RoleEditor key={botId} environmentId={environmentId} botId={botId} role={role} />
+        <NotebookSection title="Skills" empty={detail.skills.length === 0}>
+          {detail.skills.map((skill) => (
+            <button
+              key={skill.path}
+              type="button"
+              onClick={() =>
+                setOpenFile({
+                  kind: skill.shared ? "shared-skill" : "skill",
+                  name: skill.folder,
+                  title: skill.name,
+                })
+              }
+              className="flex min-w-0 flex-col text-left hover:text-foreground"
+            >
+              <span className="flex min-w-0 items-center gap-1.5 text-sm">
+                <span className="min-w-0 flex-1 truncate">{skill.name}</span>
+                {skill.shared ? (
+                  <span className="shrink-0 text-xs text-muted-foreground">shared</span>
+                ) : null}
+              </span>
+              {skill.description ? (
+                <span className="line-clamp-2 text-xs text-muted-foreground">
+                  {skill.description}
+                </span>
+              ) : null}
+            </button>
+          ))}
+        </NotebookSection>
       </div>
       {openFile !== null ? (
         <NoteDialog
@@ -1126,8 +1190,8 @@ function SettingsDialog({
                 />
               </label>
               <p className="text-xs text-muted-foreground">
-                These limit only what the bot does through T3. Its shell and file access follow
-                the permission mode above.
+                These limit only what the bot does through T3. Its shell and file access follow the
+                permission mode above.
               </p>
               {error ? <p className="text-xs text-destructive-foreground">{error}</p> : null}
             </div>
@@ -1196,6 +1260,10 @@ function RoleEditor({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const value = draft ?? role;
+  const cancel = () => {
+    setDraft(null);
+    setError(null);
+  };
 
   const save = async () => {
     setSaving(true);
@@ -1212,25 +1280,48 @@ function RoleEditor({
     setSaving(false);
   };
 
+  if (draft === null) {
+    return (
+      <NotebookSection
+        title="Role"
+        action={
+          <IconAction label="Edit role" onClick={() => setDraft(role)}>
+            <PencilIcon />
+          </IconAction>
+        }
+      >
+        {role.trim() === "" ? (
+          <p className="text-xs text-muted-foreground">
+            Not set. Say what this bot is responsible for and its rules.
+          </p>
+        ) : (
+          <p className="text-sm whitespace-pre-wrap wrap-anywhere">{role}</p>
+        )}
+      </NotebookSection>
+    );
+  }
+
   return (
     <NotebookSection title="Role">
       <Textarea
+        autoFocus
         value={value}
         placeholder="What this bot is responsible for, and its rules. The bot changes it only with your approval."
         onChange={(event) => setDraft(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") cancel();
+        }}
         className="min-h-32"
       />
       {error ? <p className="text-xs text-destructive-foreground">{error}</p> : null}
-      {draft !== null && draft !== role ? (
-        <div className="flex justify-end gap-1.5">
-          <Button size="xs" variant="ghost" onClick={() => setDraft(null)}>
-            Discard
-          </Button>
-          <Button size="xs" disabled={saving} onClick={() => void save()}>
-            Save
-          </Button>
-        </div>
-      ) : null}
+      <div className="flex justify-end gap-1.5">
+        <Button size="xs" variant="ghost" onClick={cancel}>
+          Cancel
+        </Button>
+        <Button size="xs" disabled={saving || draft === role} onClick={() => void save()}>
+          Save
+        </Button>
+      </div>
     </NotebookSection>
   );
 }
