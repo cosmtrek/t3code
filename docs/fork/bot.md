@@ -65,6 +65,7 @@ edit every part of it on the Bots page.
 | Routines | Its own scheduled tasks ("09:00 daily: open PRs and CI"), which it creates and edits itself             |
 | Items    | Concrete work toward a goal: one line each with status, next step, linked threads, and what it waits on |
 | Memory   | Lasting notes, one fact per line, at most 4 KB: preferences, project conventions, past mistakes         |
+| Notes    | Longer Markdown files in the bot's own folder, read when needed; memory lines can point to them         |
 | Skills   | Skill folders (`SKILL.md`) made available to its turns, chosen by the user                              |
 
 Role, goals, routines, and items are written by the bot from the conversation and corrected by the user

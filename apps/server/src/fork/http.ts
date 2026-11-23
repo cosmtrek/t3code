@@ -25,7 +25,7 @@ import { authenticateMediaRequest } from "../auth/http.ts";
 import { requestUrl } from "../requestUrl.ts";
 import { BotRuntime, type BotEvent, type BotRuntimeShape } from "./bot/BotRuntime.ts";
 import * as Bots from "./bot/operations.ts";
-import { authenticateTool, runTool } from "./bot/tools.ts";
+import { answerQuestion, authenticateTool, runTool } from "./bot/tools.ts";
 import type { HubEvent } from "./channels/hub.ts";
 import { InboxRuntime, type InboxRuntimeShape } from "./inbox/InboxRuntime.ts";
 import * as Inbox from "./inbox/operations.ts";
@@ -368,6 +368,36 @@ const routes = (runtime: InboxRuntimeShape, bots: BotRuntimeShape) => {
       `${BOTS}/routine/run`,
       AuthOrchestrationOperateScope,
       body.pipe(Effect.flatMap(Bots.runRoutineNow)),
+    ),
+    route(
+      "GET",
+      `${BOTS}/note`,
+      AuthOrchestrationReadScope,
+      query.pipe(Effect.flatMap(Bots.readNote)),
+    ),
+    route(
+      "POST",
+      `${BOTS}/pause`,
+      AuthOrchestrationOperateScope,
+      body.pipe(Effect.flatMap(Bots.setPaused)),
+    ),
+    route(
+      "POST",
+      `${BOTS}/settings`,
+      AuthOrchestrationOperateScope,
+      body.pipe(Effect.flatMap(Bots.saveSettings)),
+    ),
+    route(
+      "POST",
+      `${BOTS}/thread/handback`,
+      AuthOrchestrationOperateScope,
+      body.pipe(Effect.flatMap(Bots.handBack)),
+    ),
+    route(
+      "POST",
+      `${BOTS}/question/answer`,
+      AuthOrchestrationOperateScope,
+      body.pipe(Effect.flatMap(answerQuestion)),
     ),
     toolRoute(bots),
     eventsRoute(runtime, bots),

@@ -3,7 +3,15 @@
  * the provider's context. Pure, so its shape and caps are tested without a server.
  */
 import { describeSchedule } from "./routines.ts";
-import type { ChatMessage, Goal, Item, MemoryNote, OwnedThread, Routine } from "./store.ts";
+import type {
+  ChatMessage,
+  Goal,
+  Item,
+  MemoryNote,
+  OwnedThread,
+  Question,
+  Routine,
+} from "./store.ts";
 
 /** Chat before the new messages; older chat lives in the work thread or is not needed. */
 export const RECENT_CHAT_LIMIT = 10;
@@ -12,6 +20,8 @@ const MESSAGE_CHARS = 2_000;
 /** Events past this many are counted, not listed. */
 const EVENT_LIMIT = 30;
 const STALE_AFTER_DAYS = 7;
+/** Note files named in the packet; the bot lists the folder for the rest. */
+const NOTES_LISTED = 20;
 
 export interface Notebook {
   readonly goals: ReadonlyArray<Goal>;
@@ -27,6 +37,11 @@ export interface PacketInput {
   /** The tool command, ready to run: the CLI's path and this bot's id. */
   readonly tool: string;
   readonly notebook: Notebook;
+  /** The bot's notes folder and what is in it, newest first. */
+  readonly notesPath: string;
+  readonly notes: ReadonlyArray<{ readonly name: string; readonly bytes: number }>;
+  /** Its questions the user has not answered yet. */
+  readonly questions: ReadonlyArray<Pick<Question, "id" | "text">>;
   /** Messages already answered, oldest first. */
   readonly recentChat: ReadonlyArray<ChatMessage>;
   /** User messages this turn answers, oldest first. */
@@ -121,11 +136,25 @@ export function buildPacket(input: PacketInput): string {
     "- Your conversation here is reset often. Before you stop, write down what you must remember:",
     "  items for work in progress, routines for anything periodic, memory for lasting facts",
     "  (one fact per line; rewrite a note that changed, remove one that no longer holds).",
-    "  The notebook is your only memory: do not keep notes in files or other memory tools.",
+    `- Longer notes (findings, checklists, drafts) go in Markdown files in ${input.notesPath},`,
+    "  read when needed; a memory line can point to one. Keep nothing in other memory tools.",
     "- Do real work in threads you start with `thread start`, not here. They wake you when they",
     "  stop, so start one and end your turn; never wait on it.",
     "",
     renderNotebook(input.notebook),
+    `Notes (${input.notesPath}):`,
+    ...(input.notes.length === 0
+      ? ["  (none)"]
+      : input.notes.slice(0, NOTES_LISTED).map((note) => `  ${note.name} (${note.bytes} bytes)`)),
+    ...(input.questions.length > 0
+      ? [
+          "Waiting for the user's answer:",
+          ...input.questions.map(
+            (question) =>
+              `  question ${question.id}: ${clip(question.text.split("\n", 1)[0]!, 200)}`,
+          ),
+        ]
+      : []),
     ...(stale.length > 0
       ? [
           "",

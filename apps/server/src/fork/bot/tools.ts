@@ -16,18 +16,23 @@ import * as ThreadMessageIntake from "../../orchestration-v2/ThreadMessageIntake
 import * as Project from "../../project/ProjectService.ts";
 import { ForkHttpError } from "../inbox/operations.ts";
 import { BotRuntime } from "./BotRuntime.ts";
+import { decide, QUESTION_TTL_MS } from "./gate.ts";
 import {
   decode,
+  isTerminalRunStatus,
   newId,
+  notify,
   nowIso,
   readNotebook,
   readRole,
+  rolePath,
   runtimeModeFor,
   tokenPath,
+  ROLE_CHARS,
 } from "./operations.ts";
 import { renderNotebook } from "./packet.ts";
 import { describeSchedule, nextDueAt, parseSchedule } from "./routines.ts";
-import type { FollowUp, ItemStatus } from "./store.ts";
+import type { FollowUp, GatedAction, ItemStatus } from "./store.ts";
 
 export const MEMORY_BYTES = 4_096;
 const SAY_CHARS = 20_000;
@@ -39,7 +44,8 @@ const HELP = `t3bot <command> - everything you do goes through these.
 
   say <text> | say -             post to your chat with the user (- reads stdin)
   notebook                       print your goals, items, threads, routines, memory
-  role                           print your role (only the user edits it)
+  role                           print your role
+  role edit -                    replace your role with stdin; the user may have to approve
 
   goal add <title> | goal edit <id> <title> | goal done <id>
   item add [--goal <id>] [--note <next step>] <title>
@@ -61,7 +67,10 @@ const HELP = `t3bot <command> - everything you do goes through these.
                routine = never, read it on your next routine
   thread send <thread> <text>    message a thread you own, unless the user took it over
   thread read <thread> [--limit n]
-  thread list`;
+  thread list
+
+Some actions need the user's approval. Then the command does not run: it becomes a question in
+your chat, and approving it runs exactly that command. You hear the answer on a later turn.`;
 
 interface Parsed {
   readonly positional: ReadonlyArray<string>;
@@ -133,11 +142,46 @@ export const authenticateTool = Effect.fn("ForkBot.authenticateTool")(function* 
   return request;
 });
 
-export const runTool = Effect.fn("ForkBot.runTool")(function* (input: {
+export interface ToolCall {
   readonly bot: string;
   readonly argv: ReadonlyArray<string>;
   readonly stdin: string;
-}) {
+  /** The user approved exactly this call: it runs without asking again. */
+  readonly approved?: boolean;
+}
+
+/**
+ * Null when the call may run now. Otherwise it is refused, or stored as a question whose answer
+ * runs this exact call, and the bot is told so.
+ */
+const gate = Effect.fn("ForkBot.gate")(function* (
+  call: ToolCall,
+  action: GatedAction,
+  overBudget: boolean,
+  what: string,
+  detail: string,
+) {
+  if (call.approved === true) return null;
+  const runtime = yield* BotRuntime;
+  const store = runtime.store();
+  const bot = store.getBot(call.bot)!;
+  const decision = decide({ settings: bot.settings, action, overBudget });
+  if (decision === "allow") return null;
+  if (decision === "deny") return yield* fail(`The user does not let you ${what}.`);
+  const now = Date.now();
+  const id = store.addQuestion({
+    botId: call.bot,
+    text: detail === "" ? what : `${what}\n\n${detail}`,
+    argv: call.argv,
+    stdin: call.stdin,
+    createdAt: new Date(now).toISOString(),
+    expiresAt: new Date(now + QUESTION_TTL_MS).toISOString(),
+  });
+  runtime.publish(call.bot);
+  return `Not done yet: the user must approve this (question ${id}). Approving runs exactly this command; you hear the answer on a later turn, and the question lapses after 24 hours. Say why you need it in your reply, then end your turn.`;
+});
+
+export const runTool = Effect.fn("ForkBot.runTool")(function* (input: ToolCall) {
   const { positional, flags } = parseArgs(input.argv);
   const [command, sub, ...rest] = positional;
   const botId = input.bot;
@@ -163,8 +207,18 @@ export const runTool = Effect.fn("ForkBot.runTool")(function* (input: {
     }
     case "notebook":
       return renderNotebook(yield* readNotebook(botId));
-    case "role":
-      return (yield* readRole(runtime.botsDir, botId)) || "(no role yet)";
+    case "role": {
+      if (sub === undefined) return (yield* readRole(runtime.botsDir, botId)) || "(no role yet)";
+      if (sub !== "edit") return yield* fail("role | role edit -");
+      const role = textOf(rest, input.stdin);
+      if (role === "" || role.length > ROLE_CHARS) {
+        return yield* fail(`Give the whole role on stdin, under ${ROLE_CHARS} characters.`);
+      }
+      const asked = yield* gate(input, "role.edit", false, "replace its role", role);
+      if (asked !== null) return asked;
+      yield* Effect.promise(() => NodeFSP.writeFile(rolePath(runtime.botsDir, botId), role));
+      return touched("Role replaced.");
+    }
     case "goal": {
       if (sub === "add") {
         const title = textOf(rest, input.stdin);
@@ -270,7 +324,7 @@ export const runTool = Effect.fn("ForkBot.runTool")(function* (input: {
       return yield* fail("memory add | edit | remove");
     }
     case "thread":
-      return yield* threadCommand(botId, sub, rest, flags, input.stdin);
+      return yield* threadCommand(input, sub, rest, flags);
     default:
       return yield* fail(`Unknown command "${command}". Run help.`);
   }
@@ -335,10 +389,14 @@ const routineCommand = Effect.fn("ForkBot.routineCommand")(function* (
   return `Routine ${id} updated.`;
 });
 
-/** A thread is the user's once they type in it; messages T3 writes with the user role do not count. */
-const takenOverByUser = Effect.fn("ForkBot.takenOverByUser")(function* (
+/**
+ * A thread is the user's once they type in it after the bot last had it; messages T3 writes with
+ * the user role do not count.
+ */
+export const takenOverByUser = Effect.fn("ForkBot.takenOverByUser")(function* (
   projectId: string,
   threadId: string,
+  handedBackAt: string | null,
 ) {
   const threads = yield* ThreadManagement.ThreadManagementService;
   const records = yield* threads
@@ -356,6 +414,8 @@ const takenOverByUser = Effect.fn("ForkBot.takenOverByUser")(function* (
     .at(-1);
   return (
     latest !== undefined &&
+    (handedBackAt === null ||
+      DateTime.toEpochMillis(latest.createdAt) > Date.parse(handedBackAt)) &&
     latest.createdBy === "user" &&
     latest.notification === undefined &&
     latest.delegatedCompletion === undefined &&
@@ -364,12 +424,13 @@ const takenOverByUser = Effect.fn("ForkBot.takenOverByUser")(function* (
 });
 
 const threadCommand = Effect.fn("ForkBot.threadCommand")(function* (
-  botId: string,
+  call: ToolCall,
   sub: string | undefined,
   rest: ReadonlyArray<string>,
   flags: ReadonlyMap<string, string>,
-  stdin: string,
 ) {
+  const botId = call.bot;
+  const stdin = call.stdin;
   const runtime = yield* BotRuntime;
   const threads = yield* ThreadManagement.ThreadManagementService;
   const store = runtime.store();
@@ -420,6 +481,18 @@ const threadCommand = Effect.fn("ForkBot.threadCommand")(function* (
       model: flags.get("model") ?? (flags.has("provider") ? "" : bot.modelSelection.model),
     } as ModelSelection;
     if (modelSelection.model === "") return yield* fail("With --provider, give --model too.");
+    const running = store
+      .listThreads(botId)
+      .filter((thread) => !thread.takenOver && !isTerminalRunStatus(thread.status as never)).length;
+    const overBudget = running >= bot.settings.maxThreads;
+    const asked = yield* gate(
+      call,
+      "thread.start",
+      overBudget,
+      `start a thread in ${project.title}${overBudget ? ` (${running} of its ${bot.settings.maxThreads} threads already run)` : ""}`,
+      prompt,
+    );
+    if (asked !== null) return asked;
     const commandId = CommandId.make(newId("fork-bot"));
     const launched = yield* ThreadMessageIntake.launchThread({
       commandId,
@@ -466,11 +539,27 @@ const threadCommand = Effect.fn("ForkBot.threadCommand")(function* (
   if (sub === "send") {
     const owned = store.listThreads(botId).find((thread) => thread.threadId === threadId);
     if (owned === undefined) return yield* fail("You can only message threads you started.");
-    if (yield* takenOverByUser(owned.projectId, threadId)) {
-      return yield* fail("The user took this thread over; leave it to them.");
+    if (
+      owned.takenOver ||
+      (yield* takenOverByUser(owned.projectId, threadId, owned.handedBackAt))
+    ) {
+      return yield* fail(
+        "The user took this thread over; leave it to them until they hand it back.",
+      );
     }
     const text = textOf(rest.slice(1), stdin);
     if (text === "") return yield* fail("Write the message.");
+    const title = (yield* readNotebook(botId)).threads.find(
+      (thread) => thread.threadId === threadId,
+    )?.title;
+    const asked = yield* gate(
+      call,
+      "thread.send",
+      false,
+      `message its thread "${title ?? threadId}"`,
+      text,
+    );
+    if (asked !== null) return asked;
     const sent = yield* threads
       .sendToThread({
         projectId: ProjectId.make(owned.projectId),
@@ -522,4 +611,62 @@ const threadCommand = Effect.fn("ForkBot.threadCommand")(function* (
   }
 
   return yield* fail("thread start | send | read | list");
+});
+
+const AnswerInput = Schema.Struct({
+  botId: Schema.String,
+  questionId: Schema.Number,
+  approve: Schema.Boolean,
+});
+
+/**
+ * The user's answer to a question. Approving claims it once and runs the stored call, whose own
+ * checks (ownership, takeover) run again; the bot hears the outcome on its next turn.
+ */
+export const answerQuestion = Effect.fn("ForkBot.answerQuestion")(function* (input: unknown) {
+  const runtime = yield* BotRuntime;
+  const decoded = yield* decode(AnswerInput, input);
+  const store = runtime.existingStore();
+  const question =
+    store?.answerQuestion(
+      decoded.botId,
+      decoded.questionId,
+      decoded.approve ? "approved" : "declined",
+      nowIso(),
+    ) ?? null;
+  if (question === null) {
+    return yield* new ForkHttpError({
+      status: 409,
+      code: "question_closed",
+      detail: "That question was already answered or has lapsed.",
+    });
+  }
+  if (!decoded.approve) {
+    yield* notify(
+      question.botId,
+      `The user declined your question ${question.id}; it did not run.`,
+      true,
+    );
+    return {};
+  }
+  const outcome = yield* runTool({
+    bot: question.botId,
+    argv: question.argv,
+    stdin: question.stdin,
+    approved: true,
+  }).pipe(
+    Effect.map((output) => ({ ok: true, output })),
+    Effect.catchTags({
+      ForkHttpError: (error) => Effect.succeed({ ok: false, output: error.detail }),
+    }),
+  );
+  store!.setQuestionResult(question.id, outcome.output);
+  yield* notify(
+    question.botId,
+    outcome.ok
+      ? `The user approved your question ${question.id}, and it ran: ${outcome.output}`
+      : `The user approved your question ${question.id}, but it failed: ${outcome.output}`,
+    true,
+  );
+  return { ok: outcome.ok, output: outcome.output };
 });

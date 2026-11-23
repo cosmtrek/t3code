@@ -99,6 +99,8 @@ bots/
   <botId>/
     role.md        # the bot's role and rules, prose the user and the bot both edit
     token          # per-bot tool token, mode 0600
+    workspace/     # its work thread's folder; deleted with the bot
+      notes/       # longer notes the bot writes with its shell, listed in every packet
   bin/t3bot        # the tool CLI, written by the server at startup
 ```
 
@@ -195,7 +197,7 @@ was down are not delivered. The queue, the running turn, and pending questions a
    bot's chat and leaves the queue for the next wake.
 
 **One work thread per bot.** It is launched once, in the scratch project so it has no project,
-and stays. When it grows past a message limit, or on the first turn of a new day, the turn is sent
+with the bot's own `workspace/` as its folder, and stays. When it grows past a message limit, or on the first turn of a new day, the turn is sent
 with `freshContext: true`, which starts a new provider session in the same thread. Nothing is
 lost, because every packet starts from the notebook. The thread never needs settling and adds one
 row to the sidebar per bot.

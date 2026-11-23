@@ -300,7 +300,26 @@ export interface BotSummary {
   readonly name: string;
   readonly modelSelection: ModelSelection;
   readonly working: boolean;
+  readonly paused: boolean;
   readonly lastMessage: Pick<BotChatMessage, "role" | "text" | "createdAt"> | null;
+}
+
+export type BotPermission = "allow" | "ask" | "deny";
+export type BotGatedAction = "role.edit" | "thread.start" | "thread.send";
+
+export interface BotSettings {
+  readonly permissions: Readonly<Record<BotGatedAction, BotPermission>>;
+  readonly turnsPerDay: number;
+  readonly maxThreads: number;
+}
+
+/** An action the bot asked to take; approving runs exactly it. */
+export interface BotQuestion {
+  readonly id: number;
+  /** What it would do, then a blank line and the details (prompt, message, role). */
+  readonly text: string;
+  readonly createdAt: string;
+  readonly expiresAt: string;
 }
 
 export interface BotChatMessage {
@@ -318,12 +337,24 @@ export interface BotDetail {
     readonly name: string;
     readonly modelSelection: ModelSelection;
     readonly workThreadId: string | null;
+    readonly paused: boolean;
+    readonly settings: BotSettings;
+    readonly lastTurnDay: string | null;
+    readonly turnsToday: number;
   };
   readonly role: string;
   readonly working: boolean;
   /** Oldest first. */
   readonly chat: ReadonlyArray<BotChatMessage>;
   readonly notebook: BotNotebook;
+  readonly questions: ReadonlyArray<BotQuestion>;
+  /** The folder the bot keeps longer notes in, and its files, newest first. */
+  readonly notesPath: string;
+  readonly notes: ReadonlyArray<{
+    readonly name: string;
+    readonly bytes: number;
+    readonly updatedAt: string;
+  }>;
 }
 
 export interface BotNotebook {
@@ -346,6 +377,8 @@ export interface BotNotebook {
     readonly itemId: number | null;
     readonly follow: "now" | "attention" | "routine";
     readonly title: string | null;
+    /** The user typed in it; it is theirs until they hand it back. */
+    readonly takenOver: boolean;
   }>;
   readonly routines: ReadonlyArray<{
     readonly id: number;

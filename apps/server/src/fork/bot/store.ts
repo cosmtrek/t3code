@@ -19,7 +19,38 @@ export interface Bot {
   readonly workProjectId: string | null;
   /** The local day of its last turn; a new day starts a fresh provider session. */
   readonly lastTurnDay: string | null;
+  /** Turns started on `lastTurnDay`. */
+  readonly turnsToday: number;
+  readonly paused: boolean;
+  readonly settings: BotSettings;
 }
+
+export type Permission = "allow" | "ask" | "deny";
+/** The actions the user can allow, have the bot ask for, or deny. */
+export const GATED_ACTIONS = ["role.edit", "thread.start", "thread.send"] as const;
+export type GatedAction = (typeof GATED_ACTIONS)[number];
+
+export interface BotSettings {
+  readonly permissions: Readonly<Record<GatedAction, Permission>>;
+  readonly turnsPerDay: number;
+  /** Threads it started that may run at once; starting one more asks. */
+  readonly maxThreads: number;
+}
+
+const DEFAULT_SETTINGS: BotSettings = {
+  permissions: { "role.edit": "ask", "thread.start": "allow", "thread.send": "allow" },
+  turnsPerDay: 100,
+  maxThreads: 3,
+};
+
+const toSettings = (value: string): BotSettings => {
+  const parsed = JSON.parse(value) as Partial<BotSettings>;
+  return {
+    permissions: { ...DEFAULT_SETTINGS.permissions, ...parsed.permissions },
+    turnsPerDay: parsed.turnsPerDay ?? DEFAULT_SETTINGS.turnsPerDay,
+    maxThreads: parsed.maxThreads ?? DEFAULT_SETTINGS.maxThreads,
+  };
+};
 
 export type ChatRole = "user" | "bot" | "error";
 
@@ -90,6 +121,29 @@ export interface OwnedThread {
   readonly itemId: number | null;
   readonly follow: FollowUp;
   readonly createdAt: string;
+  /** The status of its latest run, as last seen. */
+  readonly status: string;
+  /** `<runId>:<status>` and the request id already reported, so nothing is reported twice. */
+  readonly lastRunKey: string | null;
+  readonly lastRequestId: string | null;
+  /** The user typed in it: theirs until they hand it back. */
+  readonly takenOver: boolean;
+  readonly handedBackAt: string | null;
+}
+
+export type QuestionStatus = "open" | "approved" | "declined" | "expired";
+
+/** An action the bot asked to take; approving runs exactly this tool call. */
+export interface Question {
+  readonly id: number;
+  readonly botId: string;
+  readonly text: string;
+  readonly argv: ReadonlyArray<string>;
+  readonly stdin: string;
+  readonly status: QuestionStatus;
+  readonly createdAt: string;
+  readonly expiresAt: string;
+  readonly result: string | null;
 }
 
 /** Something that happened, waiting for the bot's next turn. */
@@ -175,6 +229,24 @@ const MIGRATIONS: ReadonlyArray<string> = [
      wakes INTEGER NOT NULL,
      created_at TEXT NOT NULL
    );`,
+  `ALTER TABLE bots ADD COLUMN turns_today INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE bots ADD COLUMN paused INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE bots ADD COLUMN settings TEXT NOT NULL DEFAULT '{}';
+   ALTER TABLE threads ADD COLUMN status TEXT NOT NULL DEFAULT 'running';
+   ALTER TABLE threads ADD COLUMN last_run_key TEXT;
+   ALTER TABLE threads ADD COLUMN last_request_id TEXT;
+   ALTER TABLE threads ADD COLUMN taken_over INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE threads ADD COLUMN handed_back_at TEXT;
+   CREATE TABLE questions (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     bot_id TEXT NOT NULL,
+     text TEXT NOT NULL,
+     action TEXT NOT NULL,
+     status TEXT NOT NULL CHECK (status IN ('open', 'approved', 'declined', 'expired')),
+     created_at TEXT NOT NULL,
+     expires_at TEXT NOT NULL,
+     result TEXT
+   );`,
 ];
 
 type Row = Record<string, NodeSqlite.SQLOutputValue>;
@@ -191,6 +263,9 @@ function toBot(row: Row): Bot {
     workThreadId: nullableText(row, "work_thread_id"),
     workProjectId: nullableText(row, "work_project_id"),
     lastTurnDay: nullableText(row, "last_turn_day"),
+    turnsToday: Number(row.turns_today),
+    paused: Number(row.paused) === 1,
+    settings: toSettings(text(row, "settings")),
   };
 }
 
@@ -248,7 +323,27 @@ const toThread = (row: Row): OwnedThread => ({
   itemId: row.item_id === null ? null : Number(row.item_id),
   follow: text(row, "follow") as FollowUp,
   createdAt: text(row, "created_at"),
+  status: text(row, "status"),
+  lastRunKey: nullableText(row, "last_run_key"),
+  lastRequestId: nullableText(row, "last_request_id"),
+  takenOver: Number(row.taken_over) === 1,
+  handedBackAt: nullableText(row, "handed_back_at"),
 });
+
+const toQuestion = (row: Row): Question => {
+  const action = JSON.parse(text(row, "action")) as { argv: string[]; stdin: string };
+  return {
+    id: Number(row.id),
+    botId: text(row, "bot_id"),
+    text: text(row, "text"),
+    argv: action.argv,
+    stdin: action.stdin,
+    status: text(row, "status") as QuestionStatus,
+    createdAt: text(row, "created_at"),
+    expiresAt: text(row, "expires_at"),
+    result: nullableText(row, "result"),
+  };
+};
 
 const toQueued = (row: Row): QueuedEvent => ({
   id: Number(row.id),
@@ -326,6 +421,7 @@ export class BotStore {
         "routines",
         "threads",
         "queue",
+        "questions",
       ]) {
         this.db.prepare(`DELETE FROM ${table} WHERE bot_id = ?`).run(id);
       }
@@ -333,8 +429,21 @@ export class BotStore {
     });
   }
 
-  setLastTurnDay(id: string, day: string) {
-    this.db.prepare("UPDATE bots SET last_turn_day = ? WHERE id = ?").run(day, id);
+  /** Counts a turn on `day`, starting the count over on a new day. */
+  countTurn(id: string, day: string) {
+    this.db
+      .prepare(
+        "UPDATE bots SET turns_today = CASE WHEN last_turn_day = ? THEN turns_today + 1 ELSE 1 END, last_turn_day = ? WHERE id = ?",
+      )
+      .run(day, day, id);
+  }
+
+  setPaused(id: string, paused: boolean) {
+    this.db.prepare("UPDATE bots SET paused = ? WHERE id = ?").run(paused ? 1 : 0, id);
+  }
+
+  setSettings(id: string, settings: BotSettings) {
+    this.db.prepare("UPDATE bots SET settings = ? WHERE id = ?").run(JSON.stringify(settings), id);
   }
 
   setWorkThread(id: string, threadId: string, projectId: string) {
@@ -616,7 +725,42 @@ export class BotStore {
     ).map(toThread);
   }
 
-  addThread(thread: OwnedThread) {
+  getThread(threadId: string): OwnedThread | null {
+    const row = this.db.prepare("SELECT * FROM threads WHERE thread_id = ?").get(threadId) as
+      | Row
+      | undefined;
+    return row ? toThread(row) : null;
+  }
+
+  updateThread(
+    threadId: string,
+    patch: Partial<
+      Pick<OwnedThread, "status" | "lastRunKey" | "lastRequestId" | "takenOver" | "handedBackAt">
+    >,
+  ) {
+    const thread = this.getThread(threadId);
+    if (thread === null) return;
+    const next = { ...thread, ...patch };
+    this.db
+      .prepare(
+        "UPDATE threads SET status = ?, last_run_key = ?, last_request_id = ?, taken_over = ?, handed_back_at = ? WHERE thread_id = ?",
+      )
+      .run(
+        next.status,
+        next.lastRunKey,
+        next.lastRequestId,
+        next.takenOver ? 1 : 0,
+        next.handedBackAt,
+        threadId,
+      );
+  }
+
+  addThread(
+    thread: Pick<
+      OwnedThread,
+      "threadId" | "botId" | "projectId" | "itemId" | "follow" | "createdAt"
+    >,
+  ) {
     this.db
       .prepare(
         "INSERT INTO threads (thread_id, bot_id, project_id, item_id, follow, created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -643,5 +787,61 @@ export class BotStore {
     return (
       this.db.prepare("SELECT * FROM queue WHERE bot_id = ? ORDER BY id").all(botId) as Row[]
     ).map(toQueued);
+  }
+
+  // Questions
+
+  addQuestion(
+    question: Pick<Question, "botId" | "text" | "argv" | "stdin" | "createdAt" | "expiresAt">,
+  ): number {
+    return Number(
+      this.db
+        .prepare(
+          "INSERT INTO questions (bot_id, text, action, status, created_at, expires_at) VALUES (?, ?, ?, 'open', ?, ?)",
+        )
+        .run(
+          question.botId,
+          question.text,
+          JSON.stringify({ argv: question.argv, stdin: question.stdin }),
+          question.createdAt,
+          question.expiresAt,
+        ).lastInsertRowid,
+    );
+  }
+
+  openQuestions(botId: string): ReadonlyArray<Question> {
+    return (
+      this.db
+        .prepare("SELECT * FROM questions WHERE bot_id = ? AND status = 'open' ORDER BY id")
+        .all(botId) as Row[]
+    ).map(toQuestion);
+  }
+
+  /** Claims an open, unexpired question once; null when it was answered or has expired. */
+  answerQuestion(botId: string, id: number, status: "approved" | "declined", at: string) {
+    const claimed = this.db
+      .prepare(
+        "UPDATE questions SET status = ? WHERE id = ? AND bot_id = ? AND status = 'open' AND expires_at > ?",
+      )
+      .run(status, id, botId, at);
+    if (Number(claimed.changes) === 0) return null;
+    const row = this.db.prepare("SELECT * FROM questions WHERE id = ?").get(id) as Row;
+    return toQuestion(row);
+  }
+
+  setQuestionResult(id: number, result: string) {
+    this.db.prepare("UPDATE questions SET result = ? WHERE id = ?").run(result, id);
+  }
+
+  /** Expires open questions past their time and returns them. */
+  expireQuestions(at: string): ReadonlyArray<Question> {
+    const due = (
+      this.db
+        .prepare("SELECT * FROM questions WHERE status = 'open' AND expires_at <= ?")
+        .all(at) as Row[]
+    ).map(toQuestion);
+    const expire = this.db.prepare("UPDATE questions SET status = 'expired' WHERE id = ?");
+    for (const question of due) expire.run(question.id);
+    return due;
   }
 }

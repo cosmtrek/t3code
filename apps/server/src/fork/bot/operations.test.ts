@@ -21,9 +21,9 @@ import * as DocumentText from "../../provider/DocumentText.ts";
 import { ManagedProjectFolders } from "../../project/ManagedProjectFolders.ts";
 import * as ProviderRegistry from "../../provider/ProviderRegistry.ts";
 import { BotRuntime, type BotRuntimeShape } from "./BotRuntime.ts";
-import { followThreads } from "./events.ts";
+import { followThreads, reconcileThreads } from "./events.ts";
 import * as Bots from "./operations.ts";
-import { MEMORY_BYTES, runTool } from "./tools.ts";
+import { answerQuestion, MEMORY_BYTES, runTool } from "./tools.ts";
 import { BotStore } from "./store.ts";
 
 const MODEL = { instanceId: "claudeAgent", model: "claude-haiku-5-5" };
@@ -38,6 +38,10 @@ interface Harness {
   /** Runs and their assistant replies, as T3 would answer for them. */
   readonly runStatus: Map<string, OrchestrationV2RunStatus>;
   readonly replies: Map<string, string>;
+  /** Thread shells, as reconcile reads them after a restart. */
+  readonly shells: Map<string, { latestRunId: string; status: string }>;
+  /** Messages typed with the user role in a thread, for the takeover check. */
+  readonly userMessages: Map<string, Array<{ createdBy: string; createdAt: DateTime.Utc }>>;
   readonly layer: Layer.Layer<HarnessServices>;
 }
 
@@ -75,6 +79,8 @@ async function harness(store = new BotStore(":memory:")): Promise<Harness> {
   const runs: Array<{ threadId: string; runId: string }> = [];
   const runStatus = new Map<string, OrchestrationV2RunStatus>();
   const replies = new Map<string, string>();
+  const shells = new Map<string, { latestRunId: string; status: string }>();
+  const userMessages = new Map<string, Array<{ createdBy: string; createdAt: DateTime.Utc }>>();
   const nextRun = (threadId: string) => {
     const runId = `run-${runs.length + 1}`;
     runs.push({ threadId, runId });
@@ -93,14 +99,25 @@ async function harness(store = new BotStore(":memory:")): Promise<Harness> {
         packets.push(input.text);
         return Effect.succeed({ run: { id: nextRun(input.threadId) } } as never);
       },
-      getProjectThreadRecords: (_input, _fields, filter) =>
+      getThreadShell: (threadId) => {
+        const shell = shells.get(threadId);
+        return shell === undefined
+          ? Effect.fail("missing" as never)
+          : Effect.succeed({ ...shell, pendingRuntimeRequest: null } as never);
+      },
+      getProjectThreadRecords: (input, _fields, filter) =>
         Effect.succeed({
           runs: (filter?.runIds ?? []).flatMap((id) =>
             runStatus.has(id) ? [{ id, status: runStatus.get(id) }] : [],
           ),
-          messages: (filter?.messageRunIds ?? []).flatMap((id) =>
-            replies.has(id) ? [{ text: replies.get(id), createdAt: DateTime.makeUnsafe(0) }] : [],
-          ),
+          messages:
+            filter?.messageRunIds === undefined
+              ? (userMessages.get(input.threadId) ?? [])
+              : filter.messageRunIds.flatMap((id) =>
+                  replies.has(id)
+                    ? [{ text: replies.get(id), createdAt: DateTime.makeUnsafe(0) }]
+                    : [],
+                ),
         } as never),
     }),
     Layer.mock(ThreadLaunch.ThreadLaunchService)({
@@ -123,7 +140,7 @@ async function harness(store = new BotStore(":memory:")): Promise<Harness> {
     Layer.succeed(ServerConfig.ServerConfig, {} as never),
     FileSystem.layerNoop({}),
   );
-  return { runtime, packets, runs, runStatus, replies, layer };
+  return { runtime, packets, runs, runStatus, replies, shells, userMessages, layer };
 }
 
 const chatOf = (h: Harness, botId: string) =>
@@ -145,7 +162,14 @@ const withHarness = <E>(
   store?: BotStore,
 ) =>
   Effect.promise(() => harness(store)).pipe(
-    Effect.flatMap((h) => program(h).pipe(Effect.provide(h.layer))),
+    Effect.flatMap((h) =>
+      program(h).pipe(
+        Effect.provide(h.layer),
+        Effect.ensuring(
+          Effect.promise(() => NodeFSP.rm(h.runtime.botsDir, { recursive: true, force: true })),
+        ),
+      ),
+    ),
   );
 
 describe("bot turns", () => {
@@ -301,5 +325,126 @@ describe("bot turns", () => {
         ).toEqual(["The user is in UTC+8."]);
       }),
     ),
+  );
+
+  it.effect(
+    "asks before a gated action, runs exactly that call once approved, and lets it lapse",
+    () =>
+      withHarness((h) =>
+        Effect.gen(function* () {
+          const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+          const store = h.runtime.store();
+          const roleOf = () => NodeFSP.readFile(Bots.rolePath(h.runtime.botsDir, botId), "utf8");
+          const edit = (role: string) =>
+            runTool({ bot: botId, argv: ["role", "edit", "-"], stdin: role });
+
+          // Editing its role asks by default: nothing changes until the user approves.
+          expect(yield* edit("Watch CI.")).toContain("the user must approve");
+          const [question] = store.openQuestions(botId);
+          expect(question?.text).toContain("Watch CI.");
+          expect(yield* Effect.promise(() => roleOf().catch(() => ""))).toBe("");
+          yield* answerQuestion({ botId, questionId: question!.id, approve: true });
+          expect(yield* Effect.promise(roleOf)).toBe("Watch CI.");
+          // The answer wakes the bot.
+          expect(h.packets.at(-1)).toContain(
+            "approved your question 1, and it ran: Role replaced.",
+          );
+          // A question is answered once.
+          const again = yield* Effect.flip(
+            answerQuestion({ botId, questionId: question!.id, approve: true }),
+          );
+          expect(again.code).toBe("question_closed");
+
+          // Unanswered, it lapses after a day and its action never runs.
+          yield* edit("Watch nothing.");
+          // Well past its 24 hours.
+          yield* Bots.fireDueRoutines(new Date(2100, 0, 1));
+          expect(store.openQuestions(botId)).toEqual([]);
+          expect(store.queued(botId).at(-1)?.text).toContain("lapsed unanswered");
+          expect(yield* Effect.promise(roleOf)).toBe("Watch CI.");
+
+          // Denied, it is refused outright.
+          yield* Bots.saveSettings({
+            botId,
+            settings: { permissions: { "role.edit": "deny" }, turnsPerDay: 100, maxThreads: 3 },
+          });
+          const denied = yield* Effect.flip(edit("Anything."));
+          expect(denied.detail).toContain("does not let you replace its role");
+        }),
+      ),
+  );
+
+  it.effect("holds turns while paused and past the day's budget, saying so once", () =>
+    withHarness((h) =>
+      Effect.gen(function* () {
+        const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+        yield* Bots.setPaused({ botId, paused: true });
+        yield* Bots.sendMessage({ botId, text: "Hi" });
+        expect(h.runs).toHaveLength(0);
+        yield* Bots.setPaused({ botId, paused: false });
+        expect(h.runs).toHaveLength(1);
+
+        yield* Bots.saveSettings({
+          botId,
+          settings: { permissions: {}, turnsPerDay: 1, maxThreads: 3 },
+        });
+        yield* endRun(h, botId, 0, "Hello.");
+        yield* Bots.sendMessage({ botId, text: "Still there?" });
+        yield* Bots.sendMessage({ botId, text: "Hello?" });
+        expect(h.runs).toHaveLength(1);
+        expect(chatOf(h, botId).filter(([role]) => role === "error")).toEqual([
+          [
+            "error",
+            "Bot used its 1 turns for today. What happens meanwhile waits for tomorrow, or raise its budget.",
+          ],
+        ]);
+      }),
+    ),
+  );
+
+  it.effect(
+    "reports what its thread did while the server was down once, and leaves a thread the user took over until handed back",
+    () =>
+      withHarness((h) =>
+        Effect.gen(function* () {
+          const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+          const store = h.runtime.store();
+          for (const threadId of ["t-down", "t-taken"]) {
+            store.addThread({
+              threadId,
+              botId,
+              projectId: "p",
+              itemId: null,
+              follow: "attention",
+              createdAt: "t0",
+            });
+            h.runtime.ownedThreads.set(threadId, botId);
+          }
+          h.shells.set("t-down", { latestRunId: "r1", status: "failed" });
+          yield* reconcileThreads();
+          yield* reconcileThreads();
+          expect(h.runs).toHaveLength(1);
+          expect(h.packets[0]).toContain("Thread t-down failed");
+
+          // The user types in a bot's thread: it is theirs, and its end wakes nobody.
+          h.userMessages.set("t-taken", [{ createdBy: "user", createdAt: DateTime.makeUnsafe(0) }]);
+          const run = (status: string) =>
+            ({ type: "run.updated", threadId: "t-taken", payload: { id: "r2", status } }) as never;
+          yield* followThreads(Stream.make(run("running"), run("failed")));
+          expect(store.getThread("t-taken")?.takenOver).toBe(true);
+          expect(store.queued(botId).map((event) => event.text)).toEqual([
+            expect.stringContaining("The user took over thread t-taken"),
+          ]);
+          const refused = yield* Effect.flip(
+            runTool({ bot: botId, argv: ["thread", "send", "t-taken", "Carry on"], stdin: "" }),
+          );
+          expect(refused.detail).toContain("took this thread over");
+
+          yield* Bots.handBack({ botId, threadId: "t-taken" });
+          expect(store.getThread("t-taken")?.takenOver).toBe(false);
+          expect(store.queued(botId).at(-1)).toMatchObject({ wakes: true });
+          expect(store.queued(botId).at(-1)?.text).toContain("handed thread t-taken back");
+        }),
+      ),
   );
 });

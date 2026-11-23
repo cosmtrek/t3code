@@ -3,13 +3,18 @@ import { useNavigate } from "@tanstack/react-router";
 import {
   BotIcon,
   EllipsisIcon,
+  FileTextIcon,
   MessageSquareIcon,
+  PauseIcon,
+  PlayIcon,
   PlusIcon,
+  ShieldIcon,
   SquareArrowOutUpRightIcon,
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
 import ChatMarkdown from "../../components/ChatMarkdown";
+import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import {
   Dialog,
@@ -45,7 +50,16 @@ import { DelegateModelPicker } from "../inbox/DelegateDialog";
 import { PaneHeader } from "../inbox/PaneHeader";
 import { ReplyBox, useSendKey } from "../inbox/ReplyBox";
 import { formatSince } from "../presentation";
-import type { BotChatMessage, BotDetail, BotNotebook, BotSummary } from "../types";
+import type {
+  BotChatMessage,
+  BotDetail,
+  BotGatedAction,
+  BotNotebook,
+  BotPermission,
+  BotQuestion,
+  BotSettings,
+  BotSummary,
+} from "../types";
 import { useForkResource, type ForkEvent } from "../useForkResource";
 
 const ENVIRONMENT_STORAGE_KEY = "t3code:bots-environment";
@@ -199,11 +213,13 @@ function EnvironmentBots({
               <span className="min-w-0 flex-1">
                 <span className="block truncate text-sm">{candidate.name}</span>
                 <span className="block truncate text-xs text-muted-foreground">
-                  {candidate.working
-                    ? "Working…"
-                    : candidate.lastMessage
-                      ? candidate.lastMessage.text.replace(/[`*_#>]/g, "")
-                      : "New"}
+                  {candidate.paused
+                    ? "Paused"
+                    : candidate.working
+                      ? "Working…"
+                      : candidate.lastMessage
+                        ? candidate.lastMessage.text.replace(/[`*_#>]/g, "")
+                        : "New"}
                 </span>
               </span>
             </button>
@@ -376,6 +392,7 @@ function BotChat({
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [editingSettings, setEditingSettings] = useState(false);
   const data = detail.data;
   const workThreadId = data?.bot.workThreadId ?? null;
 
@@ -397,6 +414,15 @@ function BotChat({
     setSending(false);
   };
 
+  const setPaused = async (paused: boolean) => {
+    setError(null);
+    try {
+      await forkRequest(environmentId, "/bots/pause", { method: "POST", body: { botId, paused } });
+    } catch (cause) {
+      setError(errorText(cause));
+    }
+  };
+
   const openWorkThread = () => {
     if (workThreadId === null) return;
     void navigate({
@@ -413,7 +439,9 @@ function BotChat({
           <h2 className="min-w-0 flex-1 truncate px-1 text-sm font-medium">
             {data?.bot.name ?? ""}
           </h2>
-          {data?.working ? (
+          {data?.bot.paused ? (
+            <Badge variant="warning">Paused</Badge>
+          ) : data?.working ? (
             <span className="flex items-center gap-1.5 px-1 text-xs text-muted-foreground">
               <Spinner size="sm" />
               Working
@@ -429,6 +457,14 @@ function BotChat({
               <MenuItem disabled={workThreadId === null} onClick={openWorkThread}>
                 <SquareArrowOutUpRightIcon />
                 Open work thread
+              </MenuItem>
+              <MenuItem disabled={!data} onClick={() => void setPaused(!data?.bot.paused)}>
+                {data?.bot.paused ? <PlayIcon /> : <PauseIcon />}
+                {data?.bot.paused ? "Resume" : "Pause"}
+              </MenuItem>
+              <MenuItem disabled={!data} onClick={() => setEditingSettings(true)}>
+                <ShieldIcon />
+                Permissions and budget
               </MenuItem>
               <MenuItem variant="destructive" onClick={() => setDeleting(true)}>
                 Delete bot
@@ -446,6 +482,14 @@ function BotChat({
             ) : null}
             {data?.chat.map((message) => (
               <ChatLine key={message.id} message={message} />
+            ))}
+            {data?.questions.map((question) => (
+              <QuestionCard
+                key={question.id}
+                environmentId={environmentId}
+                botId={botId}
+                question={question}
+              />
             ))}
           </div>
         </div>
@@ -472,12 +516,16 @@ function BotChat({
           />
         </form>
       </section>
-      {data ? (
-        <NotebookPanel
+      {data ? <NotebookPanel environmentId={environmentId} detail={data} /> : null}
+      {editingSettings && data ? (
+        <SettingsDialog
+          key={data.bot.id}
           environmentId={environmentId}
           botId={data.bot.id}
-          role={data.role}
-          notebook={data.notebook}
+          name={data.bot.name}
+          settings={data.bot.settings}
+          turnsToday={data.bot.turnsToday}
+          onClose={() => setEditingSettings(false)}
         />
       ) : null}
       {deleting && data ? (
@@ -538,17 +586,27 @@ function NotebookSection({
 
 function NotebookPanel({
   environmentId,
-  botId,
-  role,
-  notebook,
+  detail,
 }: {
   readonly environmentId: EnvironmentId;
-  readonly botId: string;
-  readonly role: string;
-  readonly notebook: BotNotebook;
+  readonly detail: BotDetail;
 }) {
   const navigate = useNavigate();
+  const { notebook, role } = detail;
+  const botId = detail.bot.id;
   const [error, setError] = useState<string | null>(null);
+  const [openNote, setOpenNote] = useState<string | null>(null);
+  const handBack = async (threadId: string) => {
+    setError(null);
+    try {
+      await forkRequest(environmentId, "/bots/thread/handback", {
+        method: "POST",
+        body: { botId, threadId },
+      });
+    } catch (cause) {
+      setError(errorText(cause));
+    }
+  };
   const openThread = (threadId: string) =>
     void navigate({
       to: "/$environmentId/$threadId",
@@ -585,7 +643,12 @@ function NotebookPanel({
           {notebook.threads
             .filter((thread) => thread.itemId === item.id)
             .map((thread) => (
-              <ThreadLink key={thread.threadId} thread={thread} onOpen={openThread} />
+              <ThreadLink
+                key={thread.threadId}
+                thread={thread}
+                onOpen={openThread}
+                onHandBack={handBack}
+              />
             ))}
         </div>
       ));
@@ -613,7 +676,12 @@ function NotebookPanel({
           ))}
           {loose}
           {unlinked.map((thread) => (
-            <ThreadLink key={thread.threadId} thread={thread} onOpen={openThread} />
+            <ThreadLink
+              key={thread.threadId}
+              thread={thread}
+              onOpen={openThread}
+              onHandBack={handBack}
+            />
           ))}
         </NotebookSection>
         <NotebookSection title="Routines">
@@ -638,6 +706,27 @@ function NotebookPanel({
             ))
           )}
         </NotebookSection>
+        <NotebookSection title="Notes">
+          {detail.notes.length === 0 ? (
+            <p className="text-xs text-muted-foreground">None.</p>
+          ) : (
+            detail.notes.map((note) => (
+              <button
+                key={note.name}
+                type="button"
+                onClick={() => setOpenNote(note.name)}
+                className="flex min-w-0 items-center gap-1.5 text-left text-sm hover:text-foreground"
+              >
+                <FileTextIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                <span className="min-w-0 flex-1 truncate">{note.name}</span>
+                <span className="shrink-0 text-xs text-muted-foreground">
+                  {formatSince(note.updatedAt)}
+                </span>
+              </button>
+            ))
+          )}
+          <p className="text-xs text-muted-foreground wrap-anywhere">{detail.notesPath}</p>
+        </NotebookSection>
         <NotebookSection title="Memory">
           {notebook.memory.length === 0 ? (
             <p className="text-xs text-muted-foreground">None.</p>
@@ -653,27 +742,288 @@ function NotebookPanel({
         </NotebookSection>
         <RoleEditor key={botId} environmentId={environmentId} botId={botId} role={role} />
       </div>
+      {openNote !== null ? (
+        <NoteDialog
+          environmentId={environmentId}
+          botId={botId}
+          name={openNote}
+          onClose={() => setOpenNote(null)}
+        />
+      ) : null}
     </aside>
+  );
+}
+
+function NoteDialog({
+  environmentId,
+  botId,
+  name,
+  onClose,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly botId: string;
+  readonly name: string;
+  readonly onClose: () => void;
+}) {
+  const note = useForkResource<{ name: string; text: string }>(
+    environmentId,
+    `/bots/note?botId=${encodeURIComponent(botId)}&name=${encodeURIComponent(name)}`,
+    (event) => isBotEvent(event) && event.botId === botId,
+  );
+  return (
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) onClose();
+      }}
+    >
+      <DialogPopup className="sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>{name}</DialogTitle>
+        </DialogHeader>
+        <DialogPanel>
+          {note.data ? (
+            name.endsWith(".md") ? (
+              <ChatMarkdown text={note.data.text} cwd={undefined} className="text-sm" />
+            ) : (
+              <pre className="text-xs whitespace-pre-wrap wrap-anywhere">{note.data.text}</pre>
+            )
+          ) : note.error ? (
+            <p className="text-sm text-destructive-foreground">{note.error.message}</p>
+          ) : (
+            <Spinner />
+          )}
+        </DialogPanel>
+      </DialogPopup>
+    </Dialog>
+  );
+}
+
+function QuestionCard({
+  environmentId,
+  botId,
+  question,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly botId: string;
+  readonly question: BotQuestion;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [what, ...rest] = question.text.split("\n\n");
+  const details = rest.join("\n\n");
+  const answer = async (approve: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await forkRequest(environmentId, "/bots/question/answer", {
+        method: "POST",
+        body: { botId, questionId: question.id, approve },
+      });
+    } catch (cause) {
+      setError(errorText(cause));
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border p-3">
+      <p className="text-sm">
+        Wants to <span className="font-medium">{what}</span>
+      </p>
+      {details ? (
+        <pre className="max-h-48 overflow-y-auto rounded-md bg-muted px-2.5 py-2 text-xs whitespace-pre-wrap wrap-anywhere">
+          {details}
+        </pre>
+      ) : null}
+      {error ? <p className="text-xs text-destructive-foreground">{error}</p> : null}
+      <div className="flex items-center gap-1.5">
+        <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+          Lapses {new Date(question.expiresAt).toLocaleString()}
+        </span>
+        <Button size="xs" variant="ghost" disabled={busy} onClick={() => void answer(false)}>
+          Decline
+        </Button>
+        <Button size="xs" disabled={busy} onClick={() => void answer(true)}>
+          Approve
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+const GATED_ACTIONS: ReadonlyArray<{ readonly action: BotGatedAction; readonly label: string }> = [
+  { action: "thread.start", label: "Start a thread" },
+  { action: "thread.send", label: "Message its threads" },
+  { action: "role.edit", label: "Rewrite its role" },
+];
+
+const PERMISSION_LABELS: Record<BotPermission, string> = {
+  allow: "Allow",
+  ask: "Ask me",
+  deny: "Never",
+};
+
+function SettingsDialog({
+  environmentId,
+  botId,
+  name,
+  settings,
+  turnsToday,
+  onClose,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly botId: string;
+  readonly name: string;
+  readonly settings: BotSettings;
+  readonly turnsToday: number;
+  readonly onClose: () => void;
+}) {
+  const [permissions, setPermissions] = useState(settings.permissions);
+  const [turnsPerDay, setTurnsPerDay] = useState(String(settings.turnsPerDay));
+  const [maxThreads, setMaxThreads] = useState(String(settings.maxThreads));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      await forkRequest(environmentId, "/bots/settings", {
+        method: "POST",
+        body: {
+          botId,
+          settings: {
+            permissions,
+            turnsPerDay: Number(turnsPerDay),
+            maxThreads: Number(maxThreads),
+          },
+        },
+      });
+      onClose();
+    } catch (cause) {
+      setError(errorText(cause));
+      setSaving(false);
+    }
+  };
+  return (
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) onClose();
+      }}
+    >
+      <DialogPopup className="sm:max-w-md">
+        <form
+          className="flex min-h-0 flex-col"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void save();
+          }}
+        >
+          <DialogHeader>
+            <DialogTitle>{name}: permissions and budget</DialogTitle>
+          </DialogHeader>
+          <DialogPanel>
+            <div className="flex flex-col gap-3">
+              {GATED_ACTIONS.map(({ action, label }) => (
+                <div key={action} className="flex items-center gap-3 text-sm">
+                  <span className="min-w-0 flex-1">{label}</span>
+                  <Select
+                    value={permissions[action]}
+                    onValueChange={(value) => {
+                      if (value) setPermissions({ ...permissions, [action]: value });
+                    }}
+                  >
+                    <SelectTrigger aria-label={label} size="sm" className="w-28">
+                      <SelectValue>{PERMISSION_LABELS[permissions[action]]}</SelectValue>
+                    </SelectTrigger>
+                    <SelectPopup>
+                      {(["allow", "ask", "deny"] as const).map((permission) => (
+                        <SelectItem key={permission} value={permission}>
+                          {PERMISSION_LABELS[permission]}
+                        </SelectItem>
+                      ))}
+                    </SelectPopup>
+                  </Select>
+                </div>
+              ))}
+              <label className="flex items-center gap-3 text-sm">
+                <span className="min-w-0 flex-1">
+                  Turns a day
+                  <span className="block text-xs text-muted-foreground">
+                    {turnsToday} used today
+                  </span>
+                </span>
+                <Input
+                  type="number"
+                  min={1}
+                  value={turnsPerDay}
+                  onChange={(event) => setTurnsPerDay(event.target.value)}
+                  className="w-28"
+                />
+              </label>
+              <label className="flex items-center gap-3 text-sm">
+                <span className="min-w-0 flex-1">
+                  Threads running at once
+                  <span className="block text-xs text-muted-foreground">
+                    Starting one more asks you
+                  </span>
+                </span>
+                <Input
+                  type="number"
+                  min={1}
+                  value={maxThreads}
+                  onChange={(event) => setMaxThreads(event.target.value)}
+                  className="w-28"
+                />
+              </label>
+              <p className="text-xs text-muted-foreground">
+                These limit only what the bot does through T3. Its threads still have the shell
+                access of their runtime mode.
+              </p>
+              {error ? <p className="text-xs text-destructive-foreground">{error}</p> : null}
+            </div>
+          </DialogPanel>
+          <DialogFooter>
+            <Button type="button" variant="ghost" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={saving}>
+              Save
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogPopup>
+    </Dialog>
   );
 }
 
 function ThreadLink({
   thread,
   onOpen,
+  onHandBack,
 }: {
   readonly thread: BotNotebook["threads"][number];
   readonly onOpen: (threadId: string) => void;
+  readonly onHandBack: (threadId: string) => void;
 }) {
   return (
-    <button
-      type="button"
-      onClick={() => onOpen(thread.threadId)}
-      className="flex min-w-0 items-center gap-1.5 ps-6 text-left text-xs text-muted-foreground hover:text-foreground"
-    >
-      <MessageSquareIcon className="size-3 shrink-0" />
-      <span className="min-w-0 flex-1 truncate">{thread.title ?? "Untitled thread"}</span>
-      <span className="shrink-0">{thread.follow}</span>
-    </button>
+    <div className="flex min-w-0 items-center gap-1.5 ps-6 text-xs text-muted-foreground">
+      <button
+        type="button"
+        onClick={() => onOpen(thread.threadId)}
+        className="flex min-w-0 flex-1 items-center gap-1.5 text-left hover:text-foreground"
+      >
+        <MessageSquareIcon className="size-3 shrink-0" />
+        <span className="min-w-0 flex-1 truncate">{thread.title ?? "Untitled thread"}</span>
+      </button>
+      {thread.takenOver ? (
+        <Button size="xs" variant="outline" onClick={() => onHandBack(thread.threadId)}>
+          Hand back
+        </Button>
+      ) : (
+        <span className="shrink-0">{thread.follow}</span>
+      )}
+    </div>
   );
 }
 
@@ -710,7 +1060,7 @@ function RoleEditor({
     <NotebookSection title="Role">
       <Textarea
         value={value}
-        placeholder="What this bot is responsible for, and its rules. Only you edit it."
+        placeholder="What this bot is responsible for, and its rules. The bot changes it only with your approval."
         onChange={(event) => setDraft(event.target.value)}
         className="min-h-32"
       />
