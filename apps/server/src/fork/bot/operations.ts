@@ -14,6 +14,7 @@ import {
   ModelSelection,
   ProjectId,
   RunId,
+  RuntimeMode,
   ThreadId,
   type OrchestrationV2RunStatus,
 } from "@t3tools/contracts";
@@ -247,6 +248,7 @@ const NOTE_CHARS = 200_000;
 const CreateInput = Schema.Struct({
   name: Schema.String,
   modelSelection: Schema.optional(Schema.NullOr(Schema.Unknown)),
+  runtimeMode: Schema.optional(RuntimeMode),
 });
 
 export const createBot = Effect.fn("ForkBot.createBot")(function* (input: unknown) {
@@ -284,7 +286,12 @@ export const createBot = Effect.fn("ForkBot.createBot")(function* (input: unknow
     },
     catch: internal,
   });
-  runtime.store().createBot({ id, name, modelSelection, createdAt: nowIso() });
+  runtime
+    .store()
+    .createBot(
+      { id, name, modelSelection, createdAt: nowIso() },
+      decoded.runtimeMode ?? (yield* runtimeModeFor(modelSelection, "auto")),
+    );
   yield* runtime.active.open;
   runtime.publish(id);
   return { botId: id };
@@ -385,17 +392,18 @@ export const postError = Effect.fn("ForkBot.postError")(function* (botId: string
   runtime.publish(botId);
 });
 
-/** Work threads and the threads bots start run in auto mode: they need their shell. */
+/** The bot's chosen mode, or the broadest narrower one its provider offers. */
 export const runtimeModeFor = Effect.fn("ForkBot.runtimeModeFor")(function* (
   modelSelection: ModelSelection,
+  wanted: RuntimeMode,
 ) {
   const providers = yield* (yield* ProviderRegistry.ProviderRegistry).getProviders;
-  return yield* resolveRuntimeMode("auto", undefined, {
+  return yield* resolveRuntimeMode(wanted, undefined, {
     modelSelection,
     supportedRuntimeModes: providers.find(
       (provider) => provider.instanceId === modelSelection.instanceId,
     )?.supportedRuntimeModes,
-  }).pipe(Effect.orElseSucceed(() => "auto" as const));
+  }).pipe(Effect.orElseSucceed(() => wanted));
 });
 
 /** Sends the packet as a new turn: launches the work thread on the first one. */
@@ -432,7 +440,7 @@ const dispatch = Effect.fn("ForkBot.dispatch")(function* (
     projectId,
     title: `${bot.name} (bot)`,
     modelSelection,
-    runtimeMode: yield* runtimeModeFor(modelSelection),
+    runtimeMode: yield* runtimeModeFor(modelSelection, bot.settings.runtimeMode),
     interactionMode: "default",
     workspaceStrategy: {
       type: "existing_worktree",
@@ -740,6 +748,7 @@ const SettingsInput = Schema.Struct({
     permissions: Schema.Record(Schema.String, Permission),
     turnsPerDay: Schema.Number,
     maxThreads: Schema.Number,
+    runtimeMode: Schema.optional(RuntimeMode),
   }),
 });
 
@@ -749,6 +758,7 @@ export const saveSettings = Effect.fn("ForkBot.saveSettings")(function* (input: 
   const decoded = yield* decode(SettingsInput, input);
   const bot = yield* requireBot(decoded.botId);
   const { turnsPerDay, maxThreads, permissions } = decoded.settings;
+  const runtimeMode = decoded.settings.runtimeMode ?? bot.settings.runtimeMode;
   if (!Number.isInteger(turnsPerDay) || turnsPerDay < 1 || turnsPerDay > 10_000) {
     return yield* badRequest("Give 1 to 10,000 turns a day.", "turnsPerDay");
   }
@@ -764,7 +774,18 @@ export const saveSettings = Effect.fn("ForkBot.saveSettings")(function* (input: 
     ) as BotSettings["permissions"],
     turnsPerDay,
     maxThreads,
+    runtimeMode,
   };
+  if (bot.workThreadId !== null && runtimeMode !== bot.settings.runtimeMode) {
+    yield* (yield* ThreadManagement.ThreadManagementService)
+      .dispatch({
+        type: "thread.runtime-mode.set",
+        commandId: CommandId.make(newId("fork-bot")),
+        threadId: ThreadId.make(bot.workThreadId),
+        runtimeMode: yield* runtimeModeFor(bot.modelSelection, runtimeMode),
+      })
+      .pipe(Effect.mapError((cause) => badRequest(cause.message, "runtimeMode")));
+  }
   runtime.store().setSettings(bot.id, settings);
   runtime.publish(bot.id);
   // A raised budget may let a held wake run now.

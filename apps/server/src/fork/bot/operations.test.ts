@@ -42,6 +42,8 @@ interface Harness {
   readonly shells: Map<string, { latestRunId: string; status: string }>;
   /** Messages typed with the user role in a thread, for the takeover check. */
   readonly userMessages: Map<string, Array<UserMessage>>;
+  /** The runtime mode of each launch, and each later switch of one, in order. */
+  readonly modes: string[];
   /** What T3 answers a steer with: a provider turn to join, or only the queue. */
   steerDelivery: "steered" | "queued";
   /** Projects `thread start` may name, and whether each worker launch saw its thread owned. */
@@ -97,6 +99,7 @@ async function harness(store = new BotStore(":memory:")): Promise<Harness> {
   const userMessages = new Map<string, Array<UserMessage>>();
   const projects: Harness["projects"] = [];
   const ownedAtLaunch: boolean[] = [];
+  const modes: string[] = [];
   const nextRun = (threadId: string) => {
     const runId = `run-${runs.length + 1}`;
     runs.push({ threadId, runId });
@@ -107,6 +110,10 @@ async function harness(store = new BotStore(":memory:")): Promise<Harness> {
     Layer.succeed(BotRuntime, runtime),
     Layer.mock(ThreadManagement.ThreadManagementService)({
       getThreadTitles: () => Effect.succeed({}),
+      dispatch: (command) => {
+        if (command.type === "thread.runtime-mode.set") modes.push(command.runtimeMode);
+        return Effect.succeed({} as never);
+      },
       sendToThread: (input) => {
         // No turn is ever mid-provider-turn here, so a steer lands in the queue as T3 would.
         if (input.mode === "steer") {
@@ -143,6 +150,7 @@ async function harness(store = new BotStore(":memory:")): Promise<Harness> {
           if (input.initialMessage?.text === "fail") return Effect.fail({ message: "no" } as never);
         }
         packets.push(input.initialMessage?.text ?? "");
+        modes.push(input.runtimeMode);
         const runId = nextRun(input.threadId!);
         return Effect.succeed({
           threadId: input.threadId,
@@ -156,7 +164,15 @@ async function harness(store = new BotStore(":memory:")): Promise<Harness> {
     }),
     Layer.mock(DocumentText.DocumentText)({}),
     Layer.mock(Project.ProjectService)({ listShells: () => Effect.succeed(projects as never) }),
-    Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+    // The model's provider, like Antigravity, offers every mode but auto.
+    Layer.mock(ProviderRegistry.ProviderRegistry)({
+      getProviders: Effect.succeed([
+        {
+          instanceId: MODEL.instanceId,
+          supportedRuntimeModes: ["approval-required", "auto-accept-edits", "full-access"],
+        },
+      ] as never),
+    }),
     Layer.succeed(ServerConfig.ServerConfig, {} as never),
     FileSystem.layerNoop({}),
   );
@@ -171,6 +187,7 @@ async function harness(store = new BotStore(":memory:")): Promise<Harness> {
     steerDelivery: "queued",
     projects,
     ownedAtLaunch,
+    modes,
     layer,
   };
   return h;
@@ -242,7 +259,10 @@ describe("bot turns", () => {
 
   it.effect("finishes a turn whose run ended while the server was down, once", () => {
     const store = new BotStore(":memory:");
-    store.createBot({ id: "bot_1", name: "Bot", modelSelection: MODEL as never, createdAt: "t0" });
+    store.createBot(
+      { id: "bot_1", name: "Bot", modelSelection: MODEL as never, createdAt: "t0" },
+      "auto",
+    );
     store.setWorkThread("bot_1", "thread-1", SCRATCH);
     store.addChat({ id: "m1", botId: "bot_1", role: "user", text: "Hi", createdAt: "t1" });
     store.startTurn(
@@ -445,6 +465,30 @@ describe("bot turns", () => {
         // A count left from an earlier day reads as none used today.
         h.runtime.store().countTurn(botId, "2000-01-01");
         expect((yield* read()).bot.turnsToday).toBe(0);
+      }),
+    ),
+  );
+
+  it.effect("runs its work thread in the mode the user picks, and switches it on a change", () =>
+    withHarness((h) =>
+      Effect.gen(function* () {
+        // No pick: the broadest the provider offers up to auto, which it lacks.
+        const unpicked = yield* Bots.createBot({ name: "Default", modelSelection: MODEL });
+        expect(h.runtime.store().getBot(unpicked.botId)?.settings.runtimeMode).toBe(
+          "auto-accept-edits",
+        );
+        const { botId } = yield* Bots.createBot({
+          name: "Ops",
+          modelSelection: MODEL,
+          runtimeMode: "full-access",
+        });
+        yield* Bots.sendMessage({ botId, text: "Hi" });
+        yield* Bots.saveSettings({
+          botId,
+          settings: { permissions: {}, turnsPerDay: 100, maxThreads: 3, runtimeMode: "auto" },
+        });
+        expect(h.modes).toEqual(["full-access", "auto-accept-edits"]);
+        expect(h.runtime.store().getBot(botId)?.settings.runtimeMode).toBe("auto");
       }),
     ),
   );

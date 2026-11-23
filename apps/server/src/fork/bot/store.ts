@@ -7,7 +7,7 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeSqlite from "node:sqlite";
 
-import type { ModelSelection } from "@t3tools/contracts";
+import type { ModelSelection, RuntimeMode } from "@t3tools/contracts";
 
 export interface Bot {
   readonly id: string;
@@ -35,12 +35,15 @@ export interface BotSettings {
   readonly turnsPerDay: number;
   /** Threads it started that may run at once; starting one more asks. */
   readonly maxThreads: number;
+  /** Its work thread and the threads it starts; a provider without it gets the next narrower. */
+  readonly runtimeMode: RuntimeMode;
 }
 
 const DEFAULT_SETTINGS: BotSettings = {
   permissions: { "role.edit": "ask", "thread.start": "allow", "thread.send": "allow" },
   turnsPerDay: 100,
   maxThreads: 3,
+  runtimeMode: "auto",
 };
 
 const toSettings = (value: string): BotSettings => {
@@ -49,6 +52,7 @@ const toSettings = (value: string): BotSettings => {
     permissions: { ...DEFAULT_SETTINGS.permissions, ...parsed.permissions },
     turnsPerDay: parsed.turnsPerDay ?? DEFAULT_SETTINGS.turnsPerDay,
     maxThreads: parsed.maxThreads ?? DEFAULT_SETTINGS.maxThreads,
+    runtimeMode: parsed.runtimeMode ?? DEFAULT_SETTINGS.runtimeMode,
   };
 };
 
@@ -405,10 +409,21 @@ export class BotStore {
     return row ? toBot(row) : null;
   }
 
-  createBot(bot: Pick<Bot, "id" | "name" | "modelSelection" | "createdAt">) {
+  createBot(
+    bot: Pick<Bot, "id" | "name" | "modelSelection" | "createdAt">,
+    runtimeMode: RuntimeMode,
+  ) {
     this.db
-      .prepare("INSERT INTO bots (id, name, model_selection, created_at) VALUES (?, ?, ?, ?)")
-      .run(bot.id, bot.name, JSON.stringify(bot.modelSelection), bot.createdAt);
+      .prepare(
+        "INSERT INTO bots (id, name, model_selection, created_at, settings) VALUES (?, ?, ?, ?, ?)",
+      )
+      .run(
+        bot.id,
+        bot.name,
+        JSON.stringify(bot.modelSelection),
+        bot.createdAt,
+        JSON.stringify({ runtimeMode }),
+      );
   }
 
   deleteBot(id: string) {

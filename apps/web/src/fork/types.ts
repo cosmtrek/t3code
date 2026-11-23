@@ -1,4 +1,4 @@
-import type { ModelSelection } from "@t3tools/contracts";
+import type { ModelSelection, RuntimeMode } from "@t3tools/contracts";
 
 /**
  * Responses of `/api/fork/*`, mirrored from apps/server/src/fork (channels/hub.ts,
@@ -311,6 +311,7 @@ export interface BotSettings {
   readonly permissions: Readonly<Record<BotGatedAction, BotPermission>>;
   readonly turnsPerDay: number;
   readonly maxThreads: number;
+  readonly runtimeMode: RuntimeMode;
 }
 
 /** An action the bot asked to take; approving runs exactly it. */

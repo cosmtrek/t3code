@@ -6,7 +6,14 @@
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 
-import { CommandId, MessageId, ProjectId, ThreadId, type ModelSelection } from "@t3tools/contracts";
+import {
+  CommandId,
+  MessageId,
+  ProjectId,
+  ThreadId,
+  type ModelSelection,
+  type RuntimeMode,
+} from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -474,6 +481,7 @@ const launchOwned = Effect.fn("ForkBot.launchOwned")(function* (
   threadId: ThreadId,
   projectId: string,
   modelSelection: ModelSelection,
+  runtimeMode: RuntimeMode,
   prompt: string,
   flags: ReadonlyMap<string, string>,
 ) {
@@ -483,7 +491,7 @@ const launchOwned = Effect.fn("ForkBot.launchOwned")(function* (
     projectId: ProjectId.make(projectId),
     title: flags.get("title") ?? prompt.split("\n", 1)[0]!.slice(0, 80),
     modelSelection,
-    runtimeMode: yield* runtimeModeFor(modelSelection),
+    runtimeMode: yield* runtimeModeFor(modelSelection, runtimeMode),
     interactionMode: "default",
     workspaceStrategy: flags.has("worktree")
       ? { type: "worktree", baseRef: "HEAD" }
@@ -583,7 +591,15 @@ const threadCommand = Effect.fn("ForkBot.threadCommand")(function* (
           createdAt: nowIso(),
         });
         runtime.ownedThreads.set(threadId, botId);
-        yield* launchOwned(commandId, threadId, project.id, modelSelection, prompt, flags).pipe(
+        yield* launchOwned(
+          commandId,
+          threadId,
+          project.id,
+          modelSelection,
+          bot.settings.runtimeMode,
+          prompt,
+          flags,
+        ).pipe(
           Effect.onError(() =>
             Effect.sync(() => {
               store.removeThread(threadId);

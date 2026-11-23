@@ -1,4 +1,10 @@
-import { ThreadId, type EnvironmentId, type ModelSelection } from "@t3tools/contracts";
+import { useAtomValue } from "@effect/atom-react";
+import {
+  ThreadId,
+  type EnvironmentId,
+  type ModelSelection,
+  type RuntimeMode,
+} from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import {
   BotIcon,
@@ -13,6 +19,10 @@ import {
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
+import {
+  resolveRuntimeModeOption,
+  runtimeModeOptions,
+} from "../../components/chat/runtimeModeConfig";
 import ChatMarkdown from "../../components/ChatMarkdown";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
@@ -43,8 +53,11 @@ import {
 import { SidebarInset } from "../../components/ui/sidebar";
 import { Spinner } from "../../components/ui/spinner";
 import { Textarea } from "../../components/ui/textarea";
+import { useEnvironmentSettings } from "../../hooks/useSettings";
 import { cn } from "../../lib/utils";
+import { providerInstanceEntriesFor } from "../../providerInstances";
 import { useEnvironments } from "../../state/environments";
+import { EMPTY_SERVER_PROVIDERS, serverEnvironment } from "../../state/server";
 import { ForkApiError, forkRequest } from "../forkApiAccess";
 import { DelegateModelPicker } from "../inbox/DelegateDialog";
 import { PaneHeader } from "../inbox/PaneHeader";
@@ -293,6 +306,9 @@ function CreateBotDialog({
 }) {
   const [name, setName] = useState("");
   const [model, setModel] = useState<ModelSelection | null>(null);
+  const [pickedMode, setPickedMode] = useState<RuntimeMode | null>(null);
+  const modes = useRuntimeModes(environmentId, model?.instanceId ?? null);
+  const runtimeMode = runtimeModeWithin(pickedMode ?? "auto", modes);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const canCreate = name.trim() !== "" && !submitting;
@@ -303,7 +319,7 @@ function CreateBotDialog({
     try {
       const result = await forkRequest<{ botId: string }>(environmentId, "/bots/create", {
         method: "POST",
-        body: { name, modelSelection: model },
+        body: { name, modelSelection: model, runtimeMode },
       });
       onCreated(result.botId);
     } catch (cause) {
@@ -353,6 +369,7 @@ function CreateBotDialog({
                   />
                 </div>
               </div>
+              <RuntimeModeField modes={modes} value={runtimeMode} onChange={setPickedMode} />
               <p className="text-xs text-muted-foreground">
                 Tell it its job in the chat once it is created.
               </p>
@@ -523,6 +540,7 @@ function BotChat({
           environmentId={environmentId}
           botId={data.bot.id}
           name={data.bot.name}
+          instanceId={data.bot.modelSelection.instanceId}
           settings={data.bot.settings}
           turnsToday={data.bot.turnsToday}
           onClose={() => setEditingSettings(false)}
@@ -918,6 +936,64 @@ function QuestionCard({
   );
 }
 
+/** The modes the bot's provider offers, all when it reports none; `null` is the picker's first. */
+function useRuntimeModes(environmentId: EnvironmentId, instanceId: string | null) {
+  const settings = useEnvironmentSettings(environmentId);
+  const providers =
+    useAtomValue(serverEnvironment.providersValueAtom(environmentId)) ?? EMPTY_SERVER_PROVIDERS;
+  const resolved =
+    instanceId ?? providerInstanceEntriesFor(providers, settings, null)[0]?.instanceId;
+  const supported = providers.find(
+    (provider) => provider.instanceId === resolved,
+  )?.supportedRuntimeModes;
+  return supported && supported.length > 0
+    ? runtimeModeOptions.filter((mode) => supported.includes(mode))
+    : runtimeModeOptions;
+}
+
+/** Mirrors the server: a mode the provider lacks runs as the broadest narrower one it has. */
+function runtimeModeWithin(wanted: RuntimeMode, modes: ReadonlyArray<RuntimeMode>): RuntimeMode {
+  const rank = runtimeModeOptions.indexOf(wanted);
+  return modes.findLast((mode) => runtimeModeOptions.indexOf(mode) <= rank) ?? modes[0] ?? wanted;
+}
+
+function RuntimeModeField({
+  modes,
+  value,
+  onChange,
+}: {
+  readonly modes: ReadonlyArray<RuntimeMode>;
+  readonly value: RuntimeMode;
+  readonly onChange: (mode: RuntimeMode) => void;
+}) {
+  const current = resolveRuntimeModeOption(value);
+  return (
+    <div className="flex items-center gap-3 text-sm">
+      <span className="min-w-0 flex-1">
+        Permission mode
+        <span className="block text-xs text-muted-foreground">{current.description}</span>
+      </span>
+      <Select
+        value={value}
+        onValueChange={(mode) => {
+          if (mode) onChange(mode);
+        }}
+      >
+        <SelectTrigger aria-label="Permission mode" size="sm" className="w-40">
+          <SelectValue>{current.label}</SelectValue>
+        </SelectTrigger>
+        <SelectPopup>
+          {modes.map((mode) => (
+            <SelectItem key={mode} value={mode}>
+              {resolveRuntimeModeOption(mode).label}
+            </SelectItem>
+          ))}
+        </SelectPopup>
+      </Select>
+    </div>
+  );
+}
+
 const GATED_ACTIONS: ReadonlyArray<{ readonly action: BotGatedAction; readonly label: string }> = [
   { action: "thread.start", label: "Start a thread" },
   { action: "thread.send", label: "Message its threads" },
@@ -934,6 +1010,7 @@ function SettingsDialog({
   environmentId,
   botId,
   name,
+  instanceId,
   settings,
   turnsToday,
   onClose,
@@ -941,6 +1018,7 @@ function SettingsDialog({
   readonly environmentId: EnvironmentId;
   readonly botId: string;
   readonly name: string;
+  readonly instanceId: string;
   readonly settings: BotSettings;
   readonly turnsToday: number;
   readonly onClose: () => void;
@@ -948,6 +1026,8 @@ function SettingsDialog({
   const [permissions, setPermissions] = useState(settings.permissions);
   const [turnsPerDay, setTurnsPerDay] = useState(String(settings.turnsPerDay));
   const [maxThreads, setMaxThreads] = useState(String(settings.maxThreads));
+  const modes = useRuntimeModes(environmentId, instanceId);
+  const [runtimeMode, setRuntimeMode] = useState(runtimeModeWithin(settings.runtimeMode, modes));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const save = async () => {
@@ -962,6 +1042,7 @@ function SettingsDialog({
             permissions,
             turnsPerDay: Number(turnsPerDay),
             maxThreads: Number(maxThreads),
+            runtimeMode,
           },
         },
       });
@@ -991,6 +1072,7 @@ function SettingsDialog({
           </DialogHeader>
           <DialogPanel>
             <div className="flex flex-col gap-3">
+              <RuntimeModeField modes={modes} value={runtimeMode} onChange={setRuntimeMode} />
               {GATED_ACTIONS.map(({ action, label }) => (
                 <div key={action} className="flex items-center gap-3 text-sm">
                   <span className="min-w-0 flex-1">{label}</span>
@@ -1044,8 +1126,8 @@ function SettingsDialog({
                 />
               </label>
               <p className="text-xs text-muted-foreground">
-                These limit only what the bot does through T3. Its threads still have the shell
-                access of their runtime mode.
+                These limit only what the bot does through T3. Its shell and file access follow
+                the permission mode above.
               </p>
               {error ? <p className="text-xs text-destructive-foreground">{error}</p> : null}
             </div>
