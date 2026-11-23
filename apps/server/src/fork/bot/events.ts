@@ -51,22 +51,29 @@ const observeThread = Effect.fn("ForkBot.observeThread")(function* (
     return;
   }
 
+  // A run the bot did not send is the user typing in its thread: it is theirs now. Checked on a
+  // terminal status too, since a run that ended while the server was down arrives only as that.
+  const seenRun = owned.lastRunKey?.startsWith(`${change.runId}:`) === true;
+  const takenNow =
+    !owned.takenOver &&
+    !seenRun &&
+    (yield* takenOverByUser(owned.projectId, owned.threadId, owned.handedBackAt));
+  if (takenNow) {
+    store.updateThread(owned.threadId, { takenOver: true });
+    yield* notify(
+      botId,
+      `The user took over ${describe(owned).toLowerCase()}. Leave it to them until they hand it back.`,
+      false,
+    );
+  }
+  const takenOver = owned.takenOver || takenNow;
+
   if (!isTerminalRunStatus(change.status)) {
-    if (owned.status === change.status && owned.lastRunKey?.startsWith(`${change.runId}:`)) return;
-    store.updateThread(owned.threadId, { status: change.status });
-    // A new run the bot did not send is the user typing in its thread: it is theirs now.
-    if (!owned.takenOver && owned.lastRunKey?.startsWith(`${change.runId}:`) !== true) {
-      const taken = yield* takenOverByUser(owned.projectId, owned.threadId, owned.handedBackAt);
-      if (taken) {
-        store.updateThread(owned.threadId, { takenOver: true });
-        yield* notify(
-          botId,
-          `The user took over ${describe(owned).toLowerCase()}. Leave it to them until they hand it back.`,
-          false,
-        );
-      }
-    }
-    store.updateThread(owned.threadId, { lastRunKey: `${change.runId}:${change.status}` });
+    if (owned.status === change.status && seenRun) return;
+    store.updateThread(owned.threadId, {
+      status: change.status,
+      lastRunKey: `${change.runId}:${change.status}`,
+    });
     runtime.publish(botId);
     return;
   }
@@ -74,7 +81,7 @@ const observeThread = Effect.fn("ForkBot.observeThread")(function* (
   const key = `${change.runId}:${change.status}`;
   if (owned.lastRunKey === key) return;
   store.updateThread(owned.threadId, { status: change.status, lastRunKey: key });
-  if (owned.takenOver) {
+  if (takenOver) {
     runtime.publish(botId);
     return;
   }

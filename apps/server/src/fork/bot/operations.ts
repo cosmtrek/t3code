@@ -189,7 +189,8 @@ export const readBot = Effect.fn("ForkBot.readBot")(function* (params: URLSearch
   const bot = yield* requireBot(params.get("botId") ?? "");
   const store = runtime.store();
   return {
-    bot,
+    // A count from an earlier day is spent: today starts at zero.
+    bot: { ...bot, turnsToday: bot.lastTurnDay === localDay(new Date()) ? bot.turnsToday : 0 },
     role: yield* readRole(runtime.botsDir, bot.id),
     working: store.getTurn(bot.id) !== null,
     chat: store.recentChat(bot.id, CHAT_PAGE),
@@ -215,13 +216,26 @@ export const readNote = Effect.fn("ForkBot.readNote")(function* (params: URLSear
   if (NodePath.basename(input.name) !== input.name || input.name.startsWith(".")) {
     return yield* badRequest("Name a file in the bot's folder.", "name");
   }
-  const filePath =
+  const base =
     input.kind === "skill"
-      ? NodePath.join(ownSkillsPath(runtime.botsDir, bot.id), input.name, "SKILL.md")
+      ? ownSkillsPath(runtime.botsDir, bot.id)
       : input.kind === "shared-skill"
-        ? NodePath.join(sharedSkillsPath(runtime.botsDir), input.name, "SKILL.md")
-        : NodePath.join(notesPath(runtime.botsDir, bot.id), input.name);
-  const text = yield* Effect.promise(() => NodeFSP.readFile(filePath, "utf8").catch(() => null));
+        ? sharedSkillsPath(runtime.botsDir)
+        : notesPath(runtime.botsDir, bot.id);
+  const filePath =
+    input.kind === undefined || input.kind === "note"
+      ? NodePath.join(base, input.name)
+      : NodePath.join(base, input.name, "SKILL.md");
+  // The bot writes these folders, so a symlink in them must not reach past them.
+  const text = yield* Effect.promise(async () => {
+    try {
+      const [root, real] = await Promise.all([NodeFSP.realpath(base), NodeFSP.realpath(filePath)]);
+      if (!real.startsWith(root + NodePath.sep)) return null;
+      return await NodeFSP.readFile(real, "utf8");
+    } catch {
+      return null;
+    }
+  });
   if (text === null) {
     return yield* new ForkHttpError({ status: 404, code: "not_found", detail: "No such note." });
   }
@@ -304,6 +318,9 @@ export const deleteBot = Effect.fn("ForkBot.deleteBot")(function* (input: unknow
     Effect.sync(() => {
       runtime.store().deleteBot(bot.id);
       if (bot.workThreadId !== null) runtime.workThreads.delete(bot.workThreadId);
+      for (const [threadId, owner] of runtime.ownedThreads) {
+        if (owner === bot.id) runtime.ownedThreads.delete(threadId);
+      }
     }),
   );
   yield* Effect.promise(() =>
@@ -432,8 +449,12 @@ const dispatch = Effect.fn("ForkBot.dispatch")(function* (
   return { threadId: launched.threadId, runId: run.id };
 });
 
+/** Quotes a word for a POSIX shell; the state folder may hold spaces (`Application Support`). */
+export const shellQuote = (word: string) =>
+  /^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replaceAll("'", `'\\''`)}'`;
+
 const toolCommand = (runtime: BotRuntimeShape, botId: string) =>
-  `${runtime.cliPath} --bot ${botId}`;
+  `${shellQuote(runtime.cliPath)} --bot ${shellQuote(botId)}`;
 
 /** Starts a turn when the user wrote or something that wakes the bot is queued, unless one runs. */
 const wake = Effect.fn("ForkBot.wake")(function* (botId: string) {
@@ -451,12 +472,9 @@ const wake = Effect.fn("ForkBot.wake")(function* (botId: string) {
       const firstTurnToday = bot.lastTurnDay !== today;
       const turnsToday = firstTurnToday ? 0 : bot.turnsToday;
       if (turnsToday >= bot.settings.turnsPerDay) {
-        // Said once a day: the count passes the limit by one when the notice goes out.
-        if (turnsToday === bot.settings.turnsPerDay) {
-          store.countTurn(botId, today);
-          return `${bot.name} used its ${bot.settings.turnsPerDay} turns for today. What happens meanwhile waits for tomorrow, or raise its budget.`;
-        }
-        return null;
+        return store.noteBudgetSpent(botId, today)
+          ? `${bot.name} used its ${bot.settings.turnsPerDay} turns for today. What happens meanwhile waits for tomorrow, or raise its budget.`
+          : null;
       }
       yield* runtime.ensureCli;
       yield* Effect.promise(async () => {
@@ -600,7 +618,11 @@ export const fireDueRoutines = Effect.fn("ForkBot.fireDueRoutines")(function* (
   const runtime = yield* BotRuntime;
   const store = runtime.existingStore();
   if (store === null) return;
-  store.setAsideStale(new Date(now.getTime() - SET_ASIDE_AFTER_DAYS * 86_400_000).toISOString());
+  for (const botId of store.setAsideStale(
+    new Date(now.getTime() - SET_ASIDE_AFTER_DAYS * 86_400_000).toISOString(),
+  )) {
+    runtime.publish(botId);
+  }
   for (const question of store.expireQuestions(now.toISOString())) {
     yield* notify(
       question.botId,
@@ -627,7 +649,7 @@ const fireRoutine = Effect.fn("ForkBot.fireRoutine")(function* (
     .store()
     .listRoutines(botId)
     .find((candidate) => candidate.id === routineId);
-  if (routine === undefined) return;
+  if (routine === undefined) return false;
   const late =
     now.getTime() - dueAt.getTime() > LATE_MS
       ? ` It was due at ${localTime(dueAt)} and starts late, at ${localTime(now)}.`
@@ -637,6 +659,7 @@ const fireRoutine = Effect.fn("ForkBot.fireRoutine")(function* (
     `Routine ${routine.id} "${routine.title}" is due.${late} ${routine.prompt}`,
     true,
   );
+  return true;
 });
 
 const RunRoutineInput = Schema.Struct({ botId: Schema.String, routineId: Schema.Number });
@@ -645,7 +668,31 @@ export const runRoutineNow = Effect.fn("ForkBot.runRoutineNow")(function* (input
   const decoded = yield* decode(RunRoutineInput, input);
   yield* requireBot(decoded.botId);
   const now = new Date();
-  yield* fireRoutine(decoded.botId, decoded.routineId, now, now);
+  if (!(yield* fireRoutine(decoded.botId, decoded.routineId, now, now))) {
+    return yield* new ForkHttpError({
+      status: 404,
+      code: "not_found",
+      detail: "That routine does not exist.",
+    });
+  }
+  return {};
+});
+
+const ItemInput = Schema.Struct({ botId: Schema.String, itemId: Schema.Number });
+
+/** Brings a set-aside item back to the bot's open list. */
+export const reopenItem = Effect.fn("ForkBot.reopenItem")(function* (input: unknown) {
+  const runtime = yield* BotRuntime;
+  const decoded = yield* decode(ItemInput, input);
+  const bot = yield* requireBot(decoded.botId);
+  if (!runtime.store().updateItem(bot.id, decoded.itemId, {}, nowIso())) {
+    return yield* new ForkHttpError({
+      status: 404,
+      code: "not_found",
+      detail: "That item does not exist.",
+    });
+  }
+  runtime.publish(bot.id);
   return {};
 });
 

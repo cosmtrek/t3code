@@ -21,6 +21,9 @@ let bot = null;
 if (args[0] === "--bot") {
   bot = args[1];
   args.splice(0, 2);
+} else if (args[0]?.startsWith("--bot=")) {
+  bot = args[0].slice("--bot=".length);
+  args.splice(0, 1);
 }
 const fail = (message) => {
   process.stderr.write(\`t3bot: \${message}\\n\`);

@@ -247,6 +247,7 @@ const MIGRATIONS: ReadonlyArray<string> = [
      expires_at TEXT NOT NULL,
      result TEXT
    );`,
+  `ALTER TABLE bots ADD COLUMN budget_noticed_day TEXT;`,
 ];
 
 type Row = Record<string, NodeSqlite.SQLOutputValue>;
@@ -438,12 +439,28 @@ export class BotStore {
       .run(day, day, id);
   }
 
+  /** Claims the day's one over-budget notice; false when it already went out that day. */
+  noteBudgetSpent(id: string, day: string): boolean {
+    return (
+      Number(
+        this.db
+          .prepare(
+            "UPDATE bots SET budget_noticed_day = ? WHERE id = ? AND budget_noticed_day IS NOT ?",
+          )
+          .run(day, id, day).changes,
+      ) > 0
+    );
+  }
+
   setPaused(id: string, paused: boolean) {
     this.db.prepare("UPDATE bots SET paused = ? WHERE id = ?").run(paused ? 1 : 0, id);
   }
 
+  /** A new budget may run out again the same day, so its notice can go out again. */
   setSettings(id: string, settings: BotSettings) {
-    this.db.prepare("UPDATE bots SET settings = ? WHERE id = ?").run(JSON.stringify(settings), id);
+    this.db
+      .prepare("UPDATE bots SET settings = ?, budget_noticed_day = NULL WHERE id = ?")
+      .run(JSON.stringify(settings), id);
   }
 
   setWorkThread(id: string, threadId: string, projectId: string) {
@@ -610,15 +627,14 @@ export class BotStore {
     return true;
   }
 
-  /** Sets aside open items untouched since `before`; returns how many. */
-  setAsideStale(before: string): number {
-    return Number(
-      this.db
-        .prepare(
-          "UPDATE items SET set_aside = 1 WHERE status != 'done' AND set_aside = 0 AND updated_at < ?",
-        )
-        .run(before).changes,
-    );
+  /** Sets aside open items untouched since `before`; returns the bots whose items moved. */
+  setAsideStale(before: string): ReadonlyArray<string> {
+    const rows = this.db
+      .prepare(
+        "UPDATE items SET set_aside = 1 WHERE status != 'done' AND set_aside = 0 AND updated_at < ? RETURNING bot_id",
+      )
+      .all(before) as Row[];
+    return [...new Set(rows.map((row) => text(row, "bot_id")))];
   }
 
   listMemory(botId: string): ReadonlyArray<MemoryNote> {
@@ -773,6 +789,10 @@ export class BotStore {
         thread.follow,
         thread.createdAt,
       );
+  }
+
+  removeThread(threadId: string) {
+    this.db.prepare("DELETE FROM threads WHERE thread_id = ?").run(threadId);
   }
 
   // Queue

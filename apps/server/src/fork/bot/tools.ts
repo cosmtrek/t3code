@@ -38,7 +38,30 @@ export const MEMORY_BYTES = 4_096;
 const SAY_CHARS = 20_000;
 const READ_LIMIT = 20;
 const READ_CHARS = 1_500;
-const BOOLEAN_FLAGS = new Set(["all", "worktree"]);
+
+interface FlagSpec {
+  readonly values?: ReadonlyArray<string>;
+  readonly booleans?: ReadonlyArray<string>;
+}
+
+const ROUTINE_FLAGS: FlagSpec = { values: ["title", "daily", "weekdays", "every"] };
+/**
+ * The flags each command takes. Any other `--word` is text, so a message that mentions
+ * `--dry-run` reaches its thread whole; commands without an entry take only text.
+ */
+const FLAGS: Readonly<Record<string, FlagSpec>> = {
+  "item add": { values: ["goal", "note"] },
+  "item edit": { values: ["title", "status", "note", "goal"] },
+  "item done": { values: ["note"] },
+  "item list": { booleans: ["all"] },
+  "routine add": ROUTINE_FLAGS,
+  "routine edit": ROUTINE_FLAGS,
+  "thread start": {
+    values: ["project", "item", "follow", "provider", "model", "title"],
+    booleans: ["worktree"],
+  },
+  "thread read": { values: ["limit"] },
+};
 
 const HELP = `t3bot <command> - everything you do goes through these.
 
@@ -69,6 +92,8 @@ const HELP = `t3bot <command> - everything you do goes through these.
   thread read <thread> [--limit n]
   thread list
 
+Flags take --name value or --name=value. Text that itself starts with -- goes after a bare --.
+
 Some actions need the user's approval. Then the command does not run: it becomes a question in
 your chat, and approving it runs exactly that command. You hear the answer on a later turn.`;
 
@@ -77,14 +102,23 @@ interface Parsed {
   readonly flags: ReadonlyMap<string, string>;
 }
 
-function parseArgs(argv: ReadonlyArray<string>): Parsed {
+export function parseArgs(argv: ReadonlyArray<string>): Parsed {
+  const spec = FLAGS[`${argv[0]} ${argv[1]}`] ?? {};
   const positional: string[] = [];
   const flags = new Map<string, string>();
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]!;
-    if (arg.startsWith("--") && arg.length > 2) {
-      const name = arg.slice(2);
-      if (BOOLEAN_FLAGS.has(name)) flags.set(name, "true");
+    if (arg === "--") {
+      positional.push(...argv.slice(index + 1));
+      break;
+    }
+    const match = /^--([a-z]+)(?:=([\s\S]*))?$/.exec(arg);
+    const name = match?.[1];
+    const inline = match?.[2];
+    if (name !== undefined && spec.booleans?.includes(name) && inline === undefined) {
+      flags.set(name, "true");
+    } else if (name !== undefined && spec.values?.includes(name)) {
+      if (inline !== undefined) flags.set(name, inline);
       else {
         flags.set(name, argv[index + 1] ?? "");
         index += 1;
@@ -122,17 +156,21 @@ export const authenticateTool = Effect.fn("ForkBot.authenticateTool")(function* 
   const runtime = yield* BotRuntime;
   const request = yield* decode(ToolRequest, input);
   const given = authorization?.replace(/^Bearer\s+/i, "").trim() ?? "";
-  const expected = yield* Effect.promise(() =>
-    NodeFSP.readFile(tokenPath(runtime.botsDir, request.bot), "utf8").then(
-      (value) => value.trim(),
-      () => null,
-    ),
-  );
+  // Only a stored bot's id becomes a path, so the request cannot point the read elsewhere.
+  const known = runtime.existingStore()?.getBot(request.bot) != null;
+  const expected = known
+    ? yield* Effect.promise(() =>
+        NodeFSP.readFile(tokenPath(runtime.botsDir, request.bot), "utf8").then(
+          (value) => value.trim(),
+          () => null,
+        ),
+      )
+    : null;
   const ok =
     expected !== null &&
     given.length === expected.length &&
     NodeCrypto.timingSafeEqual(Buffer.from(given), Buffer.from(expected));
-  if (!ok || runtime.existingStore()?.getBot(request.bot) == null) {
+  if (!ok) {
     return yield* new ForkHttpError({
       status: 401,
       code: "unauthorized",
@@ -149,6 +187,13 @@ export interface ToolCall {
   /** The user approved exactly this call: it runs without asking again. */
   readonly approved?: boolean;
 }
+
+/** What a denied action tells the bot; the question card's wording is about the bot. */
+const DENIED: Readonly<Record<GatedAction, string>> = {
+  "role.edit": "replace your role",
+  "thread.start": "start threads",
+  "thread.send": "message your threads",
+};
 
 /**
  * Null when the call may run now. Otherwise it is refused, or stored as a question whose answer
@@ -167,7 +212,7 @@ const gate = Effect.fn("ForkBot.gate")(function* (
   const bot = store.getBot(call.bot)!;
   const decision = decide({ settings: bot.settings, action, overBudget });
   if (decision === "allow") return null;
-  if (decision === "deny") return yield* fail(`The user does not let you ${what}.`);
+  if (decision === "deny") return yield* fail(`The user does not let you ${DENIED[action]}.`);
   const now = Date.now();
   const id = store.addQuestion({
     botId: call.bot,
@@ -423,6 +468,36 @@ export const takenOverByUser = Effect.fn("ForkBot.takenOverByUser")(function* (
   );
 });
 
+/** Launches a thread the bot starts, under the id it already owns. */
+const launchOwned = Effect.fn("ForkBot.launchOwned")(function* (
+  commandId: CommandId,
+  threadId: ThreadId,
+  projectId: string,
+  modelSelection: ModelSelection,
+  prompt: string,
+  flags: ReadonlyMap<string, string>,
+) {
+  return yield* ThreadMessageIntake.launchThread({
+    commandId,
+    threadId,
+    projectId: ProjectId.make(projectId),
+    title: flags.get("title") ?? prompt.split("\n", 1)[0]!.slice(0, 80),
+    modelSelection,
+    runtimeMode: yield* runtimeModeFor(modelSelection),
+    interactionMode: "default",
+    workspaceStrategy: flags.has("worktree")
+      ? { type: "worktree", baseRef: "HEAD" }
+      : { type: "root" },
+    initialMessage: {
+      messageId: MessageId.make(NodeCrypto.randomUUID()),
+      text: prompt,
+      attachments: [],
+    },
+    createdBy: "system",
+    creationSource: "server",
+  }).pipe(Effect.mapError((cause) => fail(`The thread did not start: ${cause.message}`)));
+});
+
 const threadCommand = Effect.fn("ForkBot.threadCommand")(function* (
   call: ToolCall,
   sub: string | undefined,
@@ -481,56 +556,52 @@ const threadCommand = Effect.fn("ForkBot.threadCommand")(function* (
       model: flags.get("model") ?? (flags.has("provider") ? "" : bot.modelSelection.model),
     } as ModelSelection;
     if (modelSelection.model === "") return yield* fail("With --provider, give --model too.");
-    const running = store
-      .listThreads(botId)
-      .filter((thread) => !thread.takenOver && !isTerminalRunStatus(thread.status as never)).length;
-    const overBudget = running >= bot.settings.maxThreads;
-    const asked = yield* gate(
-      call,
-      "thread.start",
-      overBudget,
-      `start a thread in ${project.title}${overBudget ? ` (${running} of its ${bot.settings.maxThreads} threads already run)` : ""}`,
-      prompt,
+    // One start at a time, so two starts in one turn cannot both fit under the limit.
+    return yield* runtime.threadStartLock.withPermit(
+      Effect.gen(function* () {
+        const running = store
+          .listThreads(botId)
+          .filter((thread) => !thread.takenOver && !isTerminalRunStatus(thread.status)).length;
+        const overBudget = running >= bot.settings.maxThreads;
+        const asked = yield* gate(
+          call,
+          "thread.start",
+          overBudget,
+          `start a thread in ${project.title}${overBudget ? ` (${running} of its ${bot.settings.maxThreads} threads already run)` : ""}`,
+          prompt,
+        );
+        if (asked !== null) return asked;
+        const commandId = CommandId.make(newId("fork-bot"));
+        const threadId = ThreadId.make(commandId);
+        // Owned before it launches: a run that ends at once is still reported.
+        store.addThread({
+          threadId,
+          botId,
+          projectId: project.id,
+          itemId,
+          follow,
+          createdAt: nowIso(),
+        });
+        runtime.ownedThreads.set(threadId, botId);
+        yield* launchOwned(commandId, threadId, project.id, modelSelection, prompt, flags).pipe(
+          Effect.onError(() =>
+            Effect.sync(() => {
+              store.removeThread(threadId);
+              runtime.ownedThreads.delete(threadId);
+            }),
+          ),
+        );
+        if (itemId !== null) store.updateItem(botId, itemId, {}, nowIso());
+        runtime.publish(botId);
+        return `Thread ${threadId} started in ${project.title}. It will wake you ${
+          follow === "now"
+            ? "when it stops"
+            : follow === "attention"
+              ? "if it fails or needs someone"
+              : "never; read it on a routine"
+        }. End your turn now.`;
+      }),
     );
-    if (asked !== null) return asked;
-    const commandId = CommandId.make(newId("fork-bot"));
-    const launched = yield* ThreadMessageIntake.launchThread({
-      commandId,
-      threadId: ThreadId.make(commandId),
-      projectId: ProjectId.make(project.id),
-      title: flags.get("title") ?? prompt.split("\n", 1)[0]!.slice(0, 80),
-      modelSelection,
-      runtimeMode: yield* runtimeModeFor(modelSelection),
-      interactionMode: "default",
-      workspaceStrategy: flags.has("worktree")
-        ? { type: "worktree", baseRef: "HEAD" }
-        : { type: "root" },
-      initialMessage: {
-        messageId: MessageId.make(NodeCrypto.randomUUID()),
-        text: prompt,
-        attachments: [],
-      },
-      createdBy: "system",
-      creationSource: "server",
-    }).pipe(Effect.mapError((cause) => fail(`The thread did not start: ${cause.message}`)));
-    store.addThread({
-      threadId: launched.threadId,
-      botId,
-      projectId: project.id,
-      itemId,
-      follow,
-      createdAt: nowIso(),
-    });
-    runtime.ownedThreads.set(launched.threadId, botId);
-    if (itemId !== null) store.updateItem(botId, itemId, {}, nowIso());
-    runtime.publish(botId);
-    return `Thread ${launched.threadId} started in ${project.title}. It will wake you ${
-      follow === "now"
-        ? "when it stops"
-        : follow === "attention"
-          ? "if it fails or needs someone"
-          : "never; read it on a routine"
-    }. End your turn now.`;
   }
 
   const threadId = rest[0];
@@ -577,6 +648,9 @@ const threadCommand = Effect.fn("ForkBot.threadCommand")(function* (
   }
 
   if (sub === "read") {
+    // Another bot's work thread is its private workspace, not something in scope.
+    const workOf = runtime.workThreads.get(threadId);
+    if (workOf !== undefined && workOf !== botId) return yield* fail(`No thread ${threadId}.`);
     const shell = yield* threads
       .getThreadShell(ThreadId.make(threadId))
       .pipe(Effect.orElseSucceed(() => null));

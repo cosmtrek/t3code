@@ -596,34 +596,30 @@ function NotebookPanel({
   const botId = detail.bot.id;
   const [error, setError] = useState<string | null>(null);
   const [openFile, setOpenFile] = useState<OpenFile | null>(null);
-  const handBack = async (threadId: string) => {
+  // One action at a time: a second click while one runs would fire it twice.
+  const [pending, setPending] = useState<string | null>(null);
+  const post = async (key: string, path: string, body: Record<string, unknown>) => {
+    if (pending !== null) return;
+    setPending(key);
     setError(null);
     try {
-      await forkRequest(environmentId, "/bots/thread/handback", {
-        method: "POST",
-        body: { botId, threadId },
-      });
+      await forkRequest(environmentId, path, { method: "POST", body: { botId, ...body } });
     } catch (cause) {
       setError(errorText(cause));
     }
+    setPending(null);
   };
+  const handBack = (threadId: string) =>
+    void post(`thread:${threadId}`, "/bots/thread/handback", { threadId });
   const openThread = (threadId: string) =>
     void navigate({
       to: "/$environmentId/$threadId",
       params: { environmentId, threadId: ThreadId.make(threadId) },
     });
-  const runNow = async (routineId: number) => {
-    setError(null);
-    try {
-      await forkRequest(environmentId, "/bots/routine/run", {
-        method: "POST",
-        body: { botId, routineId },
-      });
-    } catch (cause) {
-      setError(errorText(cause));
-    }
-  };
+  const runNow = (routineId: number) =>
+    void post(`routine:${routineId}`, "/bots/routine/run", { routineId });
   const open = notebook.items.filter((item) => item.status !== "done" && !item.setAside);
+  const setAside = notebook.items.filter((item) => item.status !== "done" && item.setAside);
   const goals = notebook.goals.filter((goal) => !goal.done);
   const itemRows = (goalId: number | null) =>
     open
@@ -648,6 +644,7 @@ function NotebookPanel({
                 thread={thread}
                 onOpen={openThread}
                 onHandBack={handBack}
+                busy={pending !== null}
               />
             ))}
         </div>
@@ -681,9 +678,32 @@ function NotebookPanel({
               thread={thread}
               onOpen={openThread}
               onHandBack={handBack}
+              busy={pending !== null}
             />
           ))}
         </NotebookSection>
+        {setAside.length > 0 ? (
+          <NotebookSection title="Set aside">
+            {setAside.map((item) => (
+              <div key={item.id} className="flex min-w-0 items-center gap-1.5 text-sm">
+                <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
+                  #{item.id}
+                </span>
+                <span className="min-w-0 flex-1 truncate text-muted-foreground">{item.title}</span>
+                <Button
+                  size="xs"
+                  variant="outline"
+                  disabled={pending !== null}
+                  onClick={() =>
+                    void post(`item:${item.id}`, "/bots/item/reopen", { itemId: item.id })
+                  }
+                >
+                  Reopen
+                </Button>
+              </div>
+            ))}
+          </NotebookSection>
+        ) : null}
         <NotebookSection title="Routines">
           {notebook.routines.length === 0 ? (
             <p className="text-xs text-muted-foreground">None.</p>
@@ -699,7 +719,12 @@ function NotebookPanel({
                       : ""}
                   </div>
                 </div>
-                <Button size="xs" variant="outline" onClick={() => void runNow(routine.id)}>
+                <Button
+                  size="xs"
+                  variant="outline"
+                  disabled={pending !== null}
+                  onClick={() => runNow(routine.id)}
+                >
                   Run now
                 </Button>
               </div>
@@ -1043,10 +1068,12 @@ function ThreadLink({
   thread,
   onOpen,
   onHandBack,
+  busy,
 }: {
   readonly thread: BotNotebook["threads"][number];
   readonly onOpen: (threadId: string) => void;
   readonly onHandBack: (threadId: string) => void;
+  readonly busy: boolean;
 }) {
   return (
     <div className="flex min-w-0 items-center gap-1.5 ps-6 text-xs text-muted-foreground">
@@ -1059,7 +1086,12 @@ function ThreadLink({
         <span className="min-w-0 flex-1 truncate">{thread.title ?? "Untitled thread"}</span>
       </button>
       {thread.takenOver ? (
-        <Button size="xs" variant="outline" onClick={() => onHandBack(thread.threadId)}>
+        <Button
+          size="xs"
+          variant="outline"
+          disabled={busy}
+          onClick={() => onHandBack(thread.threadId)}
+        >
           Hand back
         </Button>
       ) : (
@@ -1133,12 +1165,15 @@ function DeleteBotDialog({
   readonly onClose: () => void;
 }) {
   const [error, setError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const remove = async () => {
+    setDeleting(true);
     try {
       await forkRequest(environmentId, "/bots/delete", { method: "POST", body: { botId } });
       onClose();
     } catch (cause) {
       setError(cause instanceof ForkApiError ? cause.message : errorText(cause));
+      setDeleting(false);
     }
   };
   return (
@@ -1162,7 +1197,7 @@ function DeleteBotDialog({
           <Button variant="ghost" onClick={onClose}>
             Cancel
           </Button>
-          <Button variant="destructive" onClick={() => void remove()}>
+          <Button variant="destructive" disabled={deleting} onClick={() => void remove()}>
             Delete
           </Button>
         </DialogFooter>

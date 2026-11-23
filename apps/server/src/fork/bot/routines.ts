@@ -52,12 +52,12 @@ export function parseSchedule(flags: ReadonlyMap<string, string>): RoutineSchedu
   function parseWeekdays(value: string): RoutineSchedule | null {
     const days = new Set<number>();
     for (const part of value.split(",")) {
-      const [start, end] = part.split("-").map(Number);
-      if (start === undefined || !Number.isInteger(start)) return null;
-      for (let day = start; day <= (end ?? start); day += 1) {
-        if (day < 1 || day > 7) return null;
-        days.add(day);
-      }
+      const match = /^\s*([1-7])\s*(?:-\s*([1-7])\s*)?$/.exec(part);
+      if (match === null) return null;
+      const start = Number(match[1]);
+      const end = Number(match[2] ?? match[1]);
+      if (end < start) return null;
+      for (let day = start; day <= end; day += 1) days.add(day);
     }
     return { type: "daily", time: daily!, weekdays: [...days].toSorted((a, b) => a - b) };
   }

@@ -37,7 +37,14 @@ const botsLayer = Layer.effectDiscard(
         Effect.all(
           [
             followThreads(threads.streamDomainEvents),
-            Effect.yieldNow.pipe(Effect.andThen(reconcile()), Effect.andThen(reconcileThreads())),
+            Effect.yieldNow.pipe(
+              Effect.andThen(reconcile()),
+              Effect.andThen(reconcileThreads()),
+              // Catching up is best effort; it must not stop the following beside it.
+              Effect.catchCause((cause) =>
+                Effect.logWarning("Bots could not catch up after a restart.", { cause }),
+              ),
+            ),
             // Routines are checked twice a minute against their stored due times.
             Effect.suspend(() => fireDueRoutines()).pipe(
               Effect.catchCause((cause) =>

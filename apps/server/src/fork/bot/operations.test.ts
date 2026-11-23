@@ -23,7 +23,7 @@ import * as ProviderRegistry from "../../provider/ProviderRegistry.ts";
 import { BotRuntime, type BotRuntimeShape } from "./BotRuntime.ts";
 import { followThreads, reconcileThreads } from "./events.ts";
 import * as Bots from "./operations.ts";
-import { answerQuestion, MEMORY_BYTES, runTool } from "./tools.ts";
+import { answerQuestion, authenticateTool, MEMORY_BYTES, parseArgs, runTool } from "./tools.ts";
 import { BotStore } from "./store.ts";
 
 const MODEL = { instanceId: "claudeAgent", model: "claude-haiku-5-5" };
@@ -41,8 +41,21 @@ interface Harness {
   /** Thread shells, as reconcile reads them after a restart. */
   readonly shells: Map<string, { latestRunId: string; status: string }>;
   /** Messages typed with the user role in a thread, for the takeover check. */
-  readonly userMessages: Map<string, Array<{ createdBy: string; createdAt: DateTime.Utc }>>;
+  readonly userMessages: Map<string, Array<UserMessage>>;
+  /** What T3 answers a steer with: a provider turn to join, or only the queue. */
+  steerDelivery: "steered" | "queued";
+  /** Projects `thread start` may name, and whether each worker launch saw its thread owned. */
+  readonly projects: Array<{ id: string; title: string; workspaceRoot: string }>;
+  readonly ownedAtLaunch: boolean[];
   readonly layer: Layer.Layer<HarnessServices>;
+}
+
+interface UserMessage {
+  readonly createdBy: string;
+  readonly createdAt: DateTime.Utc;
+  readonly notification?: unknown;
+  readonly delegatedCompletion?: unknown;
+  readonly idleCompaction?: unknown;
 }
 
 type HarnessServices =
@@ -67,6 +80,7 @@ async function harness(store = new BotStore(":memory:")): Promise<Harness> {
     store: () => store,
     active: Latch.makeUnsafe(false),
     turnLock: Semaphore.makeUnsafe(1),
+    threadStartLock: Semaphore.makeUnsafe(1),
     workThreads: new Map(
       store
         .listBots()
@@ -80,7 +94,9 @@ async function harness(store = new BotStore(":memory:")): Promise<Harness> {
   const runStatus = new Map<string, OrchestrationV2RunStatus>();
   const replies = new Map<string, string>();
   const shells = new Map<string, { latestRunId: string; status: string }>();
-  const userMessages = new Map<string, Array<{ createdBy: string; createdAt: DateTime.Utc }>>();
+  const userMessages = new Map<string, Array<UserMessage>>();
+  const projects: Harness["projects"] = [];
+  const ownedAtLaunch: boolean[] = [];
   const nextRun = (threadId: string) => {
     const runId = `run-${runs.length + 1}`;
     runs.push({ threadId, runId });
@@ -94,7 +110,7 @@ async function harness(store = new BotStore(":memory:")): Promise<Harness> {
       sendToThread: (input) => {
         // No turn is ever mid-provider-turn here, so a steer lands in the queue as T3 would.
         if (input.mode === "steer") {
-          return Effect.succeed({ delivery: "queued", run: { id: "steer" } } as never);
+          return Effect.succeed({ delivery: h.steerDelivery, run: { id: "steer" } } as never);
         }
         packets.push(input.text);
         return Effect.succeed({ run: { id: nextRun(input.threadId) } } as never);
@@ -122,6 +138,10 @@ async function harness(store = new BotStore(":memory:")): Promise<Harness> {
     }),
     Layer.mock(ThreadLaunch.ThreadLaunchService)({
       launch: (input) => {
+        if (input.projectId !== SCRATCH) {
+          ownedAtLaunch.push(runtime.ownedThreads.has(input.threadId!));
+          if (input.initialMessage?.text === "fail") return Effect.fail({ message: "no" } as never);
+        }
         packets.push(input.initialMessage?.text ?? "");
         const runId = nextRun(input.threadId!);
         return Effect.succeed({
@@ -135,12 +155,25 @@ async function harness(store = new BotStore(":memory:")): Promise<Harness> {
       ensureScratchProject: Effect.succeed({ projectId: SCRATCH }),
     }),
     Layer.mock(DocumentText.DocumentText)({}),
-    Layer.mock(Project.ProjectService)({ listShells: () => Effect.succeed([]) }),
+    Layer.mock(Project.ProjectService)({ listShells: () => Effect.succeed(projects as never) }),
     Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
     Layer.succeed(ServerConfig.ServerConfig, {} as never),
     FileSystem.layerNoop({}),
   );
-  return { runtime, packets, runs, runStatus, replies, shells, userMessages, layer };
+  const h: Harness = {
+    runtime,
+    packets,
+    runs,
+    runStatus,
+    replies,
+    shells,
+    userMessages,
+    steerDelivery: "queued",
+    projects,
+    ownedAtLaunch,
+    layer,
+  };
+  return h;
 }
 
 const chatOf = (h: Harness, botId: string) =>
@@ -369,7 +402,7 @@ describe("bot turns", () => {
             settings: { permissions: { "role.edit": "deny" }, turnsPerDay: 100, maxThreads: 3 },
           });
           const denied = yield* Effect.flip(edit("Anything."));
-          expect(denied.detail).toContain("does not let you replace its role");
+          expect(denied.detail).toContain("does not let you replace your role");
         }),
       ),
   );
@@ -398,6 +431,102 @@ describe("bot turns", () => {
             "Bot used its 1 turns for today. What happens meanwhile waits for tomorrow, or raise its budget.",
           ],
         ]);
+        const read = () => Bots.readBot(new URLSearchParams({ botId }));
+        expect((yield* read()).bot.turnsToday).toBe(1);
+
+        // One more turn a day lets the held messages run now.
+        yield* Bots.saveSettings({
+          botId,
+          settings: { permissions: {}, turnsPerDay: 2, maxThreads: 3 },
+        });
+        expect(h.runs).toHaveLength(2);
+        expect((yield* read()).bot.turnsToday).toBe(2);
+
+        // A count left from an earlier day reads as none used today.
+        h.runtime.store().countTurn(botId, "2000-01-01");
+        expect((yield* read()).bot.turnsToday).toBe(0);
+      }),
+    ),
+  );
+
+  it.effect("joins a message to the running turn when T3 steers it in", () =>
+    withHarness((h) =>
+      Effect.gen(function* () {
+        const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+        yield* Bots.sendMessage({ botId, text: "Start." });
+        h.steerDelivery = "steered";
+        const { messageId } = yield* Bots.sendMessage({ botId, text: "Also this." });
+        const steered = h.runtime
+          .store()
+          .recentChat(botId, 10)
+          .find((message) => message.id === messageId);
+        expect(steered?.turnRunId).toBe(h.runs[0]!.runId);
+        // Nothing waits, so the end of the turn starts no other.
+        yield* endRun(h, botId, 0, "Done both.");
+        expect(h.runs).toHaveLength(1);
+      }),
+    ),
+  );
+
+  it.effect("owns a thread before it launches, and lets it go when the launch fails", () =>
+    withHarness((h) =>
+      Effect.gen(function* () {
+        const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+        h.projects.push({ id: "p1", title: "Repo", workspaceRoot: "/repo" });
+        const start = (prompt: string) =>
+          runTool({
+            bot: botId,
+            argv: ["thread", "start", "--project=Repo", "--follow", "now", prompt],
+            stdin: "",
+          });
+        expect(yield* start("Fix --flaky tests")).toContain("started in Repo");
+        expect(h.ownedAtLaunch).toEqual([true]);
+        const [owned] = h.runtime.store().listThreads(botId);
+        expect(owned?.follow).toBe("now");
+        expect(h.packets.at(-1)).toBe("Fix --flaky tests");
+
+        const failed = yield* Effect.flip(start("fail"));
+        expect(failed.detail).toContain("did not start");
+        expect(h.runtime.store().listThreads(botId)).toHaveLength(1);
+        expect(h.runtime.ownedThreads.size).toBe(1);
+      }),
+    ),
+  );
+
+  it.effect("accepts a tool call only with the token of a bot that exists", () =>
+    withHarness((h) =>
+      Effect.gen(function* () {
+        const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+        const token = yield* Effect.promise(() =>
+          NodeFSP.readFile(Bots.tokenPath(h.runtime.botsDir, botId), "utf8"),
+        );
+        const call = (bot: string, given: string) =>
+          authenticateTool(`Bearer ${given}`, { bot, argv: ["help"], stdin: "" });
+        expect((yield* call(botId, token)).bot).toBe(botId);
+        expect((yield* Effect.flip(call(botId, "wrong"))).status).toBe(401);
+        // A token file outside any stored bot is never read.
+        yield* Effect.promise(() =>
+          NodeFSP.writeFile(NodePath.join(h.runtime.botsDir, "token"), "planted"),
+        );
+        expect((yield* Effect.flip(call(".", "planted"))).status).toBe(401);
+      }),
+    ),
+  );
+
+  it.effect("shows only notes inside the bot's folder, not where a link points", () =>
+    withHarness((h) =>
+      Effect.gen(function* () {
+        const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+        const notes = NodePath.join(h.runtime.botsDir, botId, "workspace", "notes");
+        const outside = NodePath.join(h.runtime.botsDir, "secret.txt");
+        yield* Effect.promise(async () => {
+          await NodeFSP.writeFile(NodePath.join(notes, "plan.md"), "Plan");
+          await NodeFSP.writeFile(outside, "secret");
+          await NodeFSP.symlink(outside, NodePath.join(notes, "link.md"));
+        });
+        const read = (name: string) => Bots.readNote(new URLSearchParams({ botId, name }));
+        expect((yield* read("plan.md")).text).toBe("Plan");
+        expect((yield* Effect.flip(read("link.md"))).status).toBe(404);
       }),
     ),
   );
@@ -448,6 +577,48 @@ describe("bot turns", () => {
       ),
   );
 
+  it.effect(
+    "takes a thread as the user's from a run seen only as ended, and never from T3's own messages",
+    () =>
+      withHarness((h) =>
+        Effect.gen(function* () {
+          const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+          const store = h.runtime.store();
+          for (const [threadId, message] of [
+            // The user typed here while the server was down; only the end of their run is seen.
+            ["t-user-down", { createdBy: "user" }],
+            // Messages T3 writes with the user role are not the user's.
+            ["t-notified", { createdBy: "user", notification: {} }],
+            ["t-delegated", { createdBy: "user", delegatedCompletion: {} }],
+            ["t-compacted", { createdBy: "user", idleCompaction: {} }],
+          ] as const) {
+            store.addThread({
+              threadId,
+              botId,
+              projectId: "p",
+              itemId: null,
+              follow: "routine",
+              createdAt: "t0",
+            });
+            h.runtime.ownedThreads.set(threadId, botId);
+            h.userMessages.set(threadId, [{ ...message, createdAt: DateTime.makeUnsafe(0) }]);
+            h.shells.set(threadId, { latestRunId: `${threadId}-run`, status: "completed" });
+          }
+          yield* reconcileThreads();
+          const queued = store.queued(botId).map((event) => event.text);
+          expect(queued).toContainEqual(
+            expect.stringContaining("The user took over thread t-user-down"),
+          );
+          expect(queued).not.toContainEqual(expect.stringContaining("t-user-down completed"));
+          expect(store.getThread("t-user-down")?.takenOver).toBe(true);
+          for (const threadId of ["t-notified", "t-delegated", "t-compacted"]) {
+            expect(store.getThread(threadId)?.takenOver).toBe(false);
+            expect(queued).toContainEqual(expect.stringContaining(`Thread ${threadId} completed`));
+          }
+        }),
+      ),
+  );
+
   it.effect("lists the skills a bot wrote and the shared ones, its own winning a name", () =>
     withHarness((h) =>
       Effect.gen(function* () {
@@ -478,4 +649,46 @@ describe("bot turns", () => {
       }),
     ),
   );
+});
+
+describe("t3bot arguments", () => {
+  it.each([
+    {
+      argv: ["say", "Please", "run", "--dry-run", "first"],
+      positional: ["say", "Please", "run", "--dry-run", "first"],
+      flags: {},
+    },
+    {
+      argv: ["thread", "start", "--project=t3code", "--follow=now", "--worktree", "Go"],
+      positional: ["thread", "start", "Go"],
+      flags: { project: "t3code", follow: "now", worktree: "true" },
+    },
+    {
+      argv: ["thread", "start", "--project", "t3code", "--", "--title", "is", "text"],
+      positional: ["thread", "start", "--title", "is", "text"],
+      flags: { project: "t3code" },
+    },
+    {
+      argv: ["thread", "send", "t1", "use", "--worktree", "--title", "x"],
+      positional: ["thread", "send", "t1", "use", "--worktree", "--title", "x"],
+      flags: {},
+    },
+    {
+      argv: ["item", "add", "--note=a=b", "--unknown", "Title"],
+      positional: ["item", "add", "--unknown", "Title"],
+      flags: { note: "a=b" },
+    },
+  ])("parses $argv", ({ argv, positional, flags }) => {
+    const parsed = parseArgs(argv);
+    expect(parsed.positional).toEqual(positional);
+    expect(Object.fromEntries(parsed.flags)).toEqual(flags);
+  });
+
+  it("quotes the tool's path for the shell", () => {
+    expect(Bots.shellQuote("/home/me/.t3/bots/bin/t3bot")).toBe("/home/me/.t3/bots/bin/t3bot");
+    expect(Bots.shellQuote("/Users/me/Library/Application Support/t3")).toBe(
+      "'/Users/me/Library/Application Support/t3'",
+    );
+    expect(Bots.shellQuote("it's")).toBe("'it'\\''s'");
+  });
 });

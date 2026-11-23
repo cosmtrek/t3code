@@ -35,6 +35,8 @@ export interface BotRuntimeShape {
   readonly active: Latch.Latch;
   /** Starting and ending turns, one at a time, so a bot never runs two. */
   readonly turnLock: Semaphore.Semaphore;
+  /** Thread starts, one at a time, so concurrent starts respect the thread limit. */
+  readonly threadStartLock: Semaphore.Semaphore;
   /** Work thread id to bot id, for one lookup per domain event. */
   readonly workThreads: Map<string, string>;
   /** Threads bots started, by id, to the bot that owns each. */
@@ -61,6 +63,7 @@ const make = Effect.gen(function* () {
   );
   const active = yield* Latch.make((store?.listBots().length ?? 0) > 0);
   const turnLock = yield* Semaphore.make(1);
+  const threadStartLock = yield* Semaphore.make(1);
   const listeners = new Set<(event: BotEvent) => void>();
   let cliWritten = false;
 
@@ -84,6 +87,7 @@ const make = Effect.gen(function* () {
     },
     active,
     turnLock,
+    threadStartLock,
     workThreads,
     ownedThreads,
     publish: (botId) => {
