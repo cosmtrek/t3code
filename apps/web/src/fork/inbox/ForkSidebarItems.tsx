@@ -1,5 +1,5 @@
 import { useNavigate } from "@tanstack/react-router";
-import { BotMessageSquareIcon, InboxIcon } from "lucide-react";
+import type { ReactNode } from "react";
 
 import { SidebarMenuButton, SidebarMenuItem } from "../../components/ui/sidebar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../../components/ui/tooltip";
@@ -30,7 +30,7 @@ function BotsItem({ onNavigate }: { readonly onNavigate: () => void }) {
               }}
               size="icon"
             >
-              <BotMessageSquareIcon />
+              <BotGlyph />
             </SidebarMenuButton>
           }
         />
@@ -59,7 +59,7 @@ function InboxItem({ onNavigate }: { readonly onNavigate: () => void }) {
               }}
               size="icon"
             >
-              <InboxIcon />
+              <InboxGlyph />
             </SidebarMenuButton>
           }
         />
@@ -74,5 +74,41 @@ function InboxItem({ onNavigate }: { readonly onNavigate: () => void }) {
         </span>
       ) : null}
     </SidebarMenuItem>
+  );
+}
+
+/** Drawn on lucide's 24px grid and stroke so they sit beside the other footer icons. */
+function Glyph({ children }: { readonly children: ReactNode }) {
+  return (
+    <svg
+      aria-hidden
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth={2}
+      viewBox="0 0 24 24"
+    >
+      {children}
+    </svg>
+  );
+}
+
+function BotGlyph() {
+  return (
+    <Glyph>
+      <rect x="2" y="3" width="20" height="18" rx="7" />
+      <path d="M8.5 10.5v3" />
+      <path d="M15.5 10.5v3" />
+    </Glyph>
+  );
+}
+
+function InboxGlyph() {
+  return (
+    <Glyph>
+      <path d="M9 3h6a7 7 0 0 1 7 7v1a7 7 0 0 1-7 7h-3l-5 3.5V17.6A7 7 0 0 1 2 11v-1a7 7 0 0 1 7-7z" />
+      <path d="M8 10.5h8" />
+    </Glyph>
   );
 }
