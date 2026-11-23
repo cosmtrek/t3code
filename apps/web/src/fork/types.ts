@@ -355,6 +355,14 @@ export interface BotDetail {
     readonly bytes: number;
     readonly updatedAt: string;
   }>;
+  /** Skills the bot wrote: its own first, then those every bot shares. */
+  readonly skills: ReadonlyArray<{
+    readonly name: string;
+    readonly description: string;
+    readonly shared: boolean;
+    readonly folder: string;
+    readonly path: string;
+  }>;
 }
 
 export interface BotNotebook {

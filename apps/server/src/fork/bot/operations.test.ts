@@ -447,4 +447,35 @@ describe("bot turns", () => {
         }),
       ),
   );
+
+  it.effect("lists the skills a bot wrote and the shared ones, its own winning a name", () =>
+    withHarness((h) =>
+      Effect.gen(function* () {
+        const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+        const write = (dir: string, body: string) =>
+          Effect.promise(async () => {
+            await NodeFSP.mkdir(dir, { recursive: true });
+            await NodeFSP.writeFile(NodePath.join(dir, "SKILL.md"), body);
+          });
+        const own = NodePath.join(h.runtime.botsDir, botId, "workspace", "skills");
+        const shared = NodePath.join(h.runtime.botsDir, "skills");
+        yield* write(
+          NodePath.join(own, "ci"),
+          '---\nname: ci-check\ndescription: "Use when CI on r/* is red."\n---\nSteps',
+        );
+        yield* write(
+          NodePath.join(shared, "ci-copy"),
+          "---\nname: ci-check\ndescription: older shared copy\n---\n",
+        );
+        yield* write(NodePath.join(shared, "release"), "No frontmatter here.");
+        yield* Bots.sendMessage({ botId, text: "Hi" });
+        const skills = h.packets[0]!.split("Skills:\n")[1]!.split("\n").slice(0, 3);
+        expect(skills).toEqual([
+          `  ci-check: Use when CI on r/* is red. - ${NodePath.join(own, "ci", "SKILL.md")}`,
+          `  release (shared): (no description) - ${NodePath.join(shared, "release", "SKILL.md")}`,
+          expect.not.stringContaining("older shared copy"),
+        ]);
+      }),
+    ),
+  );
 });

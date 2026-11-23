@@ -31,6 +31,7 @@ import { firstProviderDefault, ForkHttpError } from "../inbox/operations.ts";
 import { BotRuntime, type BotRuntimeShape } from "./BotRuntime.ts";
 import { buildPacket, RECENT_CHAT_LIMIT, type Notebook } from "./packet.ts";
 import { nextDueAt } from "./routines.ts";
+import { listSkills, ownSkillsPath, sharedSkillsPath } from "./skills.ts";
 import { GATED_ACTIONS, type Bot, type BotSettings, type ChatMessage } from "./store.ts";
 
 /** Chat shown on the Bots page; older messages stay in the store. */
@@ -111,8 +112,11 @@ const listNotes = (botsDir: string, botId: string) =>
       .slice(0, NOTES_LISTED);
   });
 
-const ensureWorkspace = (botsDir: string, botId: string) =>
-  NodeFSP.mkdir(notesPath(botsDir, botId), { recursive: true });
+const ensureWorkspace = async (botsDir: string, botId: string) => {
+  await NodeFSP.mkdir(notesPath(botsDir, botId), { recursive: true });
+  await NodeFSP.mkdir(ownSkillsPath(botsDir, botId), { recursive: true });
+  await NodeFSP.mkdir(sharedSkillsPath(botsDir), { recursive: true });
+};
 export const tokenPath = (botsDir: string, botId: string) => NodePath.join(botsDir, botId, "token");
 
 /** Each bot's tool token; written once, kept until the bot is deleted. */
@@ -193,23 +197,31 @@ export const readBot = Effect.fn("ForkBot.readBot")(function* (params: URLSearch
     questions: store.openQuestions(bot.id),
     notesPath: notesPath(runtime.botsDir, bot.id),
     notes: yield* listNotes(runtime.botsDir, bot.id),
+    skills: yield* Effect.promise(() => listSkills(runtime.botsDir, bot.id)),
   };
 });
 
-const NoteInput = Schema.Struct({ botId: Schema.String, name: Schema.String });
+const NoteInput = Schema.Struct({
+  botId: Schema.String,
+  name: Schema.String,
+  kind: Schema.optional(Schema.Literals(["note", "skill", "shared-skill"])),
+});
 
+/** A note, or a skill's SKILL.md by its folder name, for the Bots page to show. */
 export const readNote = Effect.fn("ForkBot.readNote")(function* (params: URLSearchParams) {
   const runtime = yield* BotRuntime;
   const input = yield* decode(NoteInput, Object.fromEntries(params));
   const bot = yield* requireBot(input.botId);
   if (NodePath.basename(input.name) !== input.name || input.name.startsWith(".")) {
-    return yield* badRequest("Name a file in the notes folder.", "name");
+    return yield* badRequest("Name a file in the bot's folder.", "name");
   }
-  const text = yield* Effect.promise(() =>
-    NodeFSP.readFile(NodePath.join(notesPath(runtime.botsDir, bot.id), input.name), "utf8").catch(
-      () => null,
-    ),
-  );
+  const filePath =
+    input.kind === "skill"
+      ? NodePath.join(ownSkillsPath(runtime.botsDir, bot.id), input.name, "SKILL.md")
+      : input.kind === "shared-skill"
+        ? NodePath.join(sharedSkillsPath(runtime.botsDir), input.name, "SKILL.md")
+        : NodePath.join(notesPath(runtime.botsDir, bot.id), input.name);
+  const text = yield* Effect.promise(() => NodeFSP.readFile(filePath, "utf8").catch(() => null));
   if (text === null) {
     return yield* new ForkHttpError({ status: 404, code: "not_found", detail: "No such note." });
   }
@@ -350,7 +362,7 @@ const steer = Effect.fn("ForkBot.steer")(function* (bot: Bot, messageId: string,
   );
 });
 
-const postError = Effect.fn("ForkBot.postError")(function* (botId: string, text: string) {
+export const postError = Effect.fn("ForkBot.postError")(function* (botId: string, text: string) {
   const runtime = yield* BotRuntime;
   runtime.store().addChat({ id: newId("msg"), botId, role: "error", text, createdAt: nowIso() });
   runtime.publish(botId);
@@ -461,6 +473,9 @@ const wake = Effect.fn("ForkBot.wake")(function* (botId: string) {
         notebook: yield* readNotebook(botId),
         notesPath: notesPath(runtime.botsDir, botId),
         notes: yield* listNotes(runtime.botsDir, botId),
+        skillsPath: ownSkillsPath(runtime.botsDir, botId),
+        sharedSkillsPath: sharedSkillsPath(runtime.botsDir),
+        skills: yield* Effect.promise(() => listSkills(runtime.botsDir, botId)),
         questions: store.openQuestions(botId),
         recentChat: answered,
         newMessages: waiting,

@@ -9,7 +9,7 @@ import * as Stream from "effect/Stream";
 
 import * as ThreadManagement from "../../orchestration-v2/ThreadManagementService.ts";
 import { BotRuntime } from "./BotRuntime.ts";
-import { finishRun, isTerminalRunStatus, notify, nowIso } from "./operations.ts";
+import { finishRun, isTerminalRunStatus, notify, nowIso, postError } from "./operations.ts";
 import type { OwnedThread } from "./store.ts";
 import { takenOverByUser } from "./tools.ts";
 
@@ -92,12 +92,26 @@ export const followThreads = Effect.fn("ForkBot.followThreads")(function* <E, R>
   events: Stream.Stream<OrchestrationV2DomainEvent, E, R>,
 ) {
   const runtime = yield* BotRuntime;
+  // Work-thread requests already posted; a request is updated more than once while pending.
+  const posted = new Set<string>();
   // Untraced: it runs for every domain event in the environment.
   const handle = Effect.fnUntraced(function* (event: OrchestrationV2DomainEvent) {
     const workBot = runtime.workThreads.get(event.threadId);
     if (workBot !== undefined) {
       if (event.type === "run.updated" && isTerminalRunStatus(event.payload.status)) {
         yield* finishRun(workBot, event.payload.id, event.payload.status);
+      }
+      // The turn cannot go on until someone answers in the work thread, and only the user can.
+      if (
+        event.type === "runtime-request.updated" &&
+        event.payload.status === "pending" &&
+        !posted.has(event.payload.id)
+      ) {
+        posted.add(event.payload.id);
+        yield* postError(
+          workBot,
+          `The bot's turn waits for ${event.payload.kind === "user_input" ? "an answer" : "an approval"} in its work thread. Open the work thread to answer it.`,
+        );
       }
       return;
     }

@@ -595,7 +595,7 @@ function NotebookPanel({
   const { notebook, role } = detail;
   const botId = detail.bot.id;
   const [error, setError] = useState<string | null>(null);
-  const [openNote, setOpenNote] = useState<string | null>(null);
+  const [openFile, setOpenFile] = useState<OpenFile | null>(null);
   const handBack = async (threadId: string) => {
     setError(null);
     try {
@@ -714,7 +714,7 @@ function NotebookPanel({
               <button
                 key={note.name}
                 type="button"
-                onClick={() => setOpenNote(note.name)}
+                onClick={() => setOpenFile({ kind: "note", name: note.name, title: note.name })}
                 className="flex min-w-0 items-center gap-1.5 text-left text-sm hover:text-foreground"
               >
                 <FileTextIcon className="size-3.5 shrink-0 text-muted-foreground" />
@@ -726,6 +726,40 @@ function NotebookPanel({
             ))
           )}
           <p className="text-xs text-muted-foreground wrap-anywhere">{detail.notesPath}</p>
+        </NotebookSection>
+        <NotebookSection title="Skills">
+          {detail.skills.length === 0 ? (
+            <p className="text-xs text-muted-foreground">
+              None yet. The bot writes one when it works out something it will repeat.
+            </p>
+          ) : (
+            detail.skills.map((skill) => (
+              <button
+                key={skill.path}
+                type="button"
+                onClick={() =>
+                  setOpenFile({
+                    kind: skill.shared ? "shared-skill" : "skill",
+                    name: skill.folder,
+                    title: skill.name,
+                  })
+                }
+                className="flex min-w-0 flex-col text-left hover:text-foreground"
+              >
+                <span className="flex min-w-0 items-center gap-1.5 text-sm">
+                  <span className="min-w-0 flex-1 truncate">{skill.name}</span>
+                  {skill.shared ? (
+                    <span className="shrink-0 text-xs text-muted-foreground">shared</span>
+                  ) : null}
+                </span>
+                {skill.description ? (
+                  <span className="line-clamp-2 text-xs text-muted-foreground">
+                    {skill.description}
+                  </span>
+                ) : null}
+              </button>
+            ))
+          )}
         </NotebookSection>
         <NotebookSection title="Memory">
           {notebook.memory.length === 0 ? (
@@ -742,32 +776,40 @@ function NotebookPanel({
         </NotebookSection>
         <RoleEditor key={botId} environmentId={environmentId} botId={botId} role={role} />
       </div>
-      {openNote !== null ? (
+      {openFile !== null ? (
         <NoteDialog
           environmentId={environmentId}
           botId={botId}
-          name={openNote}
-          onClose={() => setOpenNote(null)}
+          file={openFile}
+          onClose={() => setOpenFile(null)}
         />
       ) : null}
     </aside>
   );
 }
 
+interface OpenFile {
+  readonly kind: "note" | "skill" | "shared-skill";
+  /** The note's file name, or the skill's folder. */
+  readonly name: string;
+  readonly title: string;
+}
+
 function NoteDialog({
   environmentId,
   botId,
-  name,
+  file,
   onClose,
 }: {
   readonly environmentId: EnvironmentId;
   readonly botId: string;
-  readonly name: string;
+  readonly file: OpenFile;
   readonly onClose: () => void;
 }) {
+  const name = file.kind === "note" ? file.name : "SKILL.md";
   const note = useForkResource<{ name: string; text: string }>(
     environmentId,
-    `/bots/note?botId=${encodeURIComponent(botId)}&name=${encodeURIComponent(name)}`,
+    `/bots/note?botId=${encodeURIComponent(botId)}&kind=${file.kind}&name=${encodeURIComponent(file.name)}`,
     (event) => isBotEvent(event) && event.botId === botId,
   );
   return (
@@ -779,7 +821,7 @@ function NoteDialog({
     >
       <DialogPopup className="sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>{name}</DialogTitle>
+          <DialogTitle>{file.title}</DialogTitle>
         </DialogHeader>
         <DialogPanel>
           {note.data ? (

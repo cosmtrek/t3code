@@ -101,10 +101,12 @@ bots/
     token          # per-bot tool token, mode 0600
     workspace/     # its work thread's folder; deleted with the bot
       notes/       # longer notes the bot writes with its shell, listed in every packet
+      skills/      # skills it writes for itself: <name>/SKILL.md
+  skills/          # skills a bot wrote for every bot in the environment
   bin/t3bot        # the tool CLI, written by the server at startup
 ```
 
-`bots.sqlite` holds what has structure: `bots` (name, model, permissions, budget, skills,
+`bots.sqlite` holds what has structure: `bots` (name, model, permissions, budget,
 scope, paused), `goals`, `items` (goal, status, next step, waiting on, last touched, set
 aside), `routines` (schedule, prompt, next due), `memory` (one row per note; their total is
 capped at 4 KB), `threads` (thread id, bot, item, follow-up mode,
@@ -249,8 +251,10 @@ What happened since your last turn:
 - the user: "how is the Android build going?"
 ```
 
-Skills are named by path, not installed, so they work the same with every provider and need no
-change to provider skill discovery. Transcripts, chat history, and diffs are not included; the bot
+Bots write their own skills with their shell, as they write notes; the user does not pick them.
+The packet lists each skill's name, description, and path, the bot's own before shared ones, and
+an own skill hides a shared one of the same name. Named by path, not installed, they work the
+same with every provider and need no change to provider skill discovery. Transcripts, chat history, and diffs are not included; the bot
 reads them with paged tool calls.
 
 ### Tools

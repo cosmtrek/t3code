@@ -3,6 +3,7 @@
  * the provider's context. Pure, so its shape and caps are tested without a server.
  */
 import { describeSchedule } from "./routines.ts";
+import type { Skill } from "./skills.ts";
 import type {
   ChatMessage,
   Goal,
@@ -40,6 +41,10 @@ export interface PacketInput {
   /** The bot's notes folder and what is in it, newest first. */
   readonly notesPath: string;
   readonly notes: ReadonlyArray<{ readonly name: string; readonly bytes: number }>;
+  /** Where it writes its own skills and shared ones, and those it has. */
+  readonly skillsPath: string;
+  readonly sharedSkillsPath: string;
+  readonly skills: ReadonlyArray<Pick<Skill, "name" | "description" | "path" | "shared">>;
   /** Its questions the user has not answered yet. */
   readonly questions: ReadonlyArray<Pick<Question, "id" | "text">>;
   /** Messages already answered, oldest first. */
@@ -138,6 +143,12 @@ export function buildPacket(input: PacketInput): string {
     "  (one fact per line; rewrite a note that changed, remove one that no longer holds).",
     `- Longer notes (findings, checklists, drafts) go in Markdown files in ${input.notesPath},`,
     "  read when needed; a memory line can point to one. Keep nothing in other memory tools.",
+    "- Skills are how-tos you write for yourself: when you have worked out a procedure you will",
+    `  repeat, write it as ${input.skillsPath}/<name>/SKILL.md, starting with frontmatter`,
+    "  (`name:` and a one-line `description:` saying when it applies). Put one useful to every",
+    `  bot in ${input.sharedSkillsPath}/<name>/ instead. Fix a skill when it turns out wrong.`,
+    "  Every turn lists your skills, so they need no memory line. Read a skill's SKILL.md",
+    "  before a task it applies to.",
     "- Do real work in threads you start with `thread start`, not here. They wake you when they",
     "  stop, so start one and end your turn; never wait on it.",
     "",
@@ -146,6 +157,13 @@ export function buildPacket(input: PacketInput): string {
     ...(input.notes.length === 0
       ? ["  (none)"]
       : input.notes.slice(0, NOTES_LISTED).map((note) => `  ${note.name} (${note.bytes} bytes)`)),
+    "Skills:",
+    ...(input.skills.length === 0
+      ? ["  (none yet)"]
+      : input.skills.map(
+          (skill) =>
+            `  ${skill.name}${skill.shared ? " (shared)" : ""}: ${skill.description || "(no description)"} - ${skill.path}`,
+        )),
     ...(input.questions.length > 0
       ? [
           "Waiting for the user's answer:",
