@@ -44,6 +44,8 @@ interface Harness {
   readonly userMessages: Map<string, Array<UserMessage>>;
   /** The runtime mode of each launch, and each later switch of one, in order. */
   readonly modes: string[];
+  /** The model selection of each launch, in order. */
+  readonly models: unknown[];
   /** What T3 answers a steer with: a provider turn to join, or only the queue. */
   steerDelivery: "steered" | "queued";
   /** Projects `thread start` may name, and whether each worker launch saw its thread owned. */
@@ -100,6 +102,7 @@ async function harness(store = new BotStore(":memory:")): Promise<Harness> {
   const projects: Harness["projects"] = [];
   const ownedAtLaunch: boolean[] = [];
   const modes: string[] = [];
+  const models: unknown[] = [];
   const nextRun = (threadId: string) => {
     const runId = `run-${runs.length + 1}`;
     runs.push({ threadId, runId });
@@ -151,6 +154,7 @@ async function harness(store = new BotStore(":memory:")): Promise<Harness> {
         }
         packets.push(input.initialMessage?.text ?? "");
         modes.push(input.runtimeMode);
+        models.push(input.modelSelection);
         const runId = nextRun(input.threadId!);
         return Effect.succeed({
           threadId: input.threadId,
@@ -188,6 +192,7 @@ async function harness(store = new BotStore(":memory:")): Promise<Harness> {
     projects,
     ownedAtLaunch,
     modes,
+    models,
     layer,
   };
   return h;
@@ -515,7 +520,8 @@ describe("bot turns", () => {
   it.effect("owns a thread before it launches, and lets it go when the launch fails", () =>
     withHarness((h) =>
       Effect.gen(function* () {
-        const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+        const ownModel = { ...MODEL, options: [{ id: "effort", value: "medium" }] };
+        const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: ownModel });
         h.projects.push({ id: "p1", title: "Repo", workspaceRoot: "/repo" });
         const start = (prompt: string) =>
           runTool({
@@ -528,6 +534,8 @@ describe("bot turns", () => {
         const [owned] = h.runtime.store().listThreads(botId);
         expect(owned?.follow).toBe("now");
         expect(h.packets.at(-1)).toBe("Fix --flaky tests");
+        // Its own model, so its own effort rather than the provider's default.
+        expect(h.models.at(-1)).toEqual(ownModel);
 
         const failed = yield* Effect.flip(start("fail"));
         expect(failed.detail).toContain("did not start");

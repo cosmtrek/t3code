@@ -559,11 +559,17 @@ const threadCommand = Effect.fn("ForkBot.threadCommand")(function* (
         `No project "${wanted}". Projects: ${projects.map((shell) => `${shell.title} (${shell.workspaceRoot})`).join(", ")}`,
       );
     }
-    const modelSelection = {
+    const picked = {
       instanceId: flags.get("provider") ?? bot.modelSelection.instanceId,
       model: flags.get("model") ?? (flags.has("provider") ? "" : bot.modelSelection.model),
     } as ModelSelection;
-    if (modelSelection.model === "") return yield* fail("With --provider, give --model too.");
+    if (picked.model === "") return yield* fail("With --provider, give --model too.");
+    // Its own model keeps its options, effort among them; another starts at that model's defaults.
+    const modelSelection =
+      picked.instanceId === bot.modelSelection.instanceId &&
+      picked.model === bot.modelSelection.model
+        ? bot.modelSelection
+        : picked;
     // One start at a time, so two starts in one turn cannot both fit under the limit.
     return yield* runtime.threadStartLock.withPermit(
       Effect.gen(function* () {
