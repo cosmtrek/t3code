@@ -1,6 +1,7 @@
 /**
- * The wake packet: everything one turn needs, so no turn depends on what an earlier one left in
- * the provider's context. Pure, so its shape and caps are tested without a server.
+ * The wake packet: everything a fresh provider session needs, so no turn depends on what an
+ * earlier session left; within a session, only what changed. Pure, so its shape and caps are
+ * tested without a server.
  */
 import { describeSchedule } from "./routines.ts";
 import type { Skill } from "./skills.ts";
@@ -114,7 +115,24 @@ export function renderNotebook(notebook: Notebook): string {
   ].join("\n");
 }
 
-export function buildPacket(input: PacketInput): string {
+/**
+ * The parts of a packet the provider session keeps once it has seen them: a turn in the same
+ * session repeats only those that changed since.
+ */
+export type PacketSections = Readonly<
+  Record<"brief" | "notebook" | "notes" | "skills" | "questions", string>
+>;
+
+export interface Packet {
+  readonly text: string;
+  readonly sections: PacketSections;
+}
+
+/**
+ * The full packet when `seen` is null (a fresh provider session), otherwise only what is new to
+ * a session that holds the earlier turns: changed sections, events, and the new messages.
+ */
+export function buildPacket(input: PacketInput, seen: PacketSections | null = null): Packet {
   const role = input.role.trim();
   const recent = input.recentChat
     .slice(-RECENT_CHAT_LIMIT)
@@ -128,51 +146,73 @@ export function buildPacket(input: PacketInput): string {
     : [];
   const events = input.events.slice(0, EVENT_LIMIT);
   const moreEvents = input.events.length - events.length;
-  return [
-    `You are ${input.name}, a bot working for the user in T3 Code. It is ${input.now.toString()}.`,
-    role === ""
-      ? "The user has not written your role yet. Work from the chat and your notebook, and ask when your job is unclear."
-      : `Your role, in the user's words:\n${role}`,
-    "",
-    `How to act: only through \`${input.tool}\` from your shell (\`${input.tool} help\` lists commands).`,
-    "- This thread is your workspace; the user does not read it. Your last message in a turn is",
-    "  posted to the user. When nothing is worth telling them, end with exactly NO_REPLY.",
-    "  Use `say` only to post something before the turn ends.",
-    "- Your conversation here is reset often. Before you stop, write down what you must remember:",
-    "  items for work in progress, routines for anything periodic, memory for lasting facts",
-    "  (one fact per line; rewrite a note that changed, remove one that no longer holds).",
-    `- Longer notes (findings, checklists, drafts) go in Markdown files in ${input.notesPath},`,
-    "  read when needed; a memory line can point to one. Keep nothing in other memory tools.",
-    "- Skills are how-tos you write for yourself: when you have worked out a procedure you will",
-    `  repeat, write it as ${input.skillsPath}/<name>/SKILL.md, starting with frontmatter`,
-    "  (`name:` and a one-line `description:` saying when it applies). Put one useful to every",
-    `  bot in ${input.sharedSkillsPath}/<name>/ instead. Fix a skill when it turns out wrong.`,
-    "  Every turn lists your skills, so they need no memory line. Read a skill's SKILL.md",
-    "  before a task it applies to.",
-    "- Do real work in threads you start with `thread start`, not here. They wake you when they",
-    "  stop, so start one and end your turn; never wait on it.",
-    "",
-    renderNotebook(input.notebook),
-    `Notes (${input.notesPath}):`,
-    ...(input.notes.length === 0
-      ? ["  (none)"]
-      : input.notes.slice(0, NOTES_LISTED).map((note) => `  ${note.name} (${note.bytes} bytes)`)),
-    "Skills:",
-    ...(input.skills.length === 0
-      ? ["  (none yet)"]
-      : input.skills.map(
-          (skill) =>
-            `  ${skill.name}${skill.shared ? " (shared)" : ""}: ${skill.description || "(no description)"} - ${skill.path}`,
-        )),
-    ...(input.questions.length > 0
-      ? [
-          "Waiting for the user's answer:",
-          ...input.questions.map(
-            (question) =>
-              `  question ${question.id}: ${clip(question.text.split("\n", 1)[0]!, 200)}`,
-          ),
-        ]
-      : []),
+  const sections: PacketSections = {
+    brief: [
+      role === ""
+        ? "The user has not written your role yet. Work from the chat and your notebook, and ask when your job is unclear."
+        : `Your role, in the user's words:\n${role}`,
+      "",
+      `How to act: only through \`${input.tool}\` from your shell (\`${input.tool} help\` lists commands).`,
+      "- This thread is your workspace; the user does not read it. Your last message in a turn is",
+      "  posted to the user. When nothing is worth telling them, end with exactly NO_REPLY.",
+      "  Use `say` only to post something before the turn ends.",
+      "- Your conversation here is reset often. Before you stop, write down what you must remember:",
+      "  items for work in progress, routines for anything periodic, memory for lasting facts",
+      "  (one fact per line; rewrite a note that changed, remove one that no longer holds).",
+      `- Longer notes (findings, checklists, drafts) go in Markdown files in ${input.notesPath},`,
+      "  read when needed; a memory line can point to one. Keep nothing in other memory tools.",
+      "- Skills are how-tos you write for yourself: when you have worked out a procedure you will",
+      `  repeat, write it as ${input.skillsPath}/<name>/SKILL.md, starting with frontmatter`,
+      "  (`name:` and a one-line `description:` saying when it applies). Put one useful to every",
+      `  bot in ${input.sharedSkillsPath}/<name>/ instead. Fix a skill when it turns out wrong.`,
+      "  Every turn lists your skills, so they need no memory line. Read a skill's SKILL.md",
+      "  before a task it applies to.",
+      "- Do real work in threads you start with `thread start`, not here. They wake you when they",
+      "  stop, so start one and end your turn; never wait on it.",
+    ].join("\n"),
+    notebook: renderNotebook(input.notebook),
+    notes: [
+      `Notes (${input.notesPath}):`,
+      ...(input.notes.length === 0
+        ? ["  (none)"]
+        : input.notes.slice(0, NOTES_LISTED).map((note) => `  ${note.name} (${note.bytes} bytes)`)),
+    ].join("\n"),
+    skills: [
+      "Skills:",
+      ...(input.skills.length === 0
+        ? ["  (none yet)"]
+        : input.skills.map(
+            (skill) =>
+              `  ${skill.name}${skill.shared ? " (shared)" : ""}: ${skill.description || "(no description)"} - ${skill.path}`,
+          )),
+    ].join("\n"),
+    questions:
+      input.questions.length > 0
+        ? [
+            "Waiting for the user's answer:",
+            ...input.questions.map(
+              (question) =>
+                `  question ${question.id}: ${clip(question.text.split("\n", 1)[0]!, 200)}`,
+            ),
+          ].join("\n")
+        : seen !== null && seen.questions !== ""
+          ? "Waiting for the user's answer: (nothing now)"
+          : "",
+  };
+  const changed = (key: keyof PacketSections) =>
+    sections[key] !== "" && (seen === null || sections[key] !== seen[key]) ? [sections[key]] : [];
+  const fresh = seen === null;
+  const text = [
+    fresh
+      ? `You are ${input.name}, a bot working for the user in T3 Code. It is ${input.now.toString()}.`
+      : `It is ${input.now.toString()}. Your role and rules are as earlier in this conversation; only what changed since your last turn follows. Your last message still goes to the user, or NO_REPLY.`,
+    ...(fresh
+      ? [sections.brief, ""]
+      : changed("brief").map((brief) => `Your brief changed:\n${brief}\n`)),
+    ...changed("notebook"),
+    ...changed("notes"),
+    ...changed("skills"),
+    ...changed("questions"),
     ...(stale.length > 0
       ? [
           "",
@@ -180,7 +220,8 @@ export function buildPacket(input: PacketInput): string {
           ...stale.map((item) => `  #${item.id} ${item.title}`),
         ]
       : []),
-    ...(recent.length > 0 ? ["", "Recent chat with the user:", ...recent.map(line)] : []),
+    // A continuing session already holds the chat; only a fresh one needs it back.
+    ...(fresh && recent.length > 0 ? ["", "Recent chat with the user:", ...recent.map(line)] : []),
     ...(events.length > 0
       ? [
           "",
@@ -193,4 +234,5 @@ export function buildPacket(input: PacketInput): string {
       ? ["", "New from the user:", ...input.newMessages.map(line)]
       : []),
   ].join("\n");
+  return { text, sections };
 }

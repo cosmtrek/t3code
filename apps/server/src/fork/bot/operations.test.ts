@@ -244,11 +244,10 @@ describe("bot turns", () => {
         yield* endRun(h, botId, 0, "I watch the fork's releases.");
         expect(h.runs).toHaveLength(2);
         expect(h.runs[1]!.threadId).toBe(h.runs[0]!.threadId);
-        // The next turn carries the answered exchange as context and only the waiting message as new.
-        const [context, fresh] = h.packets[1]!.split("New from the user");
-        expect(context).toContain("I watch the fork's releases.");
-        expect(fresh).toContain("And how often?");
-        expect(fresh).not.toContain("What do you do?");
+        // The session holds the first turn, so the next carries only the waiting message.
+        expect(h.packets[1]).toContain("And how often?");
+        expect(h.packets[1]).not.toContain("What do you do?");
+        expect(h.packets[1]).not.toContain("Keep fork releases healthy.");
 
         yield* endRun(h, botId, 1, null);
         expect(chatOf(h, botId)).toEqual([
@@ -258,6 +257,12 @@ describe("bot turns", () => {
           ["error", "The turn ended without a reply."],
         ]);
         expect(h.runtime.store().getTurn(botId)).toBeNull();
+
+        // A failed turn may have lost what it was sent, so the one after resends it all.
+        yield* Bots.sendMessage({ botId, text: "Still there?" });
+        yield* Bots.finishRun(botId, h.runs[2]!.runId, "failed");
+        yield* Bots.sendMessage({ botId, text: "Hello?" });
+        expect(h.packets[3]).toContain("Keep fork releases healthy.");
       }),
     ),
   );

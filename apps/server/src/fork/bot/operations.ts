@@ -492,27 +492,33 @@ const wake = Effect.fn("ForkBot.wake")(function* (botId: string) {
       const answered = store
         .recentChat(botId, RECENT_CHAT_LIMIT + waiting.length)
         .filter((message) => !waiting.some((candidate) => candidate.id === message.id));
-      const packet = buildPacket({
-        name: bot.name,
-        role: yield* readRole(runtime.botsDir, botId),
-        tool: toolCommand(runtime, botId),
-        notebook: yield* readNotebook(botId),
-        notesPath: notesPath(runtime.botsDir, botId),
-        notes: yield* listNotes(runtime.botsDir, botId),
-        skillsPath: ownSkillsPath(runtime.botsDir, botId),
-        sharedSkillsPath: sharedSkillsPath(runtime.botsDir),
-        skills: yield* Effect.promise(() => listSkills(runtime.botsDir, botId)),
-        questions: store.openQuestions(botId),
-        recentChat: answered,
-        newMessages: waiting,
-        events: queued.map((event) => event.text),
-        now,
-        firstTurnToday,
-      });
-      // A new day starts a fresh provider session; the packet carries all a turn needs.
-      const started = yield* Effect.result(
-        dispatch(bot, packet, firstTurnToday && bot.lastTurnDay !== null),
+      // A new day starts a fresh provider session; the full packet carries all a turn needs.
+      const freshContext = firstTurnToday && bot.lastTurnDay !== null;
+      const seen =
+        freshContext || bot.workThreadId === null
+          ? null
+          : store.seenPacket(botId, bot.modelSelection);
+      const packet = buildPacket(
+        {
+          name: bot.name,
+          role: yield* readRole(runtime.botsDir, botId),
+          tool: toolCommand(runtime, botId),
+          notebook: yield* readNotebook(botId),
+          notesPath: notesPath(runtime.botsDir, botId),
+          notes: yield* listNotes(runtime.botsDir, botId),
+          skillsPath: ownSkillsPath(runtime.botsDir, botId),
+          sharedSkillsPath: sharedSkillsPath(runtime.botsDir),
+          skills: yield* Effect.promise(() => listSkills(runtime.botsDir, botId)),
+          questions: store.openQuestions(botId),
+          recentChat: answered,
+          newMessages: waiting,
+          events: queued.map((event) => event.text),
+          now,
+          firstTurnToday,
+        },
+        seen,
       );
+      const started = yield* Effect.result(dispatch(bot, packet.text, freshContext));
       if (Result.isFailure(started)) {
         yield* Effect.logWarning("A bot could not start its turn.", {
           botId,
@@ -530,6 +536,7 @@ const wake = Effect.fn("ForkBot.wake")(function* (botId: string) {
         waiting.map((message) => message.id),
         queued.map((event) => event.id),
       );
+      store.setSeenPacket(botId, { model: bot.modelSelection, sections: packet.sections });
       store.countTurn(botId, today);
       runtime.publish(botId);
       return null;
@@ -594,6 +601,8 @@ export const finishRun = Effect.fn("ForkBot.finishRun")(function* (
             : turn.answersUser && !turn.said && !silent
               ? { role: "error" as const, text: "The turn ended without a reply." }
               : null;
+      // A turn that did not complete may have lost what it was sent; the next one resends it all.
+      if (status !== "completed") store.setSeenPacket(botId, null);
       store.endTurn(
         botId,
         runId,

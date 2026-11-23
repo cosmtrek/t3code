@@ -9,6 +9,8 @@ import * as NodeSqlite from "node:sqlite";
 
 import type { ModelSelection, RuntimeMode } from "@t3tools/contracts";
 
+import type { PacketSections } from "./packet.ts";
+
 export interface Bot {
   readonly id: string;
   readonly name: string;
@@ -252,6 +254,7 @@ const MIGRATIONS: ReadonlyArray<string> = [
      result TEXT
    );`,
   `ALTER TABLE bots ADD COLUMN budget_noticed_day TEXT;`,
+  `ALTER TABLE bots ADD COLUMN seen_packet TEXT;`,
 ];
 
 type Row = Record<string, NodeSqlite.SQLOutputValue>;
@@ -476,6 +479,30 @@ export class BotStore {
     this.db
       .prepare("UPDATE bots SET settings = ?, budget_noticed_day = NULL WHERE id = ?")
       .run(JSON.stringify(settings), id);
+  }
+
+  /**
+   * The packet sections the work thread's provider session has seen; null when none were stored
+   * or they went to another model, which may mean another session.
+   */
+  seenPacket(id: string, model: ModelSelection): PacketSections | null {
+    const row = this.db.prepare("SELECT seen_packet FROM bots WHERE id = ?").get(id);
+    const stored = row === undefined ? null : nullableText(row, "seen_packet");
+    if (stored === null) return null;
+    const seen = JSON.parse(stored) as { model: string; sections: PacketSections };
+    return seen.model === JSON.stringify(model) ? seen.sections : null;
+  }
+
+  /** Null when the session may not hold them, so the next turn sends everything again. */
+  setSeenPacket(id: string, seen: { model: ModelSelection; sections: PacketSections } | null) {
+    this.db
+      .prepare("UPDATE bots SET seen_packet = ? WHERE id = ?")
+      .run(
+        seen === null
+          ? null
+          : JSON.stringify({ model: JSON.stringify(seen.model), sections: seen.sections }),
+        id,
+      );
   }
 
   setWorkThread(id: string, threadId: string, projectId: string) {
