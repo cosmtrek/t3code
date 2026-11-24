@@ -11,25 +11,27 @@ import {
   CheckIcon,
   CopyIcon,
   EllipsisIcon,
+  ExternalLinkIcon,
   FileTextIcon,
   GoalIcon,
+  IdCardIcon,
   MessageSquareIcon,
-  PanelRightCloseIcon,
-  PanelRightOpenIcon,
   PauseIcon,
   PencilIcon,
   PlayIcon,
   PlusIcon,
   ShieldIcon,
-  SquareArrowOutUpRightIcon,
+  Trash2Icon,
+  XIcon,
 } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useState, type CSSProperties, type ReactNode } from "react";
 
 import {
   resolveRuntimeModeOption,
   runtimeModeOptions,
 } from "../../components/chat/runtimeModeConfig";
 import ChatMarkdown from "../../components/ChatMarkdown";
+import { RightPanelResizeHandle } from "../../components/preview/RightPanelResizeHandle";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import {
@@ -48,7 +50,7 @@ import {
   EmptyTitle,
 } from "../../components/ui/empty";
 import { Input } from "../../components/ui/input";
-import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../../components/ui/menu";
+import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../../components/ui/menu";
 import {
   Select,
   SelectItem,
@@ -62,6 +64,7 @@ import { Textarea } from "../../components/ui/textarea";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { useEnvironmentSettings } from "../../hooks/useSettings";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
+import { RESIZABLE_WIDTH_PROPERTY, useResizableWidth } from "../../hooks/useResizableWidth";
 import { cn } from "../../lib/utils";
 import { providerInstanceEntriesFor } from "../../providerInstances";
 import { useEnvironments } from "../../state/environments";
@@ -209,10 +212,25 @@ function EnvironmentBots({
     store(BOT_STORAGE_KEY, botId);
   };
   const unsupported = listing.error?.status === 404;
+  const listWidth = useResizableWidth({
+    storageKey: "t3code:bots-list-width",
+    defaultWidth: 240,
+    minWidth: 200,
+    maxWidth: 400,
+    edge: "right",
+  });
 
   return (
     <div className="relative flex min-h-0 flex-1">
-      <aside className="flex w-60 shrink-0 flex-col border-r max-md:hidden">
+      <aside
+        className="relative flex w-(--resizable-width) min-w-50 flex-col border-r max-md:hidden"
+        style={{ [RESIZABLE_WIDTH_PROPERTY]: `${listWidth.width}px` } as CSSProperties}
+      >
+        <RightPanelResizeHandle
+          handlers={listWidth.handlers}
+          label="Resize the bot list"
+          className="-right-1 left-auto any-pointer-coarse:-right-2 any-pointer-coarse:left-auto"
+        />
         <PaneHeader edge="list">
           <h1 className="flex-1 shrink-0 px-1 text-sm font-medium">Bots</h1>
           {environmentPicker}
@@ -477,7 +495,7 @@ function BotChat({
 
   return (
     <>
-      <section className="flex min-w-0 flex-1 flex-col">
+      <section className="flex min-w-72 flex-1 flex-col">
         <PaneHeader edge="detail">
           {data ? <BotAvatar name={data.bot.name} /> : null}
           <h2 className="min-w-0 flex-1 truncate px-1 text-sm font-medium">
@@ -498,23 +516,26 @@ function BotChat({
               <EllipsisIcon />
             </MenuTrigger>
             <MenuPopup align="end">
-              <MenuItem disabled={workThreadId === null} onClick={openWorkThread}>
-                <SquareArrowOutUpRightIcon />
-                Open work thread
+              <MenuItem disabled={notebookOpen} onClick={() => setNotebookOpen(true)}>
+                <IdCardIcon />
+                Profile
               </MenuItem>
-              <MenuItem onClick={() => setNotebookOpen(!notebookOpen)}>
-                {notebookOpen ? <PanelRightCloseIcon /> : <PanelRightOpenIcon />}
-                {notebookOpen ? "Hide profile" : "Show profile"}
+              <MenuItem disabled={workThreadId === null} onClick={openWorkThread}>
+                <ExternalLinkIcon />
+                Work thread
+              </MenuItem>
+              <MenuSeparator />
+              <MenuItem disabled={!data} onClick={() => setEditingSettings(true)}>
+                <ShieldIcon />
+                Permissions and budget
               </MenuItem>
               <MenuItem disabled={!data} onClick={() => void setPaused(!data?.bot.paused)}>
                 {data?.bot.paused ? <PlayIcon /> : <PauseIcon />}
                 {data?.bot.paused ? "Resume" : "Pause"}
               </MenuItem>
-              <MenuItem disabled={!data} onClick={() => setEditingSettings(true)}>
-                <ShieldIcon />
-                Permissions and budget
-              </MenuItem>
+              <MenuSeparator />
               <MenuItem variant="destructive" onClick={() => setDeleting(true)}>
+                <Trash2Icon />
                 Delete bot
               </MenuItem>
             </MenuPopup>
@@ -680,6 +701,13 @@ function NotebookPanel({
   readonly onHide: () => void;
 }) {
   const navigate = useNavigate();
+  const width = useResizableWidth({
+    storageKey: "t3code:bots-profile-width",
+    defaultWidth: 320,
+    minWidth: 280,
+    maxWidth: 560,
+    edge: "left",
+  });
   const { notebook, role } = detail;
   const botId = detail.bot.id;
   const [error, setError] = useState<string | null>(null);
@@ -716,14 +744,16 @@ function NotebookPanel({
   return (
     <aside
       className={cn(
-        "flex w-80 shrink-0 flex-col border-l bg-background",
+        "relative flex w-(--resizable-width) max-w-full min-w-70 flex-col border-l bg-background",
         overlay && "absolute inset-y-0 right-0 z-20 shadow-lg",
       )}
+      style={{ [RESIZABLE_WIDTH_PROPERTY]: `${width.width}px` } as CSSProperties}
     >
+      <RightPanelResizeHandle handlers={width.handlers} label="Resize the profile" />
       <PaneHeader edge="detail">
         <h2 className="min-w-0 flex-1 truncate px-1 text-sm font-medium">Profile</h2>
-        <IconAction label="Hide profile" onClick={onHide}>
-          <PanelRightCloseIcon />
+        <IconAction label="Close profile" onClick={onHide}>
+          <XIcon />
         </IconAction>
       </PaneHeader>
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
