@@ -243,9 +243,10 @@ export function useSidebarUpdate() {
   const runsEverything = everything.hasUpdates && !isDownloading;
   const run = useUpdateEverythingRun();
   const isRunningEverything = run !== null;
+  const isChecking = state?.status === "checking" || isCheckingProviders;
   const showCheckIcon = shouldShowDesktopUpdateCheckIcon({
     isAnimationLatched: isCheckAnimationLatched,
-    isChecking: state?.status === "checking" || isCheckingProviders,
+    isChecking,
     prefersReducedMotion,
   });
   const { iconStatus, showUpdateDetails, showUpdateIconState } = resolveSidebarUpdatePresentation({
@@ -268,7 +269,8 @@ export function useSidebarUpdate() {
       : showCheckIcon
         ? gt("Checking for updates…")
         : (idleTooltip?.title ?? gt("Check for updates"));
-  const disabled = showCheckIcon
+  // The latch only finishes the icon's spin, and clears from that icon, which the settings menu never mounts.
+  const disabled = isChecking
     ? true
     : runsEverything
       ? false
@@ -393,7 +395,7 @@ export function useSidebarUpdate() {
   const handleCheckAnimationIteration = () => {
     setIsCheckAnimationLatched(
       shouldContinueDesktopUpdateCheckAnimation({
-        isChecking: state?.status === "checking" || isCheckingProviders,
+        isChecking,
         prefersReducedMotion,
       }),
     );
