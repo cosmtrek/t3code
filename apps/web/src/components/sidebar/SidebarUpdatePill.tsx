@@ -197,10 +197,14 @@ export async function installLocalUpdate(
 }
 
 export function SidebarUpdatePill() {
-  return <SidebarUpdateControl />;
+  const update = useSidebarUpdate();
+  return update.visible ? <SidebarUpdateControl update={update} /> : null;
 }
 
-function SidebarUpdateControl() {
+export type SidebarUpdate = ReturnType<typeof useSidebarUpdate>;
+
+/** Update state and actions, shared by the footer pill and the fork's settings menu entry. */
+export function useSidebarUpdate() {
   const state = useDesktopUpdateState();
   const gt = useGT();
   const messages = useMessages();
@@ -211,10 +215,6 @@ function SidebarUpdateControl() {
   const isCheckingProviders = providerCheck === "button";
   const [isConfirmingEverything, setIsConfirmingEverything] = useState(false);
   const [checkAnimationKey, setCheckAnimationKey] = useState(0);
-  const [releaseNotesPopoverHandle] = useState(() => PopoverCreateHandle());
-  const suppressReleaseNotesFocusOpen = useRef(false);
-  const releaseNotesPopupRef = useRef<HTMLDivElement>(null);
-  const releaseNotesTriggerId = useId();
   const prefersReducedMotion = useMediaQuery("(prefers-reduced-motion: reduce)");
 
   const updateStatus = state?.status;
@@ -278,16 +278,6 @@ function SidebarUpdateControl() {
   const isInteractionDisabled = disabled || isActionPending || isRunningEverything;
   const showReleaseNotesPopover =
     !isRunningEverything && shouldUseSidebarUpdateReleaseNotesPopover(showUpdateDetails, state);
-
-  const [releaseNotesOpen, setReleaseNotesOpen] = useState(false);
-  const [releaseNotesTriggerFocusVisible, setReleaseNotesTriggerFocusVisible] = useState(false);
-  // Release notes close when they stop applying, and open when they start
-  // applying while the trigger already holds keyboard focus.
-  const [releaseNotesShownBefore, setReleaseNotesShownBefore] = useState(showReleaseNotesPopover);
-  if (releaseNotesShownBefore !== showReleaseNotesPopover) {
-    setReleaseNotesShownBefore(showReleaseNotesPopover);
-    setReleaseNotesOpen(showReleaseNotesPopover && releaseNotesTriggerFocusVisible);
-  }
 
   const handleAction = async () => {
     const bridge = window.desktopBridge;
@@ -409,8 +399,6 @@ function SidebarUpdateControl() {
     );
   };
 
-  if (!showUpdateDetails && !isRunningEverything) return null;
-
   const statusIcon = (
     <DesktopUpdateStatusIcon
       key={showCheckIcon ? checkAnimationKey : iconStatus}
@@ -432,6 +420,57 @@ function SidebarUpdateControl() {
       onConfirm={() => void runEverything()}
     />
   );
+
+  return {
+    visible: showUpdateDetails || isRunningEverything,
+    state,
+    run,
+    action,
+    localUpdateVersion,
+    statusIcon,
+    confirmDialog,
+    tooltip,
+    idleTooltip,
+    disabled,
+    isInteractionDisabled,
+    showUpdateDetails,
+    showUpdateIconState,
+    showReleaseNotesPopover,
+    handleAction,
+  };
+}
+
+export function SidebarUpdateControl({ update }: { readonly update: SidebarUpdate }) {
+  const gt = useGT();
+  const {
+    state,
+    run,
+    action,
+    localUpdateVersion,
+    statusIcon,
+    confirmDialog,
+    tooltip,
+    idleTooltip,
+    disabled,
+    isInteractionDisabled,
+    showUpdateDetails,
+    showUpdateIconState,
+    showReleaseNotesPopover,
+    handleAction,
+  } = update;
+  const [releaseNotesPopoverHandle] = useState(() => PopoverCreateHandle());
+  const suppressReleaseNotesFocusOpen = useRef(false);
+  const releaseNotesPopupRef = useRef<HTMLDivElement>(null);
+  const releaseNotesTriggerId = useId();
+  const [releaseNotesOpen, setReleaseNotesOpen] = useState(false);
+  const [releaseNotesTriggerFocusVisible, setReleaseNotesTriggerFocusVisible] = useState(false);
+  // Release notes close when they stop applying, and open when they start
+  // applying while the trigger already holds keyboard focus.
+  const [releaseNotesShownBefore, setReleaseNotesShownBefore] = useState(showReleaseNotesPopover);
+  if (releaseNotesShownBefore !== showReleaseNotesPopover) {
+    setReleaseNotesShownBefore(showReleaseNotesPopover);
+    setReleaseNotesOpen(showReleaseNotesPopover && releaseNotesTriggerFocusVisible);
+  }
 
   if (run !== null) {
     const local: UpdateRunLocalState =

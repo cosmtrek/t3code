@@ -47,8 +47,11 @@ const UNDONE = {
   Discarded: msg("Undid discard of {count, plural, one {{count} draft} other {{count} drafts}}"),
 } satisfies Record<UndoOptions["action"], string>;
 
-function threadUndoNoticeSummary(notice: Pick<UndoNotice, "action" | "count">): string {
-  return m(SUMMARY[notice.action], { count: notice.count });
+export function threadUndoNoticeSummary(
+  notice: Pick<UndoNotice, "action" | "count">,
+  resolve: MessageResolver = m,
+): string {
+  return resolve(SUMMARY[notice.action], { count: notice.count });
 }
 
 /** Components pass `useMessages()` so the label follows a language switch. */

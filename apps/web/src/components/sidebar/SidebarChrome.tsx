@@ -1,10 +1,4 @@
-import {
-  ArrowLeftIcon,
-  ArrowRightIcon,
-  ChartNoAxesColumnIcon,
-  RefreshCwIcon,
-  SettingsIcon,
-} from "lucide-react";
+import { ArrowLeftIcon, ArrowRightIcon, ChartNoAxesColumnIcon, SettingsIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { T, useGT } from "gt-react";
 import { memo } from "react";
@@ -20,7 +14,6 @@ import {
 } from "../../navigationHistory";
 import { primaryServerKeybindingsAtom } from "../../state/server";
 import { cn } from "../../lib/utils";
-import { isElectron } from "../../env";
 import { useIssuesSupported, usePullRequestsSupported } from "../../state/environments";
 import { T3Wordmark } from "../T3Wordmark";
 import {
@@ -31,7 +24,7 @@ import {
 } from "../SidebarStageBackdrop";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
-import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/menu";
+import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import {
   SidebarFooter,
   SidebarMenu,
@@ -47,9 +40,14 @@ import { IssueGlyph } from "../issue/issuePresentation";
 import { isSidebarUtilityPage, useNavigateToMainApp } from "./mainAppLocation";
 import { SidebarThreadUndoNotice } from "./SidebarThreadUndoNotice";
 import { SidebarProviderUpdatePill } from "./SidebarProviderUpdatePill";
-import { SidebarUpdateArchitectureWarning, SidebarUpdatePill } from "./SidebarUpdatePill";
+import { SidebarUpdateArchitectureWarning, useSidebarUpdate } from "./SidebarUpdatePill";
 import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
 import { ForkSidebarItems } from "~/fork/inbox/ForkSidebarItems";
+import {
+  ForkUpdateDot,
+  ForkUpdateFooter,
+  ForkUpdateMenuItems,
+} from "~/fork/sidebar/ForkUpdateEntry";
 import { observeResize } from "~/lib/observeResize";
 
 export const SidebarChromeHeader = memo(function SidebarChromeHeader({
@@ -244,6 +242,7 @@ const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
   });
   const pullRequestsSupported = usePullRequestsSupported();
   const issuesSupported = useIssuesSupported();
+  const update = useSidebarUpdate();
   const closeMobileSidebar = () => {
     if (isMobile) {
       setOpenMobile(false);
@@ -312,9 +311,9 @@ const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
       )}
       <SidebarThreadUndoNotice />
       <SidebarMenuItem aria-hidden className="ml-auto" />
-      <SidebarUpdatePill />
+      <ForkUpdateFooter update={update} />
       {isOnUtilityPage ? null : (
-        <SidebarMenuItem className="shrink-0">
+        <SidebarMenuItem className="relative shrink-0">
           <Menu>
             <Tooltip>
               <TooltipTrigger
@@ -337,17 +336,14 @@ const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
                 <ChartNoAxesColumnIcon />
                 {gt("Usage")}
               </MenuItem>
-              {isElectron ? (
-                <>
-                  <MenuSeparator />
-                  <MenuItem onClick={handleUpdatesClick}>
-                    <RefreshCwIcon />
-                    {gt("Check for updates")}
-                  </MenuItem>
-                </>
-              ) : null}
+              <ForkUpdateMenuItems
+                update={update}
+                checkLabel={gt("Check for updates")}
+                onCheck={handleUpdatesClick}
+              />
             </MenuPopup>
           </Menu>
+          <ForkUpdateDot update={update} />
         </SidebarMenuItem>
       )}
     </SidebarMenu>

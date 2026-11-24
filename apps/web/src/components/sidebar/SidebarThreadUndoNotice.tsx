@@ -5,6 +5,7 @@ import { useState } from "react";
 
 import {
   threadUndoLabel,
+  threadUndoNoticeSummary,
   undoLatestThreadAction,
   useThreadUndoNotice,
 } from "../../hooks/showThreadUndoNotice";
@@ -12,6 +13,7 @@ import { cn } from "../../lib/utils";
 import { primaryServerKeybindingsAtom } from "../../state/server";
 import { InlineButton } from "../ui/button";
 import { SidebarMenuItem } from "../ui/sidebar";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
 const SHORT_SUMMARY = {
   Settled: msg("{count, plural, =1 {Settled,} other {Settled {count},}}"),
@@ -33,6 +35,8 @@ export function SidebarThreadUndoNotice() {
   const [shownSummary, setShownSummary] = useState(summary);
   if (summary && summary !== shownSummary) setShownSummary(summary);
   const text = summary ?? shownSummary;
+  const label = threadUndoLabel(keybindings, m);
+  const fullSummary = notice ? threadUndoNoticeSummary(notice, m) : null;
   if (!text) return null;
 
   return (
@@ -53,14 +57,28 @@ export function SidebarThreadUndoNotice() {
           !summary && "opacity-0",
         )}
       >
-        <InlineButton className="min-w-0 shrink" onClick={undoLatestThreadAction}>
-          {/* The icon's negative margin cancels its width, so beside the label it sits in
-              clipped space; once the label is too wide it wraps away and the icon shows. */}
-          <span className="flex h-6 min-w-0 flex-wrap justify-end overflow-hidden">
-            <Undo2Icon className="-ml-4 h-6 w-4 @max-[1rem]:invisible" />
-            <span>{threadUndoLabel(keybindings, m)}</span>
-          </span>
-        </InlineButton>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <InlineButton
+                className="group/undo min-w-0 shrink"
+                onClick={undoLatestThreadAction}
+              />
+            }
+          >
+            {/* The icon's negative margin cancels its width, so beside the label it sits in
+                clipped space; once the label is too wide it wraps away and the icon shows. */}
+            <span className="flex h-6 min-w-0 flex-wrap justify-end overflow-hidden">
+              <Undo2Icon className="-ml-4 h-6 w-4 text-(--sidebar-icon-color) group-hover/undo:text-sidebar-foreground @max-[1rem]:invisible" />
+              <span>{label}</span>
+            </span>
+          </TooltipTrigger>
+          {summary ? (
+            <TooltipPopup side="top">
+              {fullSummary}, {label}
+            </TooltipPopup>
+          ) : null}
+        </Tooltip>
         <span>{text}</span>
       </div>
     </SidebarMenuItem>

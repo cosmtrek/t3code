@@ -133,7 +133,12 @@ export function BotsPage() {
                     store(ENVIRONMENT_STORAGE_KEY, value);
                   }}
                 >
-                  <SelectTrigger aria-label="Environment" size="xs" className="w-auto min-w-0">
+                  <SelectTrigger
+                    aria-label="Environment"
+                    title={environment.label}
+                    size="xs"
+                    className="w-auto max-w-28 min-w-0"
+                  >
                     <SelectValue>{environment.label}</SelectValue>
                   </SelectTrigger>
                   <SelectPopup>
@@ -209,7 +214,7 @@ function EnvironmentBots({
     <div className="relative flex min-h-0 flex-1">
       <aside className="flex w-60 shrink-0 flex-col border-r max-md:hidden">
         <PaneHeader edge="list">
-          <h1 className="min-w-0 flex-1 truncate px-1 text-sm font-medium">Bots</h1>
+          <h1 className="flex-1 shrink-0 px-1 text-sm font-medium">Bots</h1>
           {environmentPicker}
           <Button
             size="icon-xs"
