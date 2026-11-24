@@ -60,6 +60,7 @@ import {
 import { SidebarInset } from "../../components/ui/sidebar";
 import { Spinner } from "../../components/ui/spinner";
 import { Textarea } from "../../components/ui/textarea";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../../components/ui/tooltip";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { useEnvironmentSettings } from "../../hooks/useSettings";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
@@ -645,33 +646,67 @@ function scheduleLabel(schedule: BotNotebook["routines"][number]["schedule"]) {
     : `${days.map((day) => DAY_NAMES[day]).join(", ")} ${schedule.time}`;
 }
 
-/** An empty section is just its dimmed title, so the sections with content stand out. */
 function NotebookSection({
   title,
-  empty = false,
+  count,
   action,
   children,
 }: {
   readonly title: string;
-  readonly empty?: boolean;
+  readonly count?: number;
   readonly action?: ReactNode;
   readonly children?: ReactNode;
 }) {
   return (
-    <section className="flex flex-col gap-1.5 border-b px-3 py-3 last:border-b-0">
+    <section className="flex flex-col gap-2 border-b px-3 py-3">
       <div className="flex h-6 items-center gap-2">
-        <h3
-          className={cn(
-            "flex-1 text-xs font-medium text-muted-foreground",
-            empty && "text-muted-foreground/50",
-          )}
-        >
+        <h3 className="flex flex-1 items-baseline gap-1.5 text-xs font-semibold">
           {title}
+          {count !== undefined ? (
+            <span className="font-normal text-muted-foreground tabular-nums">{count}</span>
+          ) : null}
         </h3>
         {action}
       </div>
-      {empty ? null : children}
+      {children}
     </section>
+  );
+}
+
+const CLAMP = { 3: "line-clamp-3", 4: "line-clamp-4" } as const;
+
+/** Long text shows its first lines; "more" appears only when something is cut. */
+function ClampedText({
+  text,
+  lines,
+  className,
+}: {
+  readonly text: string;
+  readonly lines: keyof typeof CLAMP;
+  readonly className?: string;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [cut, setCut] = useState(false);
+  return (
+    <div className="flex flex-col items-start gap-0.5">
+      <p
+        ref={(node) => {
+          if (node && !expanded) setCut(node.scrollHeight > node.clientHeight + 1);
+        }}
+        className={cn("whitespace-pre-wrap wrap-anywhere", !expanded && CLAMP[lines], className)}
+      >
+        {text}
+      </p>
+      {cut || expanded ? (
+        <button
+          type="button"
+          onClick={() => setExpanded(!expanded)}
+          className="text-xs text-muted-foreground hover:text-foreground"
+        >
+          {expanded ? "Show less" : "Show more"}
+        </button>
+      ) : null}
+    </div>
   );
 }
 
@@ -736,6 +771,13 @@ function NotebookPanel({
   const open = notebook.items.filter((item) => item.status !== "done" && !item.setAside);
   const setAside = notebook.items.filter((item) => item.status !== "done" && item.setAside);
   const unlinked = notebook.threads.filter((thread) => thread.itemId === null);
+  const empty = [
+    open.length === 0 && unlinked.length === 0 && "No work",
+    notebook.routines.length === 0 && "No routines",
+    notebook.memory.length === 0 && "No memory",
+    detail.notes.length === 0 && "No notes",
+    detail.skills.length === 0 && "No skills",
+  ].filter((label) => label !== false);
 
   return (
     <aside
@@ -755,49 +797,53 @@ function NotebookPanel({
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
         {error ? <p className="px-3 pt-2 text-xs text-destructive-foreground">{error}</p> : null}
         <RoleEditor key={botId} environmentId={environmentId} botId={botId} role={role} />
-        <NotebookSection title="Work" empty={open.length === 0 && unlinked.length === 0}>
-          {open.map((item) => (
-            <div key={item.id} className="flex flex-col gap-0.5">
-              <div className="flex min-w-0 items-baseline gap-1.5 text-sm">
-                <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
-                  #{item.id}
-                </span>
-                <span className="min-w-0 flex-1 truncate">{item.title}</span>
-                {item.status === "waiting" ? (
-                  <span className="shrink-0 text-xs text-muted-foreground">waiting</span>
+        {open.length > 0 || unlinked.length > 0 ? (
+          <NotebookSection title="Work" count={open.length}>
+            {open.map((item) => (
+              <div key={item.id} className="flex flex-col gap-0.5">
+                <div className="flex min-w-0 items-center gap-1.5 text-sm">
+                  <span className="w-4.5 shrink-0 text-xs text-muted-foreground tabular-nums">
+                    #{item.id}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate">{item.title}</span>
+                  {item.status === "waiting" ? (
+                    <Badge size="sm" variant="warning">
+                      Waiting
+                    </Badge>
+                  ) : null}
+                </div>
+                {item.note ? (
+                  <p className="ps-6 text-xs text-muted-foreground wrap-anywhere">{item.note}</p>
                 ) : null}
+                {notebook.threads
+                  .filter((thread) => thread.itemId === item.id)
+                  .map((thread) => (
+                    <ThreadLink
+                      key={thread.threadId}
+                      thread={thread}
+                      onOpen={openThread}
+                      onHandBack={handBack}
+                      busy={pending !== null}
+                    />
+                  ))}
               </div>
-              {item.note ? (
-                <p className="ps-6 text-xs text-muted-foreground wrap-anywhere">{item.note}</p>
-              ) : null}
-              {notebook.threads
-                .filter((thread) => thread.itemId === item.id)
-                .map((thread) => (
-                  <ThreadLink
-                    key={thread.threadId}
-                    thread={thread}
-                    onOpen={openThread}
-                    onHandBack={handBack}
-                    busy={pending !== null}
-                  />
-                ))}
-            </div>
-          ))}
-          {unlinked.map((thread) => (
-            <ThreadLink
-              key={thread.threadId}
-              thread={thread}
-              onOpen={openThread}
-              onHandBack={handBack}
-              busy={pending !== null}
-            />
-          ))}
-        </NotebookSection>
+            ))}
+            {unlinked.map((thread) => (
+              <ThreadLink
+                key={thread.threadId}
+                thread={thread}
+                onOpen={openThread}
+                onHandBack={handBack}
+                busy={pending !== null}
+              />
+            ))}
+          </NotebookSection>
+        ) : null}
         {setAside.length > 0 ? (
-          <NotebookSection title="Set aside">
+          <NotebookSection title="Set aside" count={setAside.length}>
             {setAside.map((item) => (
               <div key={item.id} className="flex min-w-0 items-center gap-1.5 text-sm">
-                <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
+                <span className="w-4.5 shrink-0 text-xs text-muted-foreground tabular-nums">
                   #{item.id}
                 </span>
                 <span className="min-w-0 flex-1 truncate text-muted-foreground">{item.title}</span>
@@ -815,86 +861,97 @@ function NotebookPanel({
             ))}
           </NotebookSection>
         ) : null}
-        <NotebookSection title="Routines" empty={notebook.routines.length === 0}>
-          {notebook.routines.map((routine) => (
-            <div key={routine.id} className="flex min-w-0 items-center gap-2">
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-sm">{routine.title}</div>
-                <div className="truncate text-xs text-muted-foreground">
-                  {scheduleLabel(routine.schedule)}
-                  {routine.nextDueAt
-                    ? ` · next ${new Date(routine.nextDueAt).toLocaleString()}`
-                    : ""}
+        {notebook.routines.length > 0 ? (
+          <NotebookSection title="Routines" count={notebook.routines.length}>
+            {notebook.routines.map((routine) => (
+              <div key={routine.id} className="flex min-w-0 items-center gap-2">
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm">{routine.title}</div>
+                  <div className="truncate text-xs text-muted-foreground">
+                    {scheduleLabel(routine.schedule)}
+                    {routine.nextDueAt
+                      ? ` · next ${new Date(routine.nextDueAt).toLocaleString()}`
+                      : ""}
+                  </div>
                 </div>
+                <Button
+                  size="xs"
+                  variant="outline"
+                  disabled={pending !== null}
+                  onClick={() => runNow(routine.id)}
+                >
+                  Run now
+                </Button>
               </div>
-              <Button
-                size="xs"
-                variant="outline"
-                disabled={pending !== null}
-                onClick={() => runNow(routine.id)}
-              >
-                Run now
-              </Button>
-            </div>
-          ))}
-        </NotebookSection>
-        <NotebookSection
-          title="Memory"
-          empty={notebook.memory.length === 0 && detail.notes.length === 0}
-          action={<CopyPathButton path={detail.notesPath} />}
-        >
-          {notebook.memory.length > 0 ? (
-            <ul className="flex flex-col gap-1.5 text-sm">
+            ))}
+          </NotebookSection>
+        ) : null}
+        {notebook.memory.length > 0 ? (
+          <NotebookSection title="Memory" count={notebook.memory.length}>
+            <ul className="flex flex-col gap-2">
               {notebook.memory.map((note) => (
-                <li key={note.id} className="wrap-anywhere">
-                  {note.text}
+                <li key={note.id} className="border-l-2 ps-2">
+                  <ClampedText text={note.text} lines={3} className="text-xs leading-relaxed" />
                 </li>
               ))}
             </ul>
-          ) : null}
-          {detail.notes.map((note) => (
-            <button
-              key={note.name}
-              type="button"
-              onClick={() => setOpenFile({ kind: "note", name: note.name, title: note.name })}
-              className="flex min-w-0 items-center gap-1.5 text-left text-sm hover:text-foreground"
-            >
-              <FileTextIcon className="size-3.5 shrink-0 text-muted-foreground" />
-              <span className="min-w-0 flex-1 truncate">{note.name}</span>
-              <span className="shrink-0 text-xs text-muted-foreground">
-                {formatSince(note.updatedAt)}
-              </span>
-            </button>
-          ))}
-        </NotebookSection>
-        <NotebookSection title="Skills" empty={detail.skills.length === 0}>
-          {detail.skills.map((skill) => (
-            <button
-              key={skill.path}
-              type="button"
-              onClick={() =>
-                setOpenFile({
-                  kind: skill.shared ? "shared-skill" : "skill",
-                  name: skill.folder,
-                  title: skill.name,
-                })
-              }
-              className="flex min-w-0 flex-col text-left hover:text-foreground"
-            >
-              <span className="flex min-w-0 items-center gap-1.5 text-sm">
-                <span className="min-w-0 flex-1 truncate">{skill.name}</span>
-                {skill.shared ? (
-                  <span className="shrink-0 text-xs text-muted-foreground">shared</span>
-                ) : null}
-              </span>
-              {skill.description ? (
-                <span className="line-clamp-2 text-xs text-muted-foreground">
-                  {skill.description}
+          </NotebookSection>
+        ) : null}
+        {detail.notes.length > 0 ? (
+          <NotebookSection
+            title="Notes"
+            count={detail.notes.length}
+            action={<CopyPathButton path={detail.notesPath} />}
+          >
+            {detail.notes.map((note) => (
+              <button
+                key={note.name}
+                type="button"
+                onClick={() => setOpenFile({ kind: "note", name: note.name, title: note.name })}
+                className="flex min-w-0 items-center gap-1.5 text-left text-sm hover:text-foreground"
+              >
+                <FileTextIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                <span className="min-w-0 flex-1 truncate">{note.name}</span>
+                <span className="shrink-0 text-xs text-muted-foreground">
+                  {formatSince(note.updatedAt)}
                 </span>
-              ) : null}
-            </button>
-          ))}
-        </NotebookSection>
+              </button>
+            ))}
+          </NotebookSection>
+        ) : null}
+        {detail.skills.length > 0 ? (
+          <NotebookSection title="Skills" count={detail.skills.length}>
+            {detail.skills.map((skill) => (
+              <button
+                key={skill.path}
+                type="button"
+                onClick={() =>
+                  setOpenFile({
+                    kind: skill.shared ? "shared-skill" : "skill",
+                    name: skill.folder,
+                    title: skill.name,
+                  })
+                }
+                className="flex min-w-0 flex-col text-left hover:text-foreground"
+              >
+                <span className="flex min-w-0 items-center gap-1.5 text-sm">
+                  <span className="min-w-0 flex-1 truncate">{skill.name}</span>
+                  {skill.shared ? (
+                    <span className="shrink-0 text-xs text-muted-foreground">shared</span>
+                  ) : null}
+                </span>
+                {skill.description ? (
+                  <span className="line-clamp-2 text-xs text-muted-foreground">
+                    {skill.description}
+                  </span>
+                ) : null}
+              </button>
+            ))}
+          </NotebookSection>
+        ) : null}
+        {empty.length > 0 ? (
+          <p className="px-3 py-3 text-xs text-muted-foreground">{empty.join(" · ")}</p>
+        ) : null}
       </div>
       {openFile !== null ? (
         <NoteDialog
@@ -1223,6 +1280,12 @@ function SettingsDialog({
   );
 }
 
+const FOLLOW_LABELS = {
+  now: "when it stops",
+  attention: "when it fails or needs someone",
+  routine: "only at its routines",
+} as const;
+
 function ThreadLink({
   thread,
   onOpen,
@@ -1236,14 +1299,21 @@ function ThreadLink({
 }) {
   return (
     <div className="flex min-w-0 items-center gap-1.5 ps-6 text-xs text-muted-foreground">
-      <button
-        type="button"
-        onClick={() => onOpen(thread.threadId)}
-        className="flex min-w-0 flex-1 items-center gap-1.5 text-left hover:text-foreground"
-      >
-        <MessageSquareIcon className="size-3 shrink-0" />
-        <span className="min-w-0 flex-1 truncate">{thread.title ?? "Untitled thread"}</span>
-      </button>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <button
+              type="button"
+              onClick={() => onOpen(thread.threadId)}
+              className="flex min-w-0 flex-1 items-center gap-1.5 text-left hover:text-foreground"
+            />
+          }
+        >
+          <MessageSquareIcon className="size-3 shrink-0" />
+          <span className="min-w-0 flex-1 truncate">{thread.title ?? "Untitled thread"}</span>
+        </TooltipTrigger>
+        <TooltipPopup side="top">Wakes the bot {FOLLOW_LABELS[thread.follow]}</TooltipPopup>
+      </Tooltip>
       {thread.takenOver ? (
         <Button
           size="xs"
@@ -1253,9 +1323,7 @@ function ThreadLink({
         >
           Hand back
         </Button>
-      ) : (
-        <span className="shrink-0">{thread.follow}</span>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -1308,7 +1376,7 @@ function RoleEditor({
             Not set. Say what this bot is responsible for and its rules.
           </p>
         ) : (
-          <p className="text-sm whitespace-pre-wrap wrap-anywhere">{role}</p>
+          <ClampedText text={role} lines={4} className="text-sm" />
         )}
       </NotebookSection>
     );
