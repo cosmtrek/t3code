@@ -367,14 +367,8 @@ export interface BotDetail {
 }
 
 export interface BotNotebook {
-  readonly goals: ReadonlyArray<{
-    readonly id: number;
-    readonly title: string;
-    readonly done: boolean;
-  }>;
   readonly items: ReadonlyArray<{
     readonly id: number;
-    readonly goalId: number | null;
     readonly title: string;
     readonly status: "open" | "waiting" | "done";
     readonly note: string;

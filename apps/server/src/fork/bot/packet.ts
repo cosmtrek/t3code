@@ -5,15 +5,7 @@
  */
 import { describeSchedule } from "./routines.ts";
 import type { Skill } from "./skills.ts";
-import type {
-  ChatMessage,
-  Goal,
-  Item,
-  MemoryNote,
-  OwnedThread,
-  Question,
-  Routine,
-} from "./store.ts";
+import type { ChatMessage, Item, MemoryNote, OwnedThread, Question, Routine } from "./store.ts";
 
 /** Chat before the new messages; older chat lives in the work thread or is not needed. */
 export const RECENT_CHAT_LIMIT = 10;
@@ -26,7 +18,6 @@ const STALE_AFTER_DAYS = 7;
 const NOTES_LISTED = 20;
 
 export interface Notebook {
-  readonly goals: ReadonlyArray<Goal>;
   readonly items: ReadonlyArray<Item>;
   readonly threads: ReadonlyArray<OwnedThread & { readonly title: string | null }>;
   readonly routines: ReadonlyArray<Routine>;
@@ -78,17 +69,10 @@ export function renderNotebook(notebook: Notebook): string {
         (thread) =>
           `    thread ${thread.threadId} "${thread.title ?? "untitled"}" (follow ${thread.follow})`,
       );
-  const itemLines = (goalId: number | null) =>
-    open.flatMap((item) =>
-      item.goalId === goalId
-        ? [
-            `  #${item.id} [${item.status}] ${item.title}${item.note ? ` - ${item.note}` : ""}`,
-            ...threadsOf(item.id),
-          ]
-        : [],
-    );
-  const goals = notebook.goals.filter((goal) => !goal.done);
-  const loose = itemLines(null);
+  const itemLines = open.flatMap((item) => [
+    `  #${item.id} [${item.status}] ${item.title}${item.note ? ` - ${item.note}` : ""}`,
+    ...threadsOf(item.id),
+  ]);
   const otherThreads = notebook.threads
     .filter((thread) => thread.itemId === null)
     .map(
@@ -96,10 +80,8 @@ export function renderNotebook(notebook: Notebook): string {
         `  thread ${thread.threadId} "${thread.title ?? "untitled"}" (follow ${thread.follow})`,
     );
   return [
-    "Goals and items:",
-    ...(goals.length === 0 && loose.length === 0 ? ["  (none)"] : []),
-    ...goals.flatMap((goal) => [` goal ${goal.id}: ${goal.title}`, ...itemLines(goal.id)]),
-    ...(loose.length > 0 ? [" no goal:", ...loose] : []),
+    "Items:",
+    ...(itemLines.length === 0 ? ["  (none)"] : itemLines),
     ...(otherThreads.length > 0 ? ["Threads not tied to an item:", ...otherThreads] : []),
     "Routines:",
     ...(notebook.routines.length === 0

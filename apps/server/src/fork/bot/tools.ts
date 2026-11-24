@@ -57,8 +57,8 @@ const ROUTINE_FLAGS: FlagSpec = { values: ["title", "daily", "weekdays", "every"
  * `--dry-run` reaches its thread whole; commands without an entry take only text.
  */
 const FLAGS: Readonly<Record<string, FlagSpec>> = {
-  "item add": { values: ["goal", "note"] },
-  "item edit": { values: ["title", "status", "note", "goal"] },
+  "item add": { values: ["note"] },
+  "item edit": { values: ["title", "status", "note"] },
   "item done": { values: ["note"] },
   "item list": { booleans: ["all"] },
   "routine add": ROUTINE_FLAGS,
@@ -73,13 +73,12 @@ const FLAGS: Readonly<Record<string, FlagSpec>> = {
 const HELP = `t3bot <command> - everything you do goes through these.
 
   say <text> | say -             post to your chat with the user (- reads stdin)
-  notebook                       print your goals, items, threads, routines, memory
-  role                           print your role
+  notebook                       print your items, threads, routines, memory
+  role                           print your role: who you are, what you own, your rules
   role edit -                    replace your role with stdin; the user may have to approve
 
-  goal add <title> | goal edit <id> <title> | goal done <id>
-  item add [--goal <id>] [--note <next step>] <title>
-  item edit <id> [--title t] [--status open|waiting|done] [--note t] [--goal <id>]
+  item add [--note <next step>] <title>
+  item edit <id> [--title t] [--status open|waiting|done] [--note t]
   item done <id> [--note t]
   item list [--all]              --all includes done and set-aside items
 
@@ -271,38 +270,11 @@ export const runTool = Effect.fn("ForkBot.runTool")(function* (input: ToolCall) 
       yield* Effect.promise(() => NodeFSP.writeFile(rolePath(runtime.botsDir, botId), role));
       return touched("Role replaced.");
     }
-    case "goal": {
-      if (sub === "add") {
-        const title = textOf(rest, input.stdin);
-        if (title === "") return yield* fail("Give the goal a title.");
-        return touched(`Goal ${store.addGoal(botId, title)} added.`);
-      }
-      const id = yield* idOf(rest[0], "goal");
-      const changed =
-        sub === "edit"
-          ? store.updateGoal(botId, id, { title: textOf(rest.slice(1), input.stdin) })
-          : sub === "done"
-            ? store.updateGoal(botId, id, { done: true })
-            : yield* fail("goal add | edit | done");
-      return changed ? touched(`Goal ${id} updated.`) : yield* fail(`You have no goal ${id}.`);
-    }
     case "item": {
-      const goal = flags.get("goal");
-      const goalId = goal === undefined ? undefined : yield* idOf(goal, "goal");
-      if (
-        goalId !== undefined &&
-        !store.listGoals(botId).some((candidate) => candidate.id === goalId)
-      ) {
-        return yield* fail(`You have no goal ${goalId}.`);
-      }
       if (sub === "add") {
         const title = textOf(rest, input.stdin);
         if (title === "") return yield* fail("Give the item a title.");
-        const id = store.addItem(
-          botId,
-          { goalId: goalId ?? null, title, note: flags.get("note") ?? "" },
-          at,
-        );
+        const id = store.addItem(botId, { title, note: flags.get("note") ?? "" }, at);
         return touched(`Item #${id} added.`);
       }
       if (sub === "list") {
@@ -331,7 +303,6 @@ export const runTool = Effect.fn("ForkBot.runTool")(function* (input: ToolCall) 
           ...(flags.has("title") ? { title: flags.get("title")! } : {}),
           ...(status !== undefined ? { status: status as ItemStatus } : {}),
           ...(flags.has("note") ? { note: flags.get("note")! } : {}),
-          ...(goalId !== undefined ? { goalId } : {}),
         },
         at,
       );

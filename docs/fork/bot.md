@@ -21,7 +21,7 @@ up, and writes down what it is tracking.
 You:  You're "Release Watcher". Each morning, check the fork's open PRs and CI. Fix red CI
       on fork branches yourself. Ask me before touching main.
 Bot:  Got it. I'll check at 09:00 every day. I'll fix red CI on r/* branches and ask before
-      anything that lands on main. (Saved to my role, goals, and routines.)
+      anything that lands on main. (Saved to my role and routines.)
 ...next morning...
 Bot:  CI on r/inbox-quote failed on a type error; I started a thread to fix it.
 You:  What's the status?
@@ -44,7 +44,7 @@ state, the provider sign-ins, and the chat adapter. Projects are only where it m
 The bot's own work threads have no project; the threads it starts for work go in the project the
 work is in.
 
-Each bot has its own state: role, goals, items, routines, memory, its chat, and its threads.
+Each bot has its own state: role, items, routines, memory, its chat, and its threads.
 Nothing is shared between bots.
 
 ## Creating a bot
@@ -57,18 +57,17 @@ turns what the user says into its notebook, and the user can read and edit that 
 Each bot keeps one notebook, the single source of what it knows and does. The user can open and
 edit every part of it on the Bots page.
 
-| Part     | Holds                                                                                                   |
-| -------- | ------------------------------------------------------------------------------------------------------- |
-| Role     | Who it is and how to behave, in the user's terms, including its rules                                   |
-| Goals    | The lasting outcomes it is responsible for ("fork releases stay healthy")                               |
-| Scope    | Projects it may work in and read, chat conversations it follows                                         |
-| Routines | Its own scheduled tasks ("09:00 daily: open PRs and CI"), which it creates and edits itself             |
-| Items    | Concrete work toward a goal: one line each with status, next step, linked threads, and what it waits on |
-| Memory   | Lasting notes, one fact per line, at most 4 KB: preferences, project conventions, past mistakes         |
-| Notes    | Longer Markdown files in the bot's own folder, read when needed; memory lines can point to them         |
-| Skills   | How-tos the bot writes for itself as `SKILL.md` folders, its own or shared with every bot               |
+| Part     | Holds                                                                                               |
+| -------- | --------------------------------------------------------------------------------------------------- |
+| Role     | Who it is, what it is responsible for, and how to behave, in the user's terms, including its rules  |
+| Scope    | Projects it may work in and read, chat conversations it follows                                     |
+| Routines | Its own scheduled tasks ("09:00 daily: open PRs and CI"), which it creates and edits itself         |
+| Items    | Concrete pieces of work, one line each with status, next step, linked threads, and what it waits on |
+| Memory   | Lasting notes, one fact per line, at most 4 KB: preferences, project conventions, past mistakes     |
+| Notes    | Longer Markdown files in the bot's own folder, read when needed; memory lines can point to them     |
+| Skills   | How-tos the bot writes for itself as `SKILL.md` folders, its own or shared with every bot           |
 
-Role, goals, routines, and items are written by the bot from the conversation and corrected by the user
+Role, routines, and items are written by the bot from the conversation and corrected by the user
 either by telling the bot or by editing the file. An item that waits on someone outside the bot is
 a line in it (`waiting: product confirms the copy`), not a separate state.
 
@@ -150,7 +149,7 @@ still 09:00.
 
 | Area     | Tools                                                                                                  |
 | -------- | ------------------------------------------------------------------------------------------------------ |
-| Notebook | read and edit role, goals, routines, items, memory                                                     |
+| Notebook | read and edit role, routines, items, memory                                                            |
 | Threads  | read threads in scope; start a thread; message, interrupt, or settle a thread it owns                  |
 | Chat     | reply to or ask the user; read a followed conversation; send there (the approval card shows the draft) |
 

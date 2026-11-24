@@ -13,7 +13,6 @@ import {
   EllipsisIcon,
   ExternalLinkIcon,
   FileTextIcon,
-  GoalIcon,
   IdCardIcon,
   MessageSquareIcon,
   PauseIcon,
@@ -736,9 +735,6 @@ function NotebookPanel({
     void post(`routine:${routineId}`, "/bots/routine/run", { routineId });
   const open = notebook.items.filter((item) => item.status !== "done" && !item.setAside);
   const setAside = notebook.items.filter((item) => item.status !== "done" && item.setAside);
-  const goals = notebook.goals.filter((goal) => !goal.done);
-  const goalTitle = (goalId: number | null) =>
-    goalId === null ? null : (notebook.goals.find((goal) => goal.id === goalId)?.title ?? null);
   const unlinked = notebook.threads.filter((thread) => thread.itemId === null);
 
   return (
@@ -759,52 +755,34 @@ function NotebookPanel({
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
         {error ? <p className="px-3 pt-2 text-xs text-destructive-foreground">{error}</p> : null}
         <RoleEditor key={botId} environmentId={environmentId} botId={botId} role={role} />
-        <NotebookSection title="Goals" empty={goals.length === 0}>
-          <ul className="flex flex-col gap-1 text-sm">
-            {goals.map((goal) => (
-              <li key={goal.id} className="wrap-anywhere">
-                {goal.title}
-              </li>
-            ))}
-          </ul>
-        </NotebookSection>
         <NotebookSection title="Work" empty={open.length === 0 && unlinked.length === 0}>
-          {open.map((item) => {
-            const goal = goalTitle(item.goalId);
-            return (
-              <div key={item.id} className="flex flex-col gap-0.5">
-                <div className="flex min-w-0 items-baseline gap-1.5 text-sm">
-                  <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
-                    #{item.id}
-                  </span>
-                  <span className="min-w-0 flex-1 truncate">{item.title}</span>
-                  {item.status === "waiting" ? (
-                    <span className="shrink-0 text-xs text-muted-foreground">waiting</span>
-                  ) : null}
-                </div>
-                {goal ? (
-                  <p className="flex min-w-0 items-center gap-1 ps-6 text-xs text-muted-foreground">
-                    <GoalIcon className="size-3 shrink-0" />
-                    <span className="truncate">{goal}</span>
-                  </p>
+          {open.map((item) => (
+            <div key={item.id} className="flex flex-col gap-0.5">
+              <div className="flex min-w-0 items-baseline gap-1.5 text-sm">
+                <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
+                  #{item.id}
+                </span>
+                <span className="min-w-0 flex-1 truncate">{item.title}</span>
+                {item.status === "waiting" ? (
+                  <span className="shrink-0 text-xs text-muted-foreground">waiting</span>
                 ) : null}
-                {item.note ? (
-                  <p className="ps-6 text-xs text-muted-foreground wrap-anywhere">{item.note}</p>
-                ) : null}
-                {notebook.threads
-                  .filter((thread) => thread.itemId === item.id)
-                  .map((thread) => (
-                    <ThreadLink
-                      key={thread.threadId}
-                      thread={thread}
-                      onOpen={openThread}
-                      onHandBack={handBack}
-                      busy={pending !== null}
-                    />
-                  ))}
               </div>
-            );
-          })}
+              {item.note ? (
+                <p className="ps-6 text-xs text-muted-foreground wrap-anywhere">{item.note}</p>
+              ) : null}
+              {notebook.threads
+                .filter((thread) => thread.itemId === item.id)
+                .map((thread) => (
+                  <ThreadLink
+                    key={thread.threadId}
+                    thread={thread}
+                    onOpen={openThread}
+                    onHandBack={handBack}
+                    busy={pending !== null}
+                  />
+                ))}
+            </div>
+          ))}
           {unlinked.map((thread) => (
             <ThreadLink
               key={thread.threadId}

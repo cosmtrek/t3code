@@ -81,17 +81,10 @@ export interface Turn {
   readonly said: boolean;
 }
 
-export interface Goal {
-  readonly id: number;
-  readonly title: string;
-  readonly done: boolean;
-}
-
 export type ItemStatus = "open" | "waiting" | "done";
 
 export interface Item {
   readonly id: number;
-  readonly goalId: number | null;
   readonly title: string;
   readonly status: ItemStatus;
   /** The next step, or what it waits on. */
@@ -255,6 +248,8 @@ const MIGRATIONS: ReadonlyArray<string> = [
    );`,
   `ALTER TABLE bots ADD COLUMN budget_noticed_day TEXT;`,
   `ALTER TABLE bots ADD COLUMN seen_packet TEXT;`,
+  `DROP TABLE goals;
+   ALTER TABLE items DROP COLUMN goal_id;`,
 ];
 
 type Row = Record<string, NodeSqlite.SQLOutputValue>;
@@ -299,15 +294,8 @@ function toTurn(row: Row): Turn {
   };
 }
 
-const toGoal = (row: Row): Goal => ({
-  id: Number(row.id),
-  title: text(row, "title"),
-  done: Number(row.done) === 1,
-});
-
 const toItem = (row: Row): Item => ({
   id: Number(row.id),
-  goalId: row.goal_id === null ? null : Number(row.goal_id),
   title: text(row, "title"),
   status: text(row, "status") as ItemStatus,
   note: text(row, "note"),
@@ -434,7 +422,6 @@ export class BotStore {
       for (const table of [
         "chat",
         "turns",
-        "goals",
         "items",
         "memory",
         "routines",
@@ -598,32 +585,6 @@ export class BotStore {
 
   // Notebook
 
-  listGoals(botId: string): ReadonlyArray<Goal> {
-    return (
-      this.db.prepare("SELECT * FROM goals WHERE bot_id = ? ORDER BY id").all(botId) as Row[]
-    ).map(toGoal);
-  }
-
-  addGoal(botId: string, title: string): number {
-    return Number(
-      this.db.prepare("INSERT INTO goals (bot_id, title) VALUES (?, ?)").run(botId, title)
-        .lastInsertRowid,
-    );
-  }
-
-  updateGoal(
-    botId: string,
-    id: number,
-    patch: { readonly title?: string; readonly done?: boolean },
-  ): boolean {
-    const goal = this.listGoals(botId).find((candidate) => candidate.id === id);
-    if (!goal) return false;
-    this.db
-      .prepare("UPDATE goals SET title = ?, done = ? WHERE id = ? AND bot_id = ?")
-      .run(patch.title ?? goal.title, (patch.done ?? goal.done) ? 1 : 0, id, botId);
-    return true;
-  }
-
   listItems(botId: string): ReadonlyArray<Item> {
     return (
       this.db.prepare("SELECT * FROM items WHERE bot_id = ? ORDER BY id").all(botId) as Row[]
@@ -632,15 +593,15 @@ export class BotStore {
 
   addItem(
     botId: string,
-    item: { readonly goalId: number | null; readonly title: string; readonly note: string },
+    item: { readonly title: string; readonly note: string },
     at: string,
   ): number {
     return Number(
       this.db
         .prepare(
-          "INSERT INTO items (bot_id, goal_id, title, status, note, updated_at) VALUES (?, ?, ?, 'open', ?, ?)",
+          "INSERT INTO items (bot_id, title, status, note, updated_at) VALUES (?, ?, 'open', ?, ?)",
         )
-        .run(botId, item.goalId, item.title, item.note, at).lastInsertRowid,
+        .run(botId, item.title, item.note, at).lastInsertRowid,
     );
   }
 
@@ -648,20 +609,19 @@ export class BotStore {
   updateItem(
     botId: string,
     id: number,
-    patch: Partial<Pick<Item, "title" | "status" | "note" | "goalId">>,
+    patch: Partial<Pick<Item, "title" | "status" | "note">>,
     at: string,
   ): boolean {
     const item = this.listItems(botId).find((candidate) => candidate.id === id);
     if (!item) return false;
     this.db
       .prepare(
-        "UPDATE items SET title = ?, status = ?, note = ?, goal_id = ?, updated_at = ?, set_aside = 0 WHERE id = ? AND bot_id = ?",
+        "UPDATE items SET title = ?, status = ?, note = ?, updated_at = ?, set_aside = 0 WHERE id = ? AND bot_id = ?",
       )
       .run(
         patch.title ?? item.title,
         patch.status ?? item.status,
         patch.note ?? item.note,
-        patch.goalId === undefined ? item.goalId : patch.goalId,
         at,
         id,
         botId,

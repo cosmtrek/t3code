@@ -62,19 +62,19 @@ Upstream modules are imported, never edited: `ThreadManagementService`, `ThreadM
 
 `apps/server/src/fork/bot/`, provided by `fork/layer.ts` beside the inbox:
 
-| File           | Does                                                                                 |
-| -------------- | ------------------------------------------------------------------------------------ |
-| `store.ts`     | `bots.sqlite`: bots, goals, items, routines, memory, chat, threads, questions, queue |
-| `notebook.ts`  | `role.md` per bot; renders the notebook for the wake packet                          |
-| `events.ts`    | Follows `streamDomainEvents` and `ChannelHub`; turns them into queued bot events     |
-| `reconcile.ts` | On startup, reads every bot-owned thread's shell and queues what was missed          |
-| `wake.ts`      | Per-bot queue, coalescing, one turn at a time, budget, pause, work-thread rotation   |
-| `packet.ts`    | Pure: builds the wake packet from notebook, recent chat, and the event digest        |
-| `gate.ts`      | Pure: permission and ownership decision for one action                               |
-| `actions.ts`   | Runs an allowed action through the service methods above or the inbox's `send`       |
-| `routines.ts`  | Pure: next due time in local time; a 30-second check fires what is due               |
-| `http.ts`      | Routes for the UI and for the CLI; decode, one operation, map errors                 |
-| `cli.ts`       | The `t3bot` tool CLI source, and writing it to `bots/bin/` at startup                |
+| File           | Does                                                                               |
+| -------------- | ---------------------------------------------------------------------------------- |
+| `store.ts`     | `bots.sqlite`: bots, items, routines, memory, chat, threads, questions, queue      |
+| `notebook.ts`  | `role.md` per bot; renders the notebook for the wake packet                        |
+| `events.ts`    | Follows `streamDomainEvents` and `ChannelHub`; turns them into queued bot events   |
+| `reconcile.ts` | On startup, reads every bot-owned thread's shell and queues what was missed        |
+| `wake.ts`      | Per-bot queue, coalescing, one turn at a time, budget, pause, work-thread rotation |
+| `packet.ts`    | Pure: builds the wake packet from notebook, recent chat, and the event digest      |
+| `gate.ts`      | Pure: permission and ownership decision for one action                             |
+| `actions.ts`   | Runs an allowed action through the service methods above or the inbox's `send`     |
+| `routines.ts`  | Pure: next due time in local time; a 30-second check fires what is due             |
+| `http.ts`      | Routes for the UI and for the CLI; decode, one operation, map errors               |
+| `cli.ts`       | The `t3bot` tool CLI source, and writing it to `bots/bin/` at startup              |
 
 ### On an installed T3
 
@@ -107,7 +107,7 @@ bots/
 ```
 
 `bots.sqlite` holds what has structure: `bots` (name, model, permissions, budget,
-scope, paused), `goals`, `items` (goal, status, next step, waiting on, last touched, set
+scope, paused), `items` (status, next step, waiting on, last touched, set
 aside), `routines` (schedule, prompt, next due), `memory` (one row per note; their total is
 capped at 4 KB), `threads` (thread id, bot, item, follow-up mode,
 role `work` or `worker`, handed-back marker), `chat` (the bot's conversation with the user),
@@ -241,7 +241,7 @@ Your last message is posted to the user; end with exactly NO_REPLY when nothing 
 Memory is one fact per line: rewrite a note that changed, remove one that no longer holds.
 Skills: {name}: {path}/SKILL.md — read one when it applies.
 
-Goals and items: …        Routines: …        Scope: …        Memory: …
+Items: …        Routines: …        Scope: …        Memory: …
 Stale (first turn of the day): #7 "Android 0.1.11 build", untouched 9 days
 Recent chat with the user (last 10): …
 What happened since your last turn:
@@ -270,7 +270,7 @@ needs no configuration. It calls `/api/fork/bots/*` with `Authorization: Bearer 
 ```text
 t3bot say <text>                        reply in the chat with the user
 t3bot ask <question> [--action <json>]  ask the user; with an action, approving runs it
-t3bot goal|item|routine add|edit|done   notebook
+t3bot item|routine add|edit|done        notebook
 t3bot item list [--all]                 --all includes set-aside items
 t3bot memory add <text> | edit <id> <text> | remove <id>
                                         one note at a time, 4 KB in total
@@ -295,17 +295,17 @@ design avoids.
 `gate.ts` returns `allow`, `ask`, or `deny` for (bot, action, target). Only actions the service
 performs are gated, because those are the only ones it can stop:
 
-| Action                                                | Default |
-| ----------------------------------------------------- | ------- |
-| reads in scope, `say`, goals, items, routines, memory | allow   |
-| edit its role                                         | ask     |
-| start a thread in `auto` mode, within budget          | allow   |
-| start a thread in `full-access` mode                  | ask     |
-| send, interrupt, settle its own threads               | allow   |
-| send in a followed conversation                       | ask     |
-| anything over budget                                  | ask     |
-| message a thread it does not own                      | deny    |
-| change its own permissions                            | deny    |
+| Action                                         | Default |
+| ---------------------------------------------- | ------- |
+| reads in scope, `say`, items, routines, memory | allow   |
+| edit its role                                  | ask     |
+| start a thread in `auto` mode, within budget   | allow   |
+| start a thread in `full-access` mode           | ask     |
+| send, interrupt, settle its own threads        | allow   |
+| send in a followed conversation                | ask     |
+| anything over budget                           | ask     |
+| message a thread it does not own               | deny    |
+| change its own permissions                     | deny    |
 
 `ask` stores the exact action in `questions` and shows it as a card in the bot's chat. Approving
 claims the question once, checks ownership, scope, and budget again, runs that stored action (not
@@ -338,7 +338,7 @@ chat app has no bot member, so a bot cannot be mentioned anywhere else.
 `apps/web/src/fork/bot/`, reached through the existing fork seams plus `_chat.bots.tsx`:
 
 - **Bots page**: bot list, chat, and notebook panel. The chat reuses the inbox's message list and
-  `ReplyBox`; the notebook renders goals, items with their threads, routines, scope, and memory.
+  `ReplyBox`; the notebook renders items with their threads, routines, scope, and memory.
   Each bot's permissions, budget, and pause switch are a panel of the same page.
 - **Hand back**: shown on the item whose thread the user has taken over. The thread view stays
   unaware of bots, as it stays unaware of the inbox.

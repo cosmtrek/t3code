@@ -9,7 +9,6 @@ const DAY = 86_400_000;
 
 const item = (id: number, daysAgo: number, patch: Partial<Item> = {}): Item => ({
   id,
-  goalId: null,
   title: `Item ${id}`,
   status: "open",
   note: "",
@@ -31,7 +30,7 @@ const input = (patch: Partial<PacketInput>): PacketInput => ({
   name: "Bot",
   role: "",
   tool: "t3bot --bot bot",
-  notebook: { goals: [], items: [], threads: [], routines: [], memory: [] },
+  notebook: { items: [], threads: [], routines: [], memory: [] },
   notesPath: "/notes",
   notes: [],
   skillsPath: "/skills",
@@ -54,7 +53,7 @@ describe("wake packet", () => {
       item(3, 9, { status: "done" }),
       item(4, 10, { setAside: true }),
     ];
-    const notebook = { goals: [], items, threads: [], routines: [], memory: [] };
+    const notebook = { items, threads: [], routines: [], memory: [] };
     const first = buildPacket(input({ notebook, firstTurnToday: true })).text;
     const stale = first.split("Stale")[1]!;
     expect(stale).toContain("#1 Item 1");
@@ -82,7 +81,7 @@ describe("wake packet", () => {
 
   it("sends a continuing session only what changed and none of the chat it holds", () => {
     const memory = [{ id: 1, botId: "bot", text: "Fact" }];
-    const notebook = { goals: [], items: [], threads: [], routines: [], memory };
+    const notebook = { items: [], threads: [], routines: [], memory };
     const first = buildPacket(input({ role: "Watch CI.", notebook, recentChat: [chat(1)] }));
     expect(first.text).toContain("Watch CI.");
     expect(first.text).toContain("message 1");

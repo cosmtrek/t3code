@@ -149,7 +149,6 @@ export const readNotebook = Effect.fn("ForkBot.readNotebook")(function* (botId: 
     .getThreadTitles(owned.map((thread) => ThreadId.make(thread.threadId)))
     .pipe(Effect.orElseSucceed((): Record<ThreadId, string> => ({})));
   return {
-    goals: store.listGoals(botId),
     items: store.listItems(botId),
     threads: owned.map((thread) => ({
       ...thread,
