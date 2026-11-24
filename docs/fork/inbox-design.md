@@ -35,6 +35,11 @@ The inbox has two jobs, and each has its own place:
 A conversation's delegations open from its header, where the user is already working on that
 conversation. They do not repeat on its list row.
 
+The same goes for menus: each one offers what fits the moment, not the same set everywhere. A list
+row's menu triages (mark read or unread, copy the chat ID); the open conversation's header menu acts
+on what is open (copy the chat ID, discard drafts). Marking unread a conversation you are reading
+belongs to the list, not the header.
+
 Every reply the user edits, typed or drafted by the agent, goes through one reply box
 (`ReplyBox`), shaped like T3 Code's composer. Enter sends, as in the chat app, unless the user's
 **Send shortcut** setting asks for Cmd/Ctrl+Enter: one setting decides the send key everywhere.

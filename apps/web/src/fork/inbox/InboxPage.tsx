@@ -64,7 +64,6 @@ import { readMentionable, sendReply } from "./sendReply";
 import {
   INBOX_FILTERS,
   INBOX_VIEWS,
-  agentSignalsByConversation,
   channelBanner,
   draftReplyMode,
   emptyViewTitle,
@@ -279,7 +278,6 @@ function EnvironmentInboxView({
       : { ...conversation, unread: true };
   });
   const delegations = listing.data?.delegations ?? [];
-  const agentSignals = agentSignalsByConversation(delegations);
   const kindOf = new Map(conversations.map((conversation) => [conversation.id, conversation.kind]));
   const delegation = delegations.find((candidate) => candidate.id === delegationId) ?? null;
   const conversation = conversations.find((candidate) => candidate.id === conversationId) ?? null;
@@ -392,12 +390,10 @@ function EnvironmentInboxView({
     list = (
       <ConversationList
         conversations={visibleConversations}
-        agentSignals={agentSignals}
         selectedId={conversationId}
         handlers={{
           onSelect: selectConversation,
           onSetRead: (target, read) => void onSetRead(target, read),
-          onDiscardDrafts: (target) => void onDiscardDrafts(target),
         }}
       />
     );

@@ -250,9 +250,9 @@ export function ConversationPane({
           onClose={onCloseDelegation}
         />
         <ConversationMenu
+          place="header"
           conversation={conversation}
           drafts={delegations.filter((delegation) => delegation.hasDraft).length}
-          onSetRead={handlers.onSetRead}
           onDiscardDrafts={handlers.onDiscardDrafts}
         />
       </PaneHeader>

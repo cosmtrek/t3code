@@ -2,7 +2,6 @@ import { describe, expect, it } from "vite-plus/test";
 
 import type { InboxConversation, InboxDelegation, InboxMessage } from "../types";
 import {
-  agentSignalsByConversation,
   anchorOf,
   conversationRows,
   delegationPreview,
@@ -86,26 +85,6 @@ describe("unreadMessageCount", () => {
       ]),
     ).toBe(12 + 1 + 1 + 1 + 5);
     expect(unreadMessageCount("dm", [conversation({ kind: "dm", unreadCount: 5 })])).toBe(5);
-  });
-});
-
-describe("agentSignalsByConversation", () => {
-  it("counts each conversation's unseen results, drafts, and live threads", () => {
-    const delegation = (conversationId: string, extra: Partial<InboxDelegation>) =>
-      ({
-        conversationId,
-        agentUnseen: false,
-        hasDraft: false,
-        thread: { detachedAt: null },
-        ...extra,
-      }) as InboxDelegation;
-    const signals = agentSignalsByConversation([
-      delegation("a", { agentUnseen: true }),
-      delegation("a", { hasDraft: true }),
-      delegation("b", { thread: null }),
-    ]);
-    expect(signals.get("a")).toEqual({ unseen: 1, drafts: 1, live: 2 });
-    expect(signals.get("b")).toEqual({ unseen: 0, drafts: 0, live: 0 });
   });
 });
 

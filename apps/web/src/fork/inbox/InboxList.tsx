@@ -4,6 +4,7 @@ import {
   BellOffIcon,
   BotIcon,
   CheckIcon,
+  CopyIcon,
   EllipsisIcon,
   MailIcon,
   MailOpenIcon,
@@ -30,6 +31,7 @@ import {
   type AgentSignals,
 } from "./inboxView";
 import { StatusLabel, ThreadStatus } from "./DelegationPane";
+import { copyConversationId } from "./itemActions";
 
 const KIND_ICONS: Readonly<
   Record<ConversationKind, { readonly icon: LucideIcon; readonly label: string }>
@@ -47,7 +49,6 @@ function ConversationKindIcon({ kind }: { readonly kind: ConversationKind }) {
 export interface ConversationHandlers {
   readonly onSelect: (conversation: InboxConversation) => void;
   readonly onSetRead: (conversation: InboxConversation, read: boolean) => void;
-  readonly onDiscardDrafts: (conversation: InboxConversation) => void;
 }
 
 // Rows sit 8px in from both edges, as the toolbar does; the scrollbar lane is always reserved.
@@ -56,17 +57,20 @@ const LIST_CLASS = "min-h-0 flex-1 overscroll-contain [scrollbar-gutter:stable]"
 const SWIPE_REVEAL = 68;
 const SWIPE_THRESHOLD = 40;
 
+/** Each place offers what fits its moment: the row triages, the open conversation acts on it. */
 export function ConversationMenu({
   conversation,
-  drafts,
+  place,
+  drafts = 0,
   onSetRead,
   onDiscardDrafts,
 }: {
   readonly conversation: InboxConversation;
+  readonly place: "row" | "header";
   /** How many of its delegations hold a draft reply. */
-  readonly drafts: number;
-  readonly onSetRead: ConversationHandlers["onSetRead"];
-  readonly onDiscardDrafts: ConversationHandlers["onDiscardDrafts"];
+  readonly drafts?: number;
+  readonly onSetRead?: ConversationHandlers["onSetRead"];
+  readonly onDiscardDrafts?: (conversation: InboxConversation) => void;
 }) {
   return (
     <Menu>
@@ -83,18 +87,24 @@ export function ConversationMenu({
         <EllipsisIcon />
       </MenuTrigger>
       <MenuPopup align="end">
-        {conversation.unread ? (
-          <MenuItem onClick={() => onSetRead(conversation, true)}>
-            <MailOpenIcon />
-            Mark read
-          </MenuItem>
-        ) : (
-          <MenuItem onClick={() => onSetRead(conversation, false)}>
-            <MailIcon />
-            Mark unread
-          </MenuItem>
-        )}
-        {drafts > 0 ? (
+        {place === "row" && onSetRead ? (
+          conversation.unread ? (
+            <MenuItem onClick={() => onSetRead(conversation, true)}>
+              <MailOpenIcon />
+              Mark read
+            </MenuItem>
+          ) : (
+            <MenuItem onClick={() => onSetRead(conversation, false)}>
+              <MailIcon />
+              Mark unread
+            </MenuItem>
+          )
+        ) : null}
+        <MenuItem onClick={() => void copyConversationId(conversation)}>
+          <CopyIcon />
+          Copy chat ID
+        </MenuItem>
+        {place === "header" && drafts > 0 && onDiscardDrafts ? (
           <MenuItem onClick={() => onDiscardDrafts(conversation)}>
             <Trash2Icon />
             {drafts === 1 ? "Discard draft" : `Discard ${drafts} drafts`}
@@ -133,13 +143,11 @@ export function AgentBadge({ signals }: { readonly signals: AgentSignals | undef
 
 function ConversationRow({
   conversation,
-  agent,
   now,
   selected,
   handlers,
 }: {
   readonly conversation: InboxConversation;
-  readonly agent: AgentSignals | undefined;
   readonly now: number;
   readonly selected: boolean;
   readonly handlers: ConversationHandlers;
@@ -257,10 +265,9 @@ function ConversationRow({
         {/* Takes the time's place on hover; touch has the swipe and the conversation's own menu. */}
         <div className="invisible absolute end-1.5 top-1.5 group-focus-within/row:visible group-hover/row:visible has-data-popup-open:visible pointer-coarse:hidden">
           <ConversationMenu
+            place="row"
             conversation={conversation}
-            drafts={agent?.drafts ?? 0}
             onSetRead={handlers.onSetRead}
-            onDiscardDrafts={handlers.onDiscardDrafts}
           />
         </div>
       </div>
@@ -270,12 +277,10 @@ function ConversationRow({
 
 export function ConversationList({
   conversations,
-  agentSignals,
   selectedId,
   handlers,
 }: {
   readonly conversations: ReadonlyArray<InboxConversation>;
-  readonly agentSignals: ReadonlyMap<string, AgentSignals>;
   readonly selectedId: string | null;
   readonly handlers: ConversationHandlers;
 }) {
@@ -286,11 +291,10 @@ export function ConversationList({
     <LegendList<InboxConversation>
       data={conversations}
       keyExtractor={(conversation) => conversation.id}
-      extraData={{ selectedId, now, handlers, agentSignals }}
+      extraData={{ selectedId, now, handlers }}
       renderItem={({ item }) => (
         <ConversationRow
           conversation={item}
-          agent={agentSignals.get(item.id)}
           now={now}
           selected={item.id === selectedId}
           handlers={handlers}

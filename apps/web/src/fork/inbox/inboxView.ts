@@ -86,20 +86,6 @@ export function agentSignalsFor(delegations: ReadonlyArray<InboxDelegation>): Ag
   return { unseen, drafts, live };
 }
 
-export function agentSignalsByConversation(
-  delegations: ReadonlyArray<InboxDelegation>,
-): ReadonlyMap<string, AgentSignals> {
-  const byConversation = new Map<string, InboxDelegation[]>();
-  for (const delegation of delegations) {
-    const group = byConversation.get(delegation.conversationId);
-    if (group) group.push(delegation);
-    else byConversation.set(delegation.conversationId, [delegation]);
-  }
-  return new Map(
-    [...byConversation].map(([conversationId, group]) => [conversationId, agentSignalsFor(group)]),
-  );
-}
-
 /**
  * Whether the conversation belongs in Unread or All. Unread is people's messages; agent results
  * live in the Agent view. A muted conversation shows there only when it mentions you, as in the

@@ -93,6 +93,20 @@ export async function copyDelegationContext(detail: DelegationDetail) {
   }
 }
 
+/** The chat app's own id, for agents and tools that message the conversation directly. */
+export async function copyConversationId(conversation: InboxConversation) {
+  try {
+    await navigator.clipboard.writeText(conversation.id);
+    toastManager.add({
+      type: "success",
+      title: "Copied the chat ID",
+      description: conversation.id,
+    });
+  } catch (error) {
+    fail("Could not copy the chat ID", error);
+  }
+}
+
 /** Discards the draft the user saw; one the thread rewrote meanwhile stays. */
 export async function discardDraft(
   environmentId: EnvironmentId,
