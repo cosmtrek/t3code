@@ -2,6 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 
@@ -29,6 +30,15 @@ it.effect.each(["t3code", "T3 Code (Alpha)"])(
       assert.equal(yield* fs.readFileString(path.join(destination, "Local State")), state);
       assert.equal(yield* fs.readFileString(path.join(source, "Local State")), state);
       assert.isFalse(yield* fs.exists(path.join(destination, "IndexedDB")));
+      // A variant build gets its own profile and never inherits these keys.
+      const variantPath = yield* resolveUserDataPath({
+        appDataDirectory: directory,
+        isDevelopment: false,
+        platform: "win32",
+        dataSlug: Option.some("r"),
+      });
+      assert.equal(variantPath, path.join(directory, "t3code-r"));
+      assert.isFalse(yield* fs.exists(variantPath));
       yield* fs.writeFileString(path.join(destination, "Local State"), "existing V2 state");
       yield* resolveUserDataPath({
         appDataDirectory: directory,

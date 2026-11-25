@@ -84,7 +84,7 @@ const VARIANT_CONFIG = {
     iosBundleIdentifier: "com.t3tools.t3code.dev",
     androidPackage: "com.t3tools.t3code.dev",
     relyingParty: "clerk.t3.codes",
-    assets: DEVELOPMENT_ASSETS,
+    icon: "development",
   },
   preview: {
     appName: "T3 Code Preview",
@@ -92,7 +92,7 @@ const VARIANT_CONFIG = {
     iosBundleIdentifier: "com.t3tools.t3code.preview",
     androidPackage: "com.t3tools.t3code.preview",
     relyingParty: "clerk.t3.codes",
-    assets: PREVIEW_ASSETS,
+    icon: "nightly",
   },
   production: {
     appName: "T3 Code",
@@ -100,7 +100,7 @@ const VARIANT_CONFIG = {
     iosBundleIdentifier: "com.t3tools.t3code",
     androidPackage: "com.t3tools.t3code",
     relyingParty: "clerk.t3.codes",
-    assets: RELEASE_ASSETS,
+    icon: "production",
   },
 } as const;
 
@@ -123,6 +123,44 @@ const HOSTED_APP_HOST = "app.t3.codes";
 const iosBundleIdentifier = isIosPersonalTeamBuild
   ? personalTeamBundleIdentifier!
   : variant.iosBundleIdentifier;
+
+// Forks install beside the official app under their own package; variant suffixes are kept.
+const androidPackageOverride = repoEnv.T3CODE_ANDROID_PACKAGE?.trim();
+if (androidPackageOverride && !IOS_BUNDLE_IDENTIFIER_PATTERN.test(androidPackageOverride)) {
+  throw new Error(
+    "T3CODE_ANDROID_PACKAGE must be a reverse-DNS identifier such as com.example.t3code.",
+  );
+}
+const androidPackage = androidPackageOverride
+  ? variant.androidPackage.replace(VARIANT_CONFIG.production.androidPackage, androidPackageOverride)
+  : variant.androidPackage;
+
+// Forks rename the app; variant suffixes such as "Preview" are kept.
+const appNameOverride = repoEnv.T3CODE_APP_NAME?.trim();
+if (appNameOverride && appNameOverride.length > 30) {
+  throw new Error("T3CODE_APP_NAME must be at most 30 characters.");
+}
+const appName = appNameOverride
+  ? variant.appName.replace(VARIANT_CONFIG.production.appName, appNameOverride)
+  : variant.appName;
+
+const ICON_ASSETS = {
+  development: DEVELOPMENT_ASSETS,
+  nightly: PREVIEW_ASSETS,
+  production: RELEASE_ASSETS,
+} as const;
+// Forks pick an icon set to stand apart from the official app; dev builds keep theirs.
+const appIconOverride = repoEnv.T3CODE_APP_ICON?.trim() || undefined;
+const isForkIcon = (value: string): value is "nightly" | "production" =>
+  value === "nightly" || value === "production";
+if (appIconOverride !== undefined && !isForkIcon(appIconOverride)) {
+  throw new Error("T3CODE_APP_ICON must be nightly or production.");
+}
+const appIcon =
+  appIconOverride !== undefined && isForkIcon(appIconOverride) && APP_VARIANT !== "development"
+    ? appIconOverride
+    : variant.icon;
+const assets = ICON_ASSETS[appIcon];
 
 const dmSansFonts = {
   regular: "@expo-google-fonts/dm-sans/400Regular/DMSans_400Regular.ttf",
@@ -235,7 +273,7 @@ const sharingPlugin: NonNullable<ExpoConfig["plugins"]>[number] = [
 // Match iOS PostScript names on Android so RN and the native composer share fonts before runtime loading.
 
 const config: ExpoConfig = {
-  name: variant.appName,
+  name: appName,
   slug: "t3-code",
   platforms: ["ios", "android"],
   scheme: variant.scheme,
@@ -245,7 +283,7 @@ const config: ExpoConfig = {
     policy: runtimeVersionPolicy,
   },
   orientation: "portrait",
-  icon: variant.assets.appIcon,
+  icon: assets.appIcon,
   userInterfaceStyle: "automatic",
   updates: {
     enabled: repoEnv.T3CODE_MOBILE_UPDATES_ENABLED !== "0",
@@ -254,7 +292,7 @@ const config: ExpoConfig = {
     fallbackToCacheTimeout: 0,
   },
   ios: {
-    icon: variant.assets.iosIcon,
+    icon: assets.iosIcon,
     supportsTablet: true,
     requireFullScreen: process.env.T3_SHOWCASE_CAPTURE_BUILD === "1",
     bundleIdentifier: iosBundleIdentifier,
@@ -299,18 +337,18 @@ const config: ExpoConfig = {
     },
   },
   android: {
-    icon: variant.assets.appIcon,
-    package: variant.androidPackage,
+    icon: assets.appIcon,
+    package: androidPackage,
     ...(repoEnv.T3CODE_ANDROID_GOOGLE_SERVICES_FILE
       ? { googleServicesFile: repoEnv.T3CODE_ANDROID_GOOGLE_SERVICES_FILE }
       : {}),
     adaptiveIcon: {
-      backgroundColor: variant.assets.androidAdaptiveBackgroundColor,
-      ...(variant.assets.androidAdaptiveBackgroundImage
-        ? { backgroundImage: variant.assets.androidAdaptiveBackgroundImage }
+      backgroundColor: assets.androidAdaptiveBackgroundColor,
+      ...(assets.androidAdaptiveBackgroundImage
+        ? { backgroundImage: assets.androidAdaptiveBackgroundImage }
         : {}),
-      foregroundImage: variant.assets.androidAdaptiveForeground,
-      monochromeImage: variant.assets.androidMonochromeIcon,
+      foregroundImage: assets.androidAdaptiveForeground,
+      monochromeImage: assets.androidMonochromeIcon,
     },
     // JS back dispatch needs RN's Android 16 shim and withAndroidPredictiveBackCompat on Android 13-15.
     predictiveBackGestureEnabled: true,
@@ -326,7 +364,7 @@ const config: ExpoConfig = {
     ],
   },
   web: {
-    favicon: variant.assets.appIcon,
+    favicon: assets.appIcon,
   },
   plugins: [
     "expo-asset",
@@ -367,8 +405,8 @@ const config: ExpoConfig = {
     [
       "expo-notifications",
       {
-        icon: variant.assets.androidNotificationIcon,
-        color: variant.assets.androidNotificationColor,
+        icon: assets.androidNotificationIcon,
+        color: assets.androidNotificationColor,
         mode: APP_VARIANT === "development" ? "development" : "production",
       },
     ],
@@ -380,10 +418,10 @@ const config: ExpoConfig = {
       {
         androidIcons: {
           shortcut_icon: {
-            foregroundImage: variant.assets.androidAdaptiveForeground,
-            backgroundColor: variant.assets.androidAdaptiveBackgroundColor,
-            ...(variant.assets.androidAdaptiveBackgroundImage
-              ? { backgroundImage: variant.assets.androidAdaptiveBackgroundImage }
+            foregroundImage: assets.androidAdaptiveForeground,
+            backgroundColor: assets.androidAdaptiveBackgroundColor,
+            ...(assets.androidAdaptiveBackgroundImage
+              ? { backgroundImage: assets.androidAdaptiveBackgroundImage }
               : {}),
           },
         },
@@ -418,19 +456,19 @@ const config: ExpoConfig = {
     [
       "expo-splash-screen",
       {
-        image: variant.assets.splashIcon,
+        image: assets.splashIcon,
         resizeMode: "contain",
         backgroundColor: "#ffffff",
         imageWidth: 220,
         dark: {
-          image: variant.assets.splashIcon,
+          image: assets.splashIcon,
           backgroundColor: "#0a0a0a",
         },
         android: {
           // Android 12+ masks the central two thirds of the 288dp canvas; adaptive layers avoid clipped corners.
-          image: variant.assets.androidSplashIcon,
+          image: assets.androidSplashIcon,
           imageWidth: 288,
-          dark: { image: variant.assets.androidSplashIcon },
+          dark: { image: assets.androidSplashIcon },
         },
       },
     ],
@@ -473,6 +511,7 @@ const config: ExpoConfig = {
   ],
   extra: {
     appVariant: APP_VARIANT,
+    appIcon,
     iosPersonalTeamBuild: isIosPersonalTeamBuild,
     relay: {
       url: repoEnv.T3CODE_RELAY_URL ?? null,

@@ -16,6 +16,7 @@ import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 
 import * as Electron from "electron";
 
@@ -98,12 +99,22 @@ const layerDesktopEnvironment = Layer.unwrap(
     );
     const platform = yield* HostProcess.Platform;
     const processArch = yield* HostProcess.Architecture;
+    // Read before any layer exists: the variant decides the profile and state directories.
+    const variant = metadata.isPackaged
+      ? Option.flatMap(
+          Option.liftThrowable(() =>
+            NodeFS.readFileSync(`${metadata.appPath}/package.json`, "utf8"),
+          )(),
+          DesktopEnvironment.decodePackagedVariant,
+        )
+      : Option.none();
     return DesktopEnvironment.layer({
       dirname: __dirname,
       homeDirectory: NodeOS.homedir(),
       platform,
       processArch,
       ...metadata,
+      variant,
     });
   }),
 );
