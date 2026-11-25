@@ -90,7 +90,10 @@ export const resolveDesktopSshCliRunner = (
       nodeEngineRange: serverPackageJson.engines.node,
     };
   }
-  const releaseBaseUrl = env[CLI_RELEASE_BASE_URL_ENV]?.trim() || undefined;
+  const releaseBaseUrl =
+    env[CLI_RELEASE_BASE_URL_ENV]?.trim() ||
+    Option.getOrUndefined(environment.releaseBaseUrl) ||
+    undefined;
   return {
     archiveVersion: environment.appVersion,
     ...(releaseBaseUrl === undefined ? {} : { releaseBaseUrl }),

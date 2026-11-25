@@ -4,6 +4,7 @@ import { assert, describe, it } from "@effect/vitest";
 import { CLI_RELEASE_BASE_URL_ENV } from "@t3tools/shared/cliRelease";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 
 import * as DesktopConfig from "../app/DesktopConfig.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
@@ -42,6 +43,23 @@ describe("resolveDesktopSshCliRunner", () => {
         archiveVersion: "0.0.22",
         releaseBaseUrl: "https://mirror.example.com/t3code",
       });
+    }),
+  );
+
+  it.effect("falls back to the release URL baked into a fork build", () =>
+    Effect.gen(function* () {
+      const environment = yield* packagedEnvironment;
+      const fork = { ...environment, releaseBaseUrl: Option.some("https://fork.example.com/t3") };
+
+      assert.deepStrictEqual(resolveDesktopSshCliRunner(fork, {}), {
+        archiveVersion: "0.0.22",
+        releaseBaseUrl: "https://fork.example.com/t3",
+      });
+      assert.deepStrictEqual(
+        resolveDesktopSshCliRunner(fork, { [CLI_RELEASE_BASE_URL_ENV]: "https://env.example.com" })
+          .releaseBaseUrl,
+        "https://env.example.com",
+      );
     }),
   );
 });
