@@ -4,6 +4,7 @@ import {
   EMBER_THEME,
   GROVE_THEME,
   IRIS_THEME,
+  ABSOLUTELY_THEME,
   OCEAN_THEME,
   T3_CHAT_THEME,
   themeColorToHex,
@@ -46,6 +47,7 @@ const builtInThemeModes = [
   OCEAN_THEME,
   EMBER_THEME,
   IRIS_THEME,
+  ABSOLUTELY_THEME,
 ].flatMap((theme) =>
   [theme.colors, theme.variants?.dark].filter((colors): colors is ThemeColors => !!colors),
 );
