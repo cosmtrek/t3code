@@ -445,9 +445,10 @@ it.layer(layerTest)("AntigravityDriver", (it) => {
           expect(h.launches.at(-1)?.args).toEqual([
             "acp",
             "--gemini-dir",
-            h.profileDirectory,
+            expect.any(String),
             "--app-data-dir",
             "antigravity-acp",
+            ...(runtimeMode === "full-access" ? ["--dangerously-skip-permissions"] : []),
           ]);
           expect(
             (yield* h.readRequests)

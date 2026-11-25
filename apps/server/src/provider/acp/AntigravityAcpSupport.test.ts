@@ -17,6 +17,7 @@ import {
   applyAntigravityAcpModelSelection,
   antigravityPermissionDisposition,
   antigravityServesT3Code,
+  antigravityRuntimeModeForSessionMode,
   antigravitySessionMeta,
   antigravitySessionMode,
   buildAntigravityPrompt,
@@ -101,6 +102,23 @@ describe("Antigravity Auto", () => {
     };
     expect(antigravitySessionMode("auto", modeState)).toBe(expected);
   });
+
+  it.each([
+    { offered: ["default", "accept-edits", "plan"], expected: "accept-edits" },
+    { offered: ["default", "plan"], expected: "default" },
+  ])(
+    "auto-accepts edits as $expected when the session offers $offered",
+    ({ offered, expected }) => {
+      const modeState = {
+        currentModeId: "default",
+        availableModes: offered.map((id) => ({ id, name: id })),
+      };
+      expect(antigravitySessionMode("auto_edit", modeState)).toBe(expected);
+      expect(antigravityRuntimeModeForSessionMode(expected)).toBe(
+        expected === "accept-edits" ? "auto-accept-edits" : "approval-required",
+      );
+    },
+  );
 
   it.each(["execute", "read"] as const)("asks about the %s requests agy's Auto sends", (kind) => {
     const request = {

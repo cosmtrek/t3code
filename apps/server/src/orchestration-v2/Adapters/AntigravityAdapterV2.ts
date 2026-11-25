@@ -165,6 +165,7 @@ export function makeAntigravityAcpAdapterFlavor(
             ...input,
             clientFileReads: true,
             sessionSystemPromptAppend: PULL_REQUEST_LINKING_INSTRUCTIONS,
+            skipPermissions: input.runtimePolicy.runtimeMode === "full-access",
           }),
         )
         .pipe(Effect.provideService(Scope.Scope, scope));
@@ -252,6 +253,8 @@ export function makeAntigravityAcpAdapterFlavor(
     // A finished background command or timer wakes the agent with no prompt open: it streams a
     // reply and asks for permissions, and no prompt response ever ends that reply.
     enablePostSettleContinuation: true,
+    runtimeProcessPolicyKey: (policy) =>
+      policy.runtimeMode === "full-access" ? "skip-permissions" : "ask",
     deferFinalizeForBackgroundWork: true,
     wakeOnDetachedRequest: true,
     replyEndsWithUsageUpdate: true,
