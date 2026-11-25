@@ -1,1 +1,3 @@
+# fork: queue behind other agents' heavy checks when the host provides `heavy`.
+if command -v heavy >/dev/null 2>&1; then exec heavy vp staged; fi
 vp staged

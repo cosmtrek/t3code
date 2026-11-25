@@ -1,0 +1,173 @@
+name: Fork Android APK
+
+# Fork-only: builds a sideloadable APK on a GitHub-hosted runner, without EAS.
+# See FORK.md for the version rules and the secrets this reads.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "App version (MAJOR.MINOR.PATCH)"
+        required: true
+        type: string
+      variant:
+        description: "production: daily build; preview: trial of a risky build. Both install side by side."
+        required: true
+        type: choice
+        default: production
+        options:
+          - production
+          - preview
+      abi:
+        description: "arm64-v8a for phones, x86_64 for emulators"
+        required: true
+        type: choice
+        default: arm64-v8a
+        options:
+          - arm64-v8a
+          - x86_64
+
+# write: phone builds are published as a release, whose APK link installs straight from a phone.
+permissions:
+  contents: write
+
+concurrency:
+  group: fork-android-apk-${{ inputs.variant }}
+  cancel-in-progress: false
+
+jobs:
+  apk:
+    name: Build ${{ inputs.variant }} ${{ inputs.version }}
+    if: github.repository != 'pingdotgg/t3code'
+    # A Linux Namespace profile: more cores than GitHub's ubuntu-24.04, where native modules
+    # and R8 took ~20 minutes.
+    runs-on: namespace-profile-default
+    timeout-minutes: 90
+    env:
+      APP_VARIANT: ${{ inputs.variant }}
+      T3CODE_MOBILE_VERSION: ${{ inputs.version }}
+      T3CODE_ANDROID_PACKAGE: ${{ vars.T3CODE_ANDROID_PACKAGE }}
+      T3CODE_APP_NAME: ${{ vars.T3CODE_APP_NAME }}
+      T3CODE_APP_ICON: ${{ vars.T3CODE_APP_ICON }}
+      # The official EAS project would otherwise replace this build's JS with upstream's.
+      T3CODE_MOBILE_UPDATES_ENABLED: "0"
+      MOBILE_VERSION_POLICY: appVersion
+      ABI: ${{ inputs.abi }}
+    steps:
+      - name: Validate inputs
+        run: |
+          if ! [[ "$T3CODE_MOBILE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::version must be MAJOR.MINOR.PATCH, got '$T3CODE_MOBILE_VERSION'"
+            exit 1
+          fi
+          if [ -z "$T3CODE_ANDROID_PACKAGE" ]; then
+            echo "::error::Set the repository variable T3CODE_ANDROID_PACKAGE (for example dev.yourname.t3code)."
+            exit 1
+          fi
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: package.json
+
+      - name: Enable corepack
+        run: |
+          npm install --global corepack@latest
+          corepack enable
+          pnpm --version
+
+      - name: Install mobile dependencies
+        run: pnpm install --frozen-lockfile --filter=@t3tools/mobile...
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      # GitHub's images ship the Android SDK; Namespace's do not. Gradle fetches the NDK itself.
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          # The default adds the legacy `tools` package, which cmdline-tools 16 no longer has.
+          packages: platform-tools
+
+      # Public identifiers official builds ship with; they enable T3 Connect against upstream's relay.
+      - name: Enable T3 Connect
+        run: cp .env.example .env
+
+      - name: Prebuild
+        working-directory: apps/mobile
+        run: pnpm exec expo prebuild --clean --platform android --no-install
+
+      - name: Set versionCode
+        working-directory: apps/mobile/android
+        env:
+          VERSION_CODE: ${{ github.run_number }}
+        run: |
+          sed -i -E "s/versionCode [0-9]+/versionCode $VERSION_CODE/" app/build.gradle
+          grep -E "applicationId|versionCode|versionName" app/build.gradle
+
+      - name: Build
+        working-directory: apps/mobile/android
+        run: ./gradlew app:assembleRelease "-PreactNativeArchitectures=$ABI" --no-daemon
+
+      - name: Sign
+        working-directory: apps/mobile/android
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ vars.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          apk=app/build/outputs/apk/release/app-release.apk
+          out="$RUNNER_TEMP/t3code-$APP_VARIANT-$T3CODE_MOBILE_VERSION-$ABI.apk"
+          apksigner="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -n 1)apksigner"
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+            "$apksigner" sign --ks "$RUNNER_TEMP/release.keystore" --ks-pass env:KEYSTORE_PASSWORD \
+              --ks-key-alias "$KEY_ALIAS" --key-pass env:KEY_PASSWORD --out "$out" "$apk"
+            rm -f "$RUNNER_TEMP/release.keystore"
+          else
+            echo "::warning::ANDROID_KEYSTORE_BASE64 is not set; the APK is signed with the public React Native debug key."
+            cp "$apk" "$out"
+          fi
+          "$apksigner" verify --print-certs "$out" | head -n 3
+          echo "APK_PATH=$out" >> "$GITHUB_ENV"
+          {
+            echo "### $T3CODE_ANDROID_PACKAGE $APP_VARIANT $T3CODE_MOBILE_VERSION"
+            echo "- versionCode: ${{ github.run_number }}"
+            echo "- ABI: $ABI"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: t3code-${{ inputs.variant }}-${{ inputs.version }}-${{ inputs.abi }}
+          path: ${{ env.APK_PATH }}
+          if-no-files-found: error
+
+      # Actions artifacts need a GitHub sign-in and arrive zipped; a release asset does not.
+      # Not marked latest, so the server releases keep that spot.
+      - name: Publish release
+        if: inputs.abi == 'arm64-v8a'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$APP_VARIANT" = production ]; then tag="android-v$T3CODE_MOBILE_VERSION"; else tag="android-$APP_VARIANT-v$T3CODE_MOBILE_VERSION"; fi
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" "$APK_PATH" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$tag" "$APK_PATH" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest=false \
+              --title "Android $APP_VARIANT $T3CODE_MOBILE_VERSION" \
+              --notes "$T3CODE_ANDROID_PACKAGE, versionCode ${{ github.run_number }}. Open the APK link on the phone to install."
+          fi
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/$(basename "$APK_PATH")"
+          echo "- APK: $url" >> "$GITHUB_STEP_SUMMARY"
