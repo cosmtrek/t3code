@@ -1,0 +1,251 @@
+name: Fork release
+
+# Fork-only: builds the Linux x64 `t3` CLI archive and the macOS arm64 desktop
+# app on GitHub-hosted runners and publishes both as one GitHub release that
+# `t3 update <version>` can install. Upstream's release workflows run on
+# Blacksmith runners the fork cannot use. The desktop identity comes from
+# repository variables; see FORK.md for those and the version rules.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (X.Y.Z-r.N); the tag is vX.Y.Z-r.N"
+        required: true
+        type: string
+      desktop:
+        description: "Also build the macOS desktop app"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fork-cli-release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  cli:
+    name: Build t3 ${{ inputs.version }} (linux-x64)
+    if: github.repository != 'pingdotgg/t3code'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ inputs.version }}
+      # Builds outside pingdotgg/t3code report "dev" telemetry, as upstream's release does.
+      T3CODE_TELEMETRY_CHANNEL: dev
+    steps:
+      - name: Validate version
+        run: |
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-r\.[0-9]+$ ]]; then
+            echo "::error::version must be X.Y.Z-r.N, got '$VERSION'"
+            exit 1
+          fi
+          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::release v$VERSION already exists"
+            exit 1
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup dependencies
+        uses: ./.github/actions/setup-ci-deps
+        with:
+          install-args: --filter=@t3tools/desktop... --filter=t3... --filter=@t3tools/scripts...
+
+      # Public identifiers official builds ship with; they enable T3 Connect against upstream's relay.
+      - name: Enable T3 Connect
+        run: cp .env.example .env
+
+      - name: Align package versions to release version
+        run: node scripts/update-release-package-versions.ts "$VERSION"
+
+      - name: Build JS bundle
+        run: vp run build:desktop:bundle
+
+      # Unbranded, as release.yml's js-bundle: the desktop build brands its own copy.
+      - name: Upload JS bundle
+        if: inputs.desktop
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: js-bundle
+          path: |
+            apps/server/dist
+            apps/desktop/dist-electron
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Apply web client branding
+        run: node scripts/apply-web-brand-assets.ts production apps/server/dist/client
+
+      - name: Build CLI single-executable
+        run: node apps/server/scripts/cli.ts build-exe --verbose
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Build resource monitor
+        run: |
+          cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target x86_64-unknown-linux-gnu
+          mkdir -p "$RUNNER_TEMP/cli-resource-monitor/linux-x64"
+          cp native/resource-monitor/target/x86_64-unknown-linux-gnu/release/t3-resource-monitor "$RUNNER_TEMP/cli-resource-monitor/linux-x64/"
+
+      # The Linux archive ships libatomic.so.1 and points t3's RUNPATH at it.
+      - name: Install patchelf
+        run: command -v patchelf || { sudo apt-get update && sudo apt-get install -y patchelf; }
+
+      - name: Build CLI archive
+        run: |
+          node scripts/build-cli-archive.ts \
+            --platform linux \
+            --arch x64 \
+            --version "$VERSION" \
+            --resource-monitor-dir "$RUNNER_TEMP/cli-resource-monitor" \
+            --output-dir release-cli
+
+      - name: Smoke-test CLI archive
+        run: node scripts/smoke-cli-archive.ts --archive release-cli/* --expect-version "$VERSION"
+
+      - name: Upload CLI archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: cli-linux-x64
+          path: release-cli/*
+          if-no-files-found: error
+          retention-days: 1
+
+  desktop:
+    name: Build desktop ${{ inputs.version }} (macos-arm64)
+    needs: cli
+    if: inputs.desktop
+    # A Namespace profile, which must be a macOS arm64 one: GitHub's own macOS runners queue long.
+    runs-on: namespace-profile-t3code
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ inputs.version }}
+      T3CODE_TELEMETRY_CHANNEL: dev
+      # Unset variables build the official identity, which replaces an installed T3 Code.
+      T3CODE_DESKTOP_APP_ID: ${{ vars.T3CODE_ANDROID_PACKAGE }}
+      T3CODE_DESKTOP_PRODUCT_NAME: ${{ vars.T3CODE_APP_NAME }}
+      T3CODE_DESKTOP_DATA_SLUG: ${{ vars.T3CODE_DATA_SLUG }}
+      T3CODE_DESKTOP_ICON: ${{ vars.T3CODE_APP_ICON }}
+      # SSH hosts download this release's `t3`, not upstream's (which has no -r.N tags).
+      T3CODE_DESKTOP_RELEASE_BASE_URL: https://github.com/${{ github.repository }}/releases/download
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup dependencies
+        uses: ./.github/actions/setup-ci-deps
+        with:
+          install-args: --filter=@t3tools/desktop... --filter=t3... --filter=@t3tools/scripts...
+
+      - name: Enable T3 Connect
+        run: cp .env.example .env
+
+      - name: Align package versions to release version
+        run: node scripts/update-release-package-versions.ts "$VERSION"
+
+      - name: Download JS bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: js-bundle
+          path: apps
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin
+
+      # Without Apple signing secrets the app is signed ad hoc.
+      - name: Build desktop artifact
+        run: |
+          vp run dist:desktop:artifact \
+            --platform mac \
+            --target dmg \
+            --arch arm64 \
+            --build-version "$VERSION" \
+            --skip-build \
+            --verbose
+
+      # macOS kills an app with a broken seal at launch (exit 137); fail here instead.
+      - name: Verify desktop app launches
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/verify-app"
+          ditto -x -k release/*.zip "$dir"
+          app="$(find "$dir" -maxdepth 1 -name '*.app' -print -quit)"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          exe="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")"
+          launched="$(perl -e 'alarm 120; exec @ARGV' "$app/Contents/MacOS/$exe" --version)"
+          echo "launched $launched"
+          test "$launched" = "$VERSION"
+
+      - name: Upload desktop artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: desktop-macos-arm64
+          path: |
+            release/*.dmg
+            release/*.zip
+            release/*.blockmap
+            release/latest-mac.yml
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish ${{ inputs.version }}
+    needs: [cli, desktop]
+    if: ${{ !cancelled() && needs.cli.result == 'success' && (needs.desktop.result == 'success' || needs.desktop.result == 'skipped') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      # Release notes compare against the previous release tag.
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          filter: blob:none
+
+      - name: Download CLI archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: cli-linux-x64
+          path: release-assets
+
+      - name: Download desktop artifact
+        if: needs.desktop.result == 'success'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: desktop-macos-arm64
+          path: release-assets
+
+      # `t3 update` finds its archive's line in this file by name.
+      - name: Write checksums
+        working-directory: release-assets
+        run: sha256sum -- * > SHA256SUMS && cat SHA256SUMS
+
+      - name: Write release notes
+        run: |
+          scripts/fork-release-notes.sh "$VERSION" "$GITHUB_SHA" "$GITHUB_REPOSITORY" > "$RUNNER_TEMP/release-notes.md"
+          cat "$RUNNER_TEMP/release-notes.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v$VERSION" release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "t3 $VERSION" \
+            --notes-file "$RUNNER_TEMP/release-notes.md"
