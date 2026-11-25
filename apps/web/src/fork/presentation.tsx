@@ -1,0 +1,68 @@
+import { cn } from "../lib/utils";
+import { useClientSettings } from "../hooks/useSettings";
+import { formatDayAwareTimestamp, formatRelativeElapsed } from "../timestampFormat";
+import type { ChannelStatus } from "./types";
+
+export const CHANNEL_STATUS_LABELS: Readonly<Record<ChannelStatus, string>> = {
+  disabled: "Off",
+  token_missing: "Token missing",
+  unreachable: "Adapter unreachable",
+  unauthorized: "Token refused",
+  incompatible: "Protocol mismatch",
+  needs_login: "Sign-in needed",
+  collector_stopped: "Collector stopped",
+  online: "Online",
+};
+
+const DOT_CLASS: Readonly<Record<ChannelStatus, string>> = {
+  disabled: "bg-muted-foreground/40",
+  token_missing: "bg-destructive",
+  unauthorized: "bg-destructive",
+  incompatible: "bg-destructive",
+  needs_login: "bg-warning",
+  unreachable: "bg-warning",
+  collector_stopped: "bg-warning",
+  online: "bg-success",
+};
+
+/** Statuses whose banner shows how long they have lasted. */
+export const TIMED_STATUSES: ReadonlySet<ChannelStatus> = new Set([
+  "unreachable",
+  "collector_stopped",
+]);
+
+export function ChannelStatusDot({
+  status,
+  className,
+}: {
+  readonly status: ChannelStatus;
+  readonly className?: string;
+}) {
+  return (
+    <span
+      role="img"
+      aria-label={CHANNEL_STATUS_LABELS[status]}
+      className={cn("inline-block size-2 shrink-0 rounded-full", DOT_CLASS[status], className)}
+    />
+  );
+}
+
+/** "3m", "5h", "1d", as the sidebar shows them; "now" under a minute. */
+export function formatSpan(ms: number): string {
+  const relative = formatRelativeElapsed(Math.max(0, ms));
+  return relative.suffix === null ? "now" : relative.value;
+}
+
+export function formatSince(iso: string | null, now = Date.now()): string {
+  if (iso === null) return "never";
+  const at = Date.parse(iso);
+  if (!Number.isFinite(at)) return "unknown";
+  const span = formatSpan(now - at);
+  return span === "now" ? "just now" : `${span} ago`;
+}
+
+/** A message time as the chat shows it, in the format chosen in Settings (12- or 24-hour). */
+export function useFormatTimestamp(): (iso: string) => string {
+  const timestampFormat = useClientSettings((settings) => settings.timestampFormat);
+  return (iso) => formatDayAwareTimestamp(iso, timestampFormat);
+}

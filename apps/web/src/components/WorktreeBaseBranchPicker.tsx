@@ -12,6 +12,7 @@ import { resolveBranchTriggerLabel, sanitizeNewRefName } from "./BranchToolbar.l
 import { MiddleTruncate } from "./ui/middle-truncate";
 import { Button } from "./ui/button";
 import { ComboboxTrigger } from "./ui/combobox";
+import { ComposerControl } from "./chat/ComposerControl";
 
 export function WorktreeBaseBranchPicker({
   environmentId,
@@ -22,6 +23,7 @@ export function WorktreeBaseBranchPicker({
   onStartFromOriginChange,
   disabled = false,
   id,
+  compact = false,
 }: {
   environmentId: EnvironmentId;
   cwd: string | null;
@@ -31,6 +33,8 @@ export function WorktreeBaseBranchPicker({
   onStartFromOriginChange: (checked: boolean) => void;
   disabled?: boolean;
   id?: string;
+  /** A chip in a composer's control row instead of a form field. */
+  compact?: boolean;
 }) {
   const gt = useGT();
   const messages = useMessages();
@@ -127,16 +131,29 @@ export function WorktreeBaseBranchPicker({
         ) : null;
       }}
     >
-      <ComboboxTrigger
-        id={id}
-        disabled={disabled || !cwd}
-        render={<Button variant="outline" size="sm" />}
-        className="w-full justify-between "
-      >
-        <GitBranchIcon className="size-3.5 shrink-0 text-muted-foreground" />
-        <MiddleTruncate value={label} className="flex-1 text-left" />
-        <ChevronDownIcon className="size-3.5 shrink-0 text-muted-foreground" />
-      </ComboboxTrigger>
+      {compact ? (
+        <ComboboxTrigger
+          id={id}
+          disabled={disabled || !cwd}
+          aria-label={gt("Base branch")}
+          render={<ComposerControl size="xs" className="min-w-0 shrink" />}
+        >
+          <GitBranchIcon className="size-3" />
+          <MiddleTruncate value={label} className="min-w-0" />
+          <ChevronDownIcon data-composer-control-chevron className="opacity-60" />
+        </ComboboxTrigger>
+      ) : (
+        <ComboboxTrigger
+          id={id}
+          disabled={disabled || !cwd}
+          render={<Button variant="outline" size="sm" />}
+          className="w-full justify-between "
+        >
+          <GitBranchIcon className="size-3.5 shrink-0 text-muted-foreground" />
+          <MiddleTruncate value={label} className="flex-1 text-left" />
+          <ChevronDownIcon className="size-3.5 shrink-0 text-muted-foreground" />
+        </ComboboxTrigger>
+      )}
     </BranchPicker>
   );
 }

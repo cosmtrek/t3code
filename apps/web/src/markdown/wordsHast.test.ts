@@ -207,6 +207,21 @@ describe("wordsHast", () => {
     );
   });
 
+  it("marks chat mentions in prose, not in code or links", () => {
+    const mentions = (text: string) =>
+      text.split(/(@\w+)/).map((part) => ({
+        text: part,
+        mention: part.startsWith("@") ? { self: part === "@me" } : null,
+      }));
+    expect(
+      wordsHtml("**@me** and @sam, not `@sam` or [@sam](https://x.dev)", {
+        extensions: { mentions },
+      }),
+    ).toBe(
+      '<p dir="ltr"><strong><span class="rounded bg-primary px-1 text-primary-foreground">@me</span></strong> and <span class="text-primary">@sam</span>, not <code data-inline-code="" dir="ltr">@sam</code> or <a href="https://x.dev">@sam</a></p>',
+    );
+  });
+
   it("keeps the composer's tildes and list numbers in user messages", () => {
     const markdown = "Install as ~/a/x, then (~/b.md). ~one~ ~~two~~\n\n3. three\n5. five";
     expect(wordsHtml(markdown, { extensions: { userMessage: true } })).toBe(

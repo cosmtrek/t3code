@@ -1,0 +1,7 @@
+{
+  "displayName": "Lark",
+  "defaultProjectPaths": ["~/code/example-service"],
+  "relevanceSummary": "Direct messages, mentions of you, and threads you took part in.",
+  "capabilities": ["mentions", "markdown", "attachments"],
+  "ackReaction": "OK"
+}
