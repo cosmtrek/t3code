@@ -1,0 +1,9 @@
+event: message.created
+data: {"conversationId":"oc_platform","messageId":"om_3"}
+
+event: conversation.updated
+data: {"conversationId":"oc_platform"}
+
+event: health.changed
+data: {}
+

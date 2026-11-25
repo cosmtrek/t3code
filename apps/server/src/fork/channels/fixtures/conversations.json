@@ -1,0 +1,40 @@
+{
+  "items": [
+    {
+      "id": "oc_platform",
+      "kind": "group",
+      "name": "Platform team",
+      "lastActivityAt": "2026-11-14T09:30:00.000Z",
+      "relevant": true,
+      "muted": false,
+      "lastMessage": {
+        "id": "om_3",
+        "createdAt": "2026-11-14T09:30:00.000Z",
+        "author": { "id": "ou_sam", "name": "Sam Okafor", "isSelf": false },
+        "preview": "Same on staging."
+      },
+      "lastOtherMessageAt": "2026-11-14T09:30:00.000Z",
+      "lastSelfMessageAt": "2026-11-14T09:10:00.000Z",
+      "lastMentionAt": "2026-11-14T09:00:00.000Z",
+      "selfReadThroughAt": "2026-11-14T09:00:00.000Z"
+    },
+    {
+      "id": "oc_jordan",
+      "kind": "dm",
+      "name": "Jordan Lee",
+      "lastActivityAt": "2026-11-14T08:10:00+08:00",
+      "relevant": true,
+      "muted": false,
+      "lastMessage": {
+        "id": "om_9",
+        "createdAt": "2026-11-14T08:10:00+08:00",
+        "author": { "id": "ou_me", "name": "Alex Rivera", "isSelf": true },
+        "preview": "[Image]"
+      },
+      "lastOtherMessageAt": "2026-11-14T08:05:00+08:00",
+      "lastSelfMessageAt": "2026-11-14T08:10:00+08:00",
+      "lastMentionAt": null
+    }
+  ],
+  "nextCursor": "page-2"
+}
