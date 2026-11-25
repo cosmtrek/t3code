@@ -1,4 +1,4 @@
-import type { ModelSelection, RuntimeMode } from "@t3tools/contracts";
+import type { ModelSelection } from "@t3tools/contracts";
 
 /**
  * Responses of `/api/fork/*`, mirrored from apps/server/src/fork (channels/hub.ts,
@@ -89,6 +89,14 @@ export interface InboxChannelSummary {
   readonly capabilities: ReadonlyArray<string>;
   /** Unread DMs, groups that mention me, and unseen agent results. */
   readonly unreadCount: number | null;
+  /**
+   * Unread DMs, mentions, and conversations with an open follow-up, with those follow-ups; the
+   * sidebar picks the ones that need the user. Null until the listing is read.
+   */
+  readonly attention: {
+    readonly conversations: ReadonlyArray<InboxConversation>;
+    readonly delegations: ReadonlyArray<InboxDelegation>;
+  } | null;
   readonly error: string | null;
 }
 
@@ -294,134 +302,4 @@ export interface DelegateOptions {
   /** Where the delegation's last thread worked: its worktree, else the project checkout. */
   readonly defaultWorkspaceStrategy: WorkspaceStrategy;
   readonly existing: LinkedThread | null;
-}
-
-/** Responses of `/api/fork/bots/*`, mirrored from apps/server/src/fork/bot. */
-export interface BotSummary {
-  readonly id: string;
-  readonly name: string;
-  readonly modelSelection: ModelSelection;
-  readonly working: boolean;
-  readonly paused: boolean;
-  readonly lastMessage: Pick<BotChatMessage, "role" | "text" | "createdAt"> | null;
-  /** Its posts the user has not seen, plus its questions waiting for an answer. */
-  readonly unread: number;
-}
-
-export type BotPermission = "allow" | "ask";
-
-/** One connector instance, as this bot may use it. */
-export interface BotConnectorSettings {
-  readonly enabled: boolean;
-  /** Per write operation; one missing here asks. */
-  readonly permissions: Readonly<Record<string, BotPermission>>;
-  /** The kind's own settings; for chat: `signature`, `mentions`. */
-  readonly config: Readonly<Record<string, unknown>>;
-}
-
-export interface BotSettings {
-  /** Starting threads and messaging its own; editing its role always asks. */
-  readonly threads: BotPermission;
-  readonly turnsPerDay: number;
-  readonly maxThreads: number;
-  readonly runtimeMode: RuntimeMode;
-  /** By instance id; one missing here is off. */
-  readonly connectors: Readonly<Record<string, BotConnectorSettings>>;
-}
-
-/** A connector instance of the environment, such as a chat channel, for a bot's settings. */
-export interface BotConnectorInstance {
-  /** Also its `t3bot` command. */
-  readonly id: string;
-  readonly kind: string;
-  readonly name: string;
-  readonly status: "ok" | "degraded" | "down";
-  readonly reason: string | null;
-  /** Its writes, each allow or ask per bot. */
-  readonly operations: ReadonlyArray<{ readonly id: string; readonly label: string }>;
-  /** What its kind adds; for chat, the bot that wakes on the user's mentions there now. */
-  readonly info: Readonly<Record<string, unknown>>;
-}
-
-/** An action the bot asked to take; approving runs exactly it. */
-export interface BotQuestion {
-  readonly id: number;
-  /** What it would do, then a blank line and the details (prompt, message, role). */
-  readonly text: string;
-  readonly createdAt: string;
-  readonly expiresAt: string;
-}
-
-export interface BotChatMessage {
-  readonly id: string;
-  readonly role: "user" | "bot" | "error";
-  readonly text: string;
-  readonly createdAt: string;
-  /** For a user message: the turn that took it; null while it waits for one. */
-  readonly turnRunId: string | null;
-}
-
-export interface BotDetail {
-  readonly bot: {
-    readonly id: string;
-    readonly name: string;
-    readonly modelSelection: ModelSelection;
-    readonly workThreadId: string | null;
-    readonly paused: boolean;
-    readonly settings: BotSettings;
-    readonly lastTurnDay: string | null;
-    readonly turnsToday: number;
-  };
-  readonly role: string;
-  readonly working: boolean;
-  /** Oldest first. */
-  readonly chat: ReadonlyArray<BotChatMessage>;
-  readonly notebook: BotNotebook;
-  readonly questions: ReadonlyArray<BotQuestion>;
-  /** The folder the bot keeps longer notes in, and its files, newest first. */
-  readonly notesPath: string;
-  readonly notes: ReadonlyArray<{
-    readonly name: string;
-    readonly bytes: number;
-    readonly updatedAt: string;
-  }>;
-  /** Skills the bot wrote: its own first, then those every bot shares. */
-  readonly skills: ReadonlyArray<{
-    readonly name: string;
-    readonly description: string;
-    readonly shared: boolean;
-    readonly folder: string;
-    readonly path: string;
-  }>;
-  /** The environment's connector instances, such as its chat channels. */
-  readonly connectors: ReadonlyArray<BotConnectorInstance>;
-}
-
-export interface BotNotebook {
-  readonly items: ReadonlyArray<{
-    readonly id: number;
-    readonly title: string;
-    readonly status: "open" | "waiting" | "done";
-    readonly note: string;
-    readonly updatedAt: string;
-    readonly setAside: boolean;
-  }>;
-  readonly threads: ReadonlyArray<{
-    readonly threadId: string;
-    readonly itemId: number | null;
-    readonly follow: "now" | "attention" | "routine";
-    readonly title: string | null;
-    /** The user typed in it; it is theirs until they hand it back. */
-    readonly takenOver: boolean;
-  }>;
-  readonly routines: ReadonlyArray<{
-    readonly id: number;
-    readonly title: string;
-    readonly prompt: string;
-    readonly schedule:
-      | { readonly type: "daily"; readonly time: string; readonly weekdays?: ReadonlyArray<number> }
-      | { readonly type: "every"; readonly minutes: number };
-    readonly nextDueAt: string | null;
-  }>;
-  readonly memory: ReadonlyArray<{ readonly id: number; readonly text: string }>;
 }

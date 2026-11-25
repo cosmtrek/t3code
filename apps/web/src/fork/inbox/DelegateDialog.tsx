@@ -41,7 +41,8 @@ import { providerInstanceEntriesFor } from "../../providerInstances";
 import { useEnvironmentQuery } from "../../state/query";
 import { EMPTY_SERVER_PROVIDERS, serverEnvironment } from "../../state/server";
 import { vcsEnvironment } from "../../state/vcs";
-import { ForkApiError, forkRequest } from "../forkApiAccess";
+import { ForkApiError } from "@t3tools/fork-client/http";
+import { forkRequest } from "../forkApiAccess";
 import type {
   ConversationKind,
   DelegateOptions,
@@ -485,11 +486,13 @@ export function DelegateModelPicker({
   environmentId,
   projectId,
   selection,
+  triggerClassName,
   onChange,
 }: {
   readonly environmentId: EnvironmentId;
   readonly projectId: string | null;
   readonly selection: ModelSelection | null;
+  readonly triggerClassName?: string;
   readonly onChange: (selection: ModelSelection) => void;
 }) {
   const settings = useEnvironmentSettings(environmentId);
@@ -535,6 +538,7 @@ export function DelegateModelPicker({
       )}
       isComposerOwned={false}
       popupAlign="end"
+      {...(triggerClassName === undefined ? {} : { triggerClassName })}
       triggerSuffix={effort.suffix}
       triggerDetail={effort.detail}
       effortColumn={<ComposerEffortColumn traits={traits} />}

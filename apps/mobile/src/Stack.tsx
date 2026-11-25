@@ -153,6 +153,7 @@ import {
   registerPresentedRoutes,
 } from "./features/layout/workspace-overlay-routes";
 import { ShowcaseReadyMarker } from "./features/showcase/ShowcaseCaptureCoordinator";
+import { BotRouteScreen } from "./fork/bots/BotRouteScreen";
 import { immersiveRoute, modalRoute, pageRoute, sheetRoute } from "./features/layout/route-options";
 import { deriveLayout } from "./lib/layout";
 import { useNativeLayoutMetrics } from "./native/native-layout-metrics";
@@ -632,6 +633,11 @@ const RootStackConfig = createWorkspaceStackNavigator({
     PullRequestEdit: createNativeStackScreen({
       screen: PullRequestEditScreen,
       options: sheetRoute({ detent: 0.75, androidFit: true }),
+    }),
+    Bot: createNativeStackScreen({
+      screen: BotRouteScreen,
+      linking: "bots/:environmentId/:botId",
+      options: pageRoute({ duoMinimize: "never" }),
     }),
     Issue: createNativeStackScreen({
       screen: IssueRouteScreen,

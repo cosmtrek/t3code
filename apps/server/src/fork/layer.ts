@@ -7,6 +7,7 @@ import * as Layer from "effect/Layer";
 
 import { ThreadManagementService } from "../orchestration-v2/ThreadManagementService.ts";
 import * as BotRuntime from "./bot/BotRuntime.ts";
+import { startConnectors } from "./bot/connectors/registry.ts";
 import { followThreads, reconcileThreads } from "./bot/events.ts";
 import { fireDueRoutines, reconcile } from "./bot/operations.ts";
 import { routesLayer } from "./http.ts";
@@ -53,6 +54,7 @@ const botsLayer = Layer.effectDiscard(
               Effect.andThen(Effect.sleep("30 seconds")),
               Effect.forever,
             ),
+            Effect.scoped(startConnectors),
           ],
           { concurrency: "unbounded", discard: true },
         ),

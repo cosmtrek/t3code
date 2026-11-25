@@ -8,7 +8,7 @@ export function FileMarkdownPreview(props: {
   readonly cwd: string;
   readonly relativePath: string;
   readonly text: string;
-  readonly threadRef: ScopedThreadRef;
+  readonly threadRef: ScopedThreadRef | undefined;
   readonly workspaceMutationId: string | null;
   readonly className?: string;
   readonly onTaskListChange?:

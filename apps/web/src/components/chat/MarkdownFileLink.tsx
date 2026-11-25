@@ -37,6 +37,7 @@ interface MarkdownFileLinkProps {
   isAppBundle?: boolean;
   workspaceRelativePath: string | null;
   panelPath: string | null;
+  panelAvailable?: boolean;
   line?: number | undefined;
   label: string;
   copyMarkdown: string;
@@ -63,6 +64,7 @@ export const MarkdownFileLink = memo(function MarkdownFileLink({
   isAppBundle = false,
   workspaceRelativePath,
   panelPath,
+  panelAvailable = false,
   line,
   label,
   copyMarkdown,
@@ -119,7 +121,7 @@ export const MarkdownFileLink = memo(function MarkdownFileLink({
   };
 
   const handleOpenInFilePreview = () => {
-    if (threadRef && panelPath) {
+    if ((threadRef || panelAvailable) && panelPath) {
       onOpenInPanel(panelPath, line);
       return;
     }
@@ -318,7 +320,7 @@ export const MarkdownFileLink = memo(function MarkdownFileLink({
 
   const canOpenInEditor = onOpen !== undefined;
   const canOpenInBrowser = onOpenInBrowser !== undefined;
-  const canOpenInPanel = threadRef !== undefined && Boolean(panelPath);
+  const canOpenInPanel = (threadRef !== undefined || panelAvailable) && Boolean(panelPath);
   const hasPrimaryAction = hasMarkdownFilePrimaryAction({
     canOpenInEditor,
     canOpenInBrowser,
@@ -421,6 +423,7 @@ function areMarkdownFileLinkPropsEqual(
     previous.environmentId === next.environmentId &&
     previous.workspaceRelativePath === next.workspaceRelativePath &&
     previous.panelPath === next.panelPath &&
+    previous.panelAvailable === next.panelAvailable &&
     previous.line === next.line &&
     previous.label === next.label &&
     previous.copyMarkdown === next.copyMarkdown &&

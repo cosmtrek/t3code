@@ -46,6 +46,13 @@ export function IssueCommentComposer(props: {
   readonly posting: boolean;
   readonly bottomInset: number;
   readonly contentMaxWidth?: number;
+  /** Words for a box that is not an issue comment; each defaults to the comment's. */
+  readonly copy?: {
+    readonly placeholder: string;
+    readonly send: string;
+    readonly sending: string;
+    readonly submit: string;
+  };
   /** Resolves true once the comment is posted, which clears the draft. */
   readonly onSubmit: (body: string) => Promise<boolean>;
   readonly onHeightChange: (height: number) => void;
@@ -103,7 +110,11 @@ export function IssueCommentComposer(props: {
   const sendButton = (
     <ComposerActionButton
       size={chrome.controlSize}
-      accessibilityLabel={props.posting ? gt("Posting comment") : gt("Post comment")}
+      accessibilityLabel={
+        props.posting
+          ? (props.copy?.sending ?? gt("Posting comment"))
+          : (props.copy?.send ?? gt("Post comment"))
+      }
       icon="arrow.up"
       variant="primary"
       disabled={!canSend}
@@ -187,7 +198,7 @@ export function IssueCommentComposer(props: {
                         if (!locked) changeDraft(text);
                       }}
                       onSelectionChange={setSelection}
-                      placeholder={gt("Leave a comment")}
+                      placeholder={props.copy?.placeholder ?? gt("Leave a comment")}
                       onFocus={() => {
                         setFocused(true);
                         props.onFocusChange(true);
@@ -197,7 +208,9 @@ export function IssueCommentComposer(props: {
                         props.onFocusChange(false);
                       }}
                       onSubmit={() => void send()}
-                      submitTitle={gt("Comment", { $context: "verb, posts the comment" })}
+                      submitTitle={
+                        props.copy?.submit ?? gt("Comment", { $context: "verb, posts the comment" })
+                      }
                       {...compactEditor.editorProps}
                       textStyle={textStyle}
                     />

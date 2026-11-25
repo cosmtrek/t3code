@@ -31,7 +31,7 @@ export function ChunkedMarkdown(props: {
   readonly loading?: boolean;
   readonly cwd: string;
   readonly relativePath: string;
-  readonly threadRef: ScopedThreadRef;
+  readonly threadRef: ScopedThreadRef | undefined;
   readonly workspaceMutationId: string | null;
   readonly onKeyDown?: KeyboardEventHandler<HTMLDivElement>;
   readonly onTaskListChange?:
@@ -49,8 +49,8 @@ export function ChunkedMarkdown(props: {
   }
   const listRef = useRef<LegendListRef | null>(null);
   const positionKey = JSON.stringify([
-    props.threadRef.environmentId,
-    props.threadRef.threadId,
+    props.threadRef?.environmentId,
+    props.threadRef?.threadId,
     props.cwd,
     props.relativePath,
   ]);

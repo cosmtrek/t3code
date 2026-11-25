@@ -10,6 +10,7 @@ import {
   withDeviceHubQuery,
 } from "@t3tools/client-runtime/state/deviceHubAccess";
 import type { EnvironmentId } from "@t3tools/contracts";
+import { ForkApiError, forkApiErrorFrom } from "@t3tools/fork-client/http";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -86,33 +87,6 @@ export function forkUrl(access: DeviceHubAccess, path: string): string {
   return withDeviceHubQuery(`${access.httpBase}${path}`, access);
 }
 
-// @effect-diagnostics-next-line extendsNativeError:off -- thrown from plain fetch code and caught by React views, never in an Effect channel.
-export class ForkApiError extends Error {
-  readonly status: number;
-  readonly code: string;
-  readonly field: string | undefined;
-  constructor(status: number, code: string, message: string, field?: string) {
-    super(message);
-    this.status = status;
-    this.code = code;
-    this.field = field;
-  }
-}
-
-async function errorFrom(response: Response): Promise<ForkApiError> {
-  try {
-    const body = (await response.json()) as { code?: string; message?: string; field?: string };
-    return new ForkApiError(
-      response.status,
-      body.code ?? "unknown",
-      body.message ?? `The server answered ${response.status}.`,
-      body.field,
-    );
-  } catch {
-    return new ForkApiError(response.status, "unknown", `The server answered ${response.status}.`);
-  }
-}
-
 /** `path` is below `/api/fork`, such as `/inbox/conversations?channelId=x`. Renews the ticket once on 401. */
 export async function forkRequest<T>(
   environmentId: EnvironmentId,
@@ -145,7 +119,7 @@ export async function forkRequest<T>(
     const renewed = await readForkAccess(environmentId, { renew: true });
     if (renewed !== null) response = await send(renewed);
   }
-  if (!response.ok) throw await errorFrom(response);
+  if (!response.ok) throw await forkApiErrorFrom(response);
   return (await response.json()) as T;
 }
 
@@ -156,6 +130,7 @@ export function subscribeForkEvents(
     readonly type: string;
     readonly channelId?: string;
     readonly botId?: string;
+    readonly text?: string;
   }) => void,
 ): () => void {
   let closed = false;

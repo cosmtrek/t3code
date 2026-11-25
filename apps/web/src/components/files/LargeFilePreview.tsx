@@ -25,7 +25,7 @@ export default function LargeFilePreview(props: {
   readonly delimiter: "," | "\t" | null;
   /** Renders the file as Markdown resolving links against this workspace; null shows source. */
   readonly markdownCwd: string | null;
-  readonly threadRef: ScopedThreadRef;
+  readonly threadRef: ScopedThreadRef | undefined;
   readonly workspaceMutationId: string | null;
   readonly copyContents: RefObject<(() => Promise<string>) | null>;
   readonly onRetry: () => void;

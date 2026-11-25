@@ -383,6 +383,18 @@ const routes = (runtime: InboxRuntimeShape, bots: BotRuntimeShape) => {
       body.pipe(Effect.flatMap(Bots.reopenItem)),
     ),
     route(
+      "POST",
+      `${BOTS}/memory/forget`,
+      AuthOrchestrationOperateScope,
+      body.pipe(Effect.flatMap(Bots.forgetMemory)),
+    ),
+    route(
+      "POST",
+      `${BOTS}/memory/to-role`,
+      AuthOrchestrationOperateScope,
+      body.pipe(Effect.flatMap(Bots.moveMemoryToRole)),
+    ),
+    route(
       "GET",
       `${BOTS}/note`,
       AuthOrchestrationReadScope,

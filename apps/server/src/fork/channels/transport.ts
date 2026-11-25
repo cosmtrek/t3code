@@ -1,6 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off globalDate:off globalTimers:off globalFetch:off extendsNativeError:off - Runs outside the Effect runtime: adapter sockets, timers, and plain callbacks.
 import { resolveLoopbackBase } from "./config.ts";
-import { createSseParser, parseChannelEvent, type ChannelEvent } from "./protocol.ts";
+import { createSseParser } from "@t3tools/fork-client/sse";
+
+import { parseChannelEvent, type ChannelEvent } from "./protocol.ts";
 
 export interface AdapterRequest {
   readonly method: "GET" | "POST";

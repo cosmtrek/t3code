@@ -105,7 +105,7 @@ interface StatusLabel {
   readonly className: string;
   readonly iconTintClassName: string;
 }
-const STATUS_LABEL_BY_STATUS: Partial<Record<ThreadListV2Status, StatusLabel>> = {
+export const STATUS_LABEL_BY_STATUS: Partial<Record<ThreadListV2Status, StatusLabel>> = {
   approval: {
     label: msg("Approval", { $context: "thread status, waiting for approval" }),
     icon: "exclamationmark.shield",
@@ -233,7 +233,7 @@ const LEGACY_MENU_ACTIONS: MenuAction[] = [
   },
 ];
 
-function ThreadListV2Section(props: {
+export function ThreadListV2Section(props: {
   readonly label: string;
   readonly pane?: "screen" | "sidebar";
   readonly tone?: "default" | "snoozed";

@@ -1,13 +1,11 @@
 import type { EnvironmentId } from "@t3tools/contracts";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 
-import { ForkApiError, forkRequest, subscribeForkEvents } from "./forkApiAccess";
+import { ForkApiError } from "@t3tools/fork-client/http";
+import type { ForkEvent } from "@t3tools/fork-client/sse";
+import { forkRequest, subscribeForkEvents } from "./forkApiAccess";
 
-export interface ForkEvent {
-  readonly type: string;
-  readonly channelId?: string;
-  readonly botId?: string;
-}
+export type { ForkEvent } from "@t3tools/fork-client/sse";
 
 type Listener = (event: ForkEvent) => void;
 
@@ -58,6 +56,19 @@ const asForkError = (error: unknown) =>
 const isRetryable = (error: ForkApiError) =>
   error.status === 0 || error.status >= 500 || error.code === "unreachable";
 
+/**
+ * The last good read of each resource, so a view that mounts again (switching between bots or
+ * the inbox) shows it at once while it reads again, instead of a blank pane.
+ */
+const lastReads = new Map<string, unknown>();
+const LAST_READS_LIMIT = 64;
+
+function rememberRead(key: string, data: unknown) {
+  lastReads.delete(key);
+  lastReads.set(key, data);
+  if (lastReads.size > LAST_READS_LIMIT) lastReads.delete(lastReads.keys().next().value!);
+}
+
 export interface ForkResource<T> {
   readonly data: T | null;
   readonly error: ForkApiError | null;
@@ -83,7 +94,7 @@ export function useForkResource<T>(
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- fetches the resource from the environment's server and follows its events and a visibility-aware poll
   useEffect(() => {
-    if (environmentId === null || path === null) return;
+    if (key === null || environmentId === null || path === null) return;
     const controller = new AbortController();
     // A refresh asked for mid-read waits for that read and runs once after it, instead of
     // aborting it: under a burst of events, aborting would never let a slow read finish.
@@ -103,7 +114,12 @@ export function useForkResource<T>(
         current.key === key
           ? // With nothing to show, a retry reads as loading, not as the last error.
             { ...current, error: hasData ? current.error : null, loading: true }
-          : { key, data: null, error: null, loading: true },
+          : {
+              key,
+              data: (lastReads.get(key) as T | undefined) ?? null,
+              error: null,
+              loading: true,
+            },
       );
       const outcome = await forkRequest<T>(environmentId, path, { signal: controller.signal }).then(
         (data) => ({ ok: true as const, data }),
@@ -113,6 +129,7 @@ export function useForkResource<T>(
         if (outcome.ok) {
           hasData = true;
           failures = 0;
+          rememberRead(key, outcome.data);
           setState({ key, data: outcome.data, error: null, loading: false });
         } else {
           const error = asForkError(outcome.raw);
@@ -130,7 +147,10 @@ export function useForkResource<T>(
             // A failed refresh keeps what was shown, so a blip does not blank the view.
             setState((current) => ({
               key,
-              data: current.key === key ? current.data : null,
+              data:
+                current.key === key
+                  ? current.data
+                  : ((lastReads.get(key) as T | undefined) ?? null),
               error,
               loading: false,
             }));
@@ -184,7 +204,11 @@ export function useForkResource<T>(
 
   const current = state.key === key;
   return {
-    data: current ? state.data : null,
+    data: current
+      ? state.data
+      : key === null
+        ? null
+        : ((lastReads.get(key) as T | undefined) ?? null),
     error: current ? state.error : null,
     loading: key !== null && (!current || state.loading),
     refresh: () =>

@@ -1,5 +1,5 @@
 import type { EnvironmentId } from "@t3tools/contracts";
-import { ChevronRightIcon, EllipsisIcon, MessagesSquareIcon, PlusIcon } from "lucide-react";
+import { CableIcon, ChevronRightIcon, EllipsisIcon, PlusIcon } from "lucide-react";
 import { useId, useState, type ReactNode } from "react";
 
 import { EnvironmentRow } from "../../components/settings/EnvironmentRow";
@@ -42,7 +42,8 @@ import { Switch } from "../../components/ui/switch";
 import { namedClipboardTarget, useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { cn } from "../../lib/utils";
 import { useEnvironments } from "../../state/environments";
-import { ForkApiError, forkRequest } from "../forkApiAccess";
+import { ForkApiError } from "@t3tools/fork-client/http";
+import { forkRequest } from "../forkApiAccess";
 import {
   CHANNEL_STATUS_LABELS,
   ChannelStatusDot,
@@ -273,7 +274,7 @@ function ChannelRow({
   return (
     <div className="border-t border-border/60 first:border-t-0">
       <EnvironmentRow
-        icon={<MessagesSquareIcon className="size-4" />}
+        icon={<CableIcon className="size-4" />}
         label={channel.name}
         dimmed={!channel.enabled}
         subtitle={

@@ -3,6 +3,7 @@ import { useGT, useMessages } from "gt-react-native";
 import { useContentTopInset } from "../../components/ui/useBarInset";
 import { usePaneRole } from "../../components/ui/Pane";
 import { ScreenContent } from "../../components/ui/ScreenContent";
+import { ForkBotsGroup } from "../../fork/bots/ForkBotsGroup";
 import { useActiveNewTask } from "../../state/active-new-task";
 import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
 import { useAndroidControlSizing } from "../../components/ui/useAndroidControlSizing";
@@ -704,6 +705,7 @@ export function HomeScreen(props: HomeScreenProps) {
           onProjectChange={props.onProjectChange}
         />
       ) : null}
+      <ForkBotsGroup searching={hasSearchQuery} />
     </>
   );
 
@@ -751,6 +753,8 @@ export function HomeScreen(props: HomeScreenProps) {
   if (Platform.OS === "android" && threadListV2Items.length === 0) {
     return (
       <ScreenContent surface="screen">
+        {listHeader}
+        <ForkBotsGroup searching={hasSearchQuery} />
         <View
           className="flex-1 items-center justify-center px-4"
           style={{ paddingBottom: insets.bottom }}

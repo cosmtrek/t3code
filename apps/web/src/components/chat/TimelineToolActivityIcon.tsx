@@ -229,7 +229,7 @@ function ToolActivityImageIcon(props: {
   );
 }
 
-function WorkEntryIcon({ name, className }: { name: WorkEntryIconName; className: string }) {
+export function WorkEntryIcon({ name, className }: { name: WorkEntryIconName; className: string }) {
   switch (name) {
     case "pull-request":
       return <PullRequestGlyph.pullRequest className={className} aria-hidden />;

@@ -1,0 +1,379 @@
+# Maintaining This Fork
+
+`cosmtrek/t3code` is a personal fork of [pingdotgg/t3code](https://github.com/pingdotgg/t3code).
+The goal is to ship a personal build while staying able to sync upstream and send PRs upstream.
+
+## Branches
+
+| Branch      | Purpose                                                               | Cut from        |
+| ----------- | --------------------------------------------------------------------- | --------------- |
+| `main`      | Mirror of upstream. **Never commit here.**                            | —               |
+| `r/main`    | Personal mainline: upstream plus my patches. Releases ship from here. | `main`          |
+| `r/<name>`  | Personal work                                                         | `r/main`        |
+| `pr/<name>` | Upstream PR, one problem per branch                                   | `upstream/main` |
+
+Rule of thumb: if upstream would want the change, use `pr/` and cherry-pick it into `r/main` while
+the PR is open. Only fork-only changes go on `r/`.
+
+```bash
+git remote -v                   # origin = cosmtrek/t3code, upstream = pingdotgg/t3code
+git config rerere.enabled true  # resolve a repeated conflict once
+```
+
+## Syncing upstream
+
+```bash
+git fetch upstream --tags
+git push origin upstream/main:main      # update the mirror
+git switch r/main
+git rebase v0.1.9                       # the new upstream stable tag, not upstream/main
+git range-diff ORIG_HEAD...HEAD         # check that no patch changed unexpectedly
+git push --force-with-lease origin r/main
+```
+
+Then run `git rebase r/main` on any personal branch that has not landed yet.
+
+Every sync ends with a release on all three surfaces: the server CLI and macOS desktop
+(`X.Y.Z-r.1`, see Releases) and the Android app (next mobile version, see Android builds).
+
+Sync to an upstream stable tag so `X.Y.Z-r.N` means exactly that release plus the patches (see
+Versions). upstream/main runs ahead of its latest stable tag.
+
+## Sending a PR upstream
+
+```bash
+git switch -c pr/xxx upstream/main
+# edit and commit
+git push -u origin pr/xxx
+gh pr create --repo pingdotgg/t3code --base main --head cosmtrek:pr/xxx
+```
+
+Read upstream's `CONTRIBUTING.md` first. PRs that do not follow it are closed automatically.
+
+## Cherry-picking upstream PRs
+
+A merged PR (upstream squash-merges, so one PR is one commit):
+
+```bash
+sha=$(git log upstream/main --format=%H --grep='(#12345)$' -1)
+git cherry-pick -x "$sha"
+```
+
+This is rarely needed, because the next sync brings it in.
+
+An open PR:
+
+```bash
+git fetch upstream pull/12345/head:up/pr-12345
+base=$(git merge-base up/pr-12345 upstream/main)
+git cherry-pick -x -e "$base..up/pr-12345"   # add an "Upstream-PR: #12345" line to the message
+```
+
+Do not use `git merge --squash`. It brings in the upstream commits between the PR's base and `r/main`.
+
+Once upstream merges the PR, a rebase conflict on it resolves in upstream's favor: `git rebase --skip`
+the local copy. Before syncing, list which ones have merged:
+
+```bash
+git log upstream/main..r/main --format=%B | grep -o 'Upstream-PR: #[0-9]*' | grep -o '[0-9]*' | sort -u |
+  while read n; do echo "#$n $(gh pr view "$n" --repo pingdotgg/t3code --json state -q .state)"; done
+```
+
+## Versions
+
+Desktop/server and mobile have separate version lines, as upstream does. Upstream releases them
+separately with no version coupling. Compatibility comes from keeping `packages/contracts` changes
+additive.
+
+### Desktop / server / CLI: `X.Y.Z-r.N`
+
+- `X.Y.Z`: the upstream stable release `r/main` is based on, such as upstream `v0.1.8`.
+- `N`: increases by one per release and restarts at 1 when the base changes.
+- Example: `0.1.8-r.1` → `0.1.8-r.2` → sync to upstream 0.1.9 → `0.1.9-r.1`. The tag is `v0.1.8-r.1`.
+- Test builds get no version scheme of their own. To test a packaged build, use the release
+  workflow's `preview` channel: its version is generated, and it has no update feed, so releases are
+  never offered it. Day-to-day checks use `vp run dev`.
+
+### Mobile: `MAJOR.MINOR.PATCH`, numbers only
+
+- Starts at `1.0.0`. PATCH for JS-only changes, MINOR for native changes or larger features.
+- Numbers only, because iOS `CFBundleShortVersionString` rejects suffixes.
+- `versionCode` is the GitHub Actions run number, so it always increases.
+- Test and daily builds differ by `APP_VARIANT`, not by version: `preview` is the test build and
+  `production` the daily one. They have different package names and install side by side.
+
+## Fork identity (repository variables)
+
+The fork installs beside the official apps under its own name, id, and data. Workflows read these
+repository variables and pass them to the builds; nothing is hard-coded, and an unset variable falls
+back to the official value.
+
+| Variable                 | Value                | Used by                                                                           |
+| ------------------------ | -------------------- | --------------------------------------------------------------------------------- |
+| `T3CODE_ANDROID_PACKAGE` | `com.rickoyu.t3code` | App id on Android (preview adds `.preview`) and macOS                             |
+| `T3CODE_APP_NAME`        | `T3 Code R`          | App name on Android (`T3 Code R Preview`) and macOS. Safe to change any time      |
+| `T3CODE_DATA_SLUG`       | `r`                  | macOS data: `~/.t3-r` and `~/Library/Application Support/t3code-r`                |
+| `T3CODE_APP_ICON`        | `nightly`            | Icon set on Android (production and preview) and macOS, `production` or `nightly` |
+
+**Never change `T3CODE_DATA_SLUG`** once the app is in use: the next build would start from empty
+data. Renaming is what `T3CODE_APP_NAME` is for. The desktop build needs the id, name, and slug
+together and refuses the official id.
+
+```bash
+gh variable set T3CODE_APP_NAME -R cosmtrek/t3code --body "T3 Code R"
+gh variable set T3CODE_DATA_SLUG -R cosmtrek/t3code --body r
+gh variable set T3CODE_APP_ICON -R cosmtrek/t3code --body nightly
+```
+
+## Android builds (GitHub Actions)
+
+Workflow: `.github/workflows/fork-android-apk.yml`, manual trigger only. It runs on the Namespace
+profile `namespace-profile-default` (Linux).
+
+```bash
+gh workflow run fork-android-apk.yml --ref r/main -f version=1.0.0
+gh run watch                        # wait for the build
+gh run download --name t3code-production-1.0.0-arm64-v8a
+```
+
+Install `production` for daily use. Android cannot downgrade without uninstalling, which drops the
+app's data, so try a risky build (native changes, a MINOR bump) as `-f variant=preview` first: it
+installs beside production and leaves it untouched.
+
+Repository settings it reads (Settings → Secrets and variables → Actions):
+
+| Kind     | Name                                                 | Notes                                                                                    |
+| -------- | ---------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| Variable | `T3CODE_ANDROID_PACKAGE`                             | **Required.** See Fork identity                                                          |
+| Secret   | `ANDROID_KEYSTORE_BASE64`                            | Base64 of the signing keystore                                                           |
+| Secret   | `ANDROID_KEYSTORE_PASSWORD` / `ANDROID_KEY_PASSWORD` | Keystore password and key password                                                       |
+| Variable | `ANDROID_KEY_ALIAS`                                  | Key alias. A variable, because a secret would mask every occurrence of its value in logs |
+
+Without a keystore the build still runs, signed with the public React Native debug key. That is fine
+for a quick try only: once an app is installed with one key, a build signed with another cannot
+update it. Create your own keystore early and **back it up**:
+
+```bash
+keytool -genkeypair -v -keystore t3code-release.keystore -alias t3code \
+  -keyalg RSA -keysize 4096 -validity 36500
+base64 -w0 t3code-release.keystore | gh secret set ANDROID_KEYSTORE_BASE64 -R cosmtrek/t3code
+gh secret set ANDROID_KEYSTORE_PASSWORD -R cosmtrek/t3code
+gh variable set ANDROID_KEY_ALIAS -R cosmtrek/t3code --body t3code
+gh secret set ANDROID_KEY_PASSWORD -R cosmtrek/t3code
+gh variable set T3CODE_ANDROID_PACKAGE -R cosmtrek/t3code --body com.rickoyu.t3code
+```
+
+Current limits:
+
+- OTA updates are off (`T3CODE_MOBILE_UPDATES_ENABLED=0`). Otherwise the app would pull JS from
+  upstream's EAS project and replace this fork's changes. Using OTA needs an own EAS project, with
+  `updates.url` and `extra.eas.projectId` in `app.config.ts` replaced.
+- No `google-services.json`, so push notifications do not arrive.
+- `app.t3.codes` thread links verify only the official packages, so they open in the browser.
+- T3 Connect uses upstream's public Clerk instance and relay (`.env.example`). The relay accepts
+  any valid Clerk session, but Clerk ties some sign-in methods to the official app identities:
+  passkeys and native Google sign-in fail under this package, and OAuth (GitHub, Apple, Microsoft)
+  may be rejected as an unlisted redirect. Sign in with an email code, using the email of your
+  existing account. LAN or Tailscale direct connections always work.
+
+## Releases: server CLI and macOS desktop (GitHub Actions)
+
+Workflow: `.github/workflows/fork-cli-release.yml`, manual trigger only. It builds the Linux x64
+`t3` archive and the macOS arm64 desktop app (DMG and zip) from the same JS bundle and publishes
+both as release `vX.Y.Z-r.N` with a `SHA256SUMS` file, the layout `t3 update` expects. Pass
+`-f desktop=false` to release only the CLI. `scripts/fork-release-notes.sh` writes the release notes: patches new since the
+previous `-r.N` release, matched by patch-id so a rebase onto a new upstream tag does not relist
+them. `(fork)`-scoped commits are left out, so keep that scope for fork-only docs and CI.
+
+```bash
+gh workflow run fork-cli-release.yml -R cosmtrek/t3code --ref r/main -f version=0.1.9-r.1
+gh run watch -R cosmtrek/t3code
+```
+
+Switch a machine's `t3` service to a fork release, or roll back to upstream:
+
+```bash
+T3CODE_RELEASE_BASE_URL=https://github.com/cosmtrek/t3code/releases/download t3 update 0.1.9-r.1
+t3 update 0.1.9                         # back to upstream's build
+```
+
+Always pass a version. A bare `t3 update` installs upstream's latest release over the fork build.
+
+The desktop app is not signed, so it is signed ad hoc. The first launch needs **System Settings →
+Privacy & Security → Open Anyway**, and updates are a manual DMG download: in-app updates expect a
+signed app. It installs beside the official T3 Code with its own data (see Fork identity), and its
+`t3` launcher lives in `~/.t3-<slug>/bin`. Only the macOS build reads the identity at runtime; Linux
+startup and desktop-entry names still use the official values.
+
+An SSH environment runs the remote `t3` at the desktop's exact version, so the desktop build bakes in
+this repository's release URL (`T3CODE_DESKTOP_RELEASE_BASE_URL`) for SSH hosts to download it from.
+Release the CLI archive along with the desktop app, or SSH connections fail on hosts that lack it.
+
+## GitHub Actions in the fork
+
+Most upstream workflows run on Blacksmith runners, which a fork does not have, so their jobs stay
+queued (for example `CI` on a push to `main`). Disable the ones you do not need and re-enable them
+when you do:
+
+```bash
+gh workflow list -R cosmtrek/t3code
+gh workflow disable CI -R cosmtrek/t3code
+```
+
+The desktop release workflow (`release.yml`) depends on Blacksmith runners, Apple signing, npm,
+Vercel, and more, so it **does not run as-is** in the fork. The fork release workflow builds the Mac
+app instead, on the Namespace runner profile `namespace-profile-macos`, and publishes `-r.N` versions as full releases: upstream
+publishes suffixed versions as prereleases, which the desktop stable channel ignores.
+
+## Patches on `r/main`
+
+Review this list after every sync, and upstream whatever upstream would take.
+
+| Patch                                                  | Files                                    | Upstreamable                   |
+| ------------------------------------------------------ | ---------------------------------------- | ------------------------------ |
+| Fork maintenance guide                                 | `FORK.md`                                | No                             |
+| Android APK build workflow                             | `.github/workflows/fork-android-apk.yml` | No                             |
+| `T3CODE_ANDROID_PACKAGE` overrides the Android package | `apps/mobile/app.config.ts` and its test | Yes, as a fork-friendly option |
+| `T3CODE_APP_NAME` and `T3CODE_APP_ICON` for mobile     | `apps/mobile/app.config.ts`, brand mark  | Yes, as a fork-friendly option |
+| Desktop variant: id, name, data, icon from variables   | `build-desktop-artifact.ts`, desktop app | Yes, as a fork-friendly option |
+| Release workflow (server CLI and macOS desktop)        | `.github/workflows/fork-cli-release.yml` | No                             |
+| SSH hosts download the fork's own `t3` archive         | desktop environment, SSH runner          | Yes, as a fork-friendly option |
+| agy user skills linked where `--app-data-dir` reads    | `antigravityAuthSupport.ts`              | Yes                            |
+| A lost agy checkpoint starts a fresh session           | `AntigravityTurnOutcome.ts`              | Yes (rest of closed #30083)    |
+| agy full access and accept-edits modes                 | Antigravity support, ACP adapter         | Yes                            |
+| Built-in Absolutely theme                              | `themePalettes.ts`, web boot, mobile     | No                             |
+| Inbox and message channels                             | `apps/*/src/fork/`, seams below          | No                             |
+
+### Bot seams
+
+| File                                                                      | Change                                                                                                                                                                                                                                                     |
+| ------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `apps/web/src/components/ChatMarkdown.tsx`                                | Accept a file-panel opener for bot chats, preserving workspace lookup and invalidating stale requests.                                                                                                                                                     |
+| `apps/web/src/components/chat/MarkdownFileLink.tsx`                       | Allow a supplied panel opener without a work thread, including the context menu.                                                                                                                                                                           |
+| `apps/web/src/components/files/FilePreviewPanel.tsx`                      | Use draft workspace assets without a thread, disable thread-only browser opening, and omit draft Markdown thread refs; non-document drafts use `draft-workspace-file` with attachment disposition, also fixing binary downloads in ordinary draft threads. |
+| `apps/web/src/components/files/ChunkedMarkdown.tsx`                       | Accept an absent thread ref for draft Markdown assets.                                                                                                                                                                                                     |
+| `apps/web/src/components/files/FileMarkdownPreview.tsx`                   | Accept an absent thread ref for draft Markdown assets.                                                                                                                                                                                                     |
+| `apps/web/src/components/files/LargeFilePreview.tsx`                      | Pass an optional thread ref through large draft Markdown previews.                                                                                                                                                                                         |
+| `apps/mobile/src/Stack.tsx`                                               | Register the Bot route and its environment/bot deep link.                                                                                                                                                                                                  |
+| `apps/mobile/src/features/home/HomeRouteScreen.tsx`                       | Filter bot work threads from the main thread list.                                                                                                                                                                                                         |
+| `apps/mobile/src/features/home/HomeScreen.tsx`                            | Mount ForkBotsGroup above the thread list.                                                                                                                                                                                                                 |
+| `apps/mobile/src/features/issues/IssueCommentComposer.tsx`                | Accept optional copy so the bot composer can reuse the component.                                                                                                                                                                                          |
+| `apps/mobile/src/features/layout/workspace/workspace-detail-selection.ts` | Add Bot identity and workspace detail selection/deep-link handling.                                                                                                                                                                                        |
+| `apps/mobile/src/features/threads/thread-list-v2-items.tsx`               | Export the section header and status appearance map for bot rows.                                                                                                                                                                                          |
+| `apps/mobile/src/lib/android-workspace-navigation.ts`                     | Treat Bot as a detail pane replacement for Android split-view animations.                                                                                                                                                                                  |
+| `apps/mobile/package.json`                                                | Add the fork-client workspace dependency.                                                                                                                                                                                                                  |
+| `apps/server/package.json`                                                | Add the fork-client workspace dependency.                                                                                                                                                                                                                  |
+| `apps/web/package.json`                                                   | Add the fork-client workspace dependency.                                                                                                                                                                                                                  |
+| `.vite-hooks/pre-commit`                                                  | Run vp staged through heavy when the host provides it, queuing expensive checks.                                                                                                                                                                           |
+
+## Inbox and channels
+
+The inbox (`/inbox`) mirrors the conversations an external chat adapter collects, delegates
+messages to a thread, and sends the thread's draft back. Settings → Channels configures adapters per
+environment. Everything lives in fork-only directories:
+
+- Server: `apps/server/src/fork/` (`layer.ts` merges it all; `channels/` holds the protocol client,
+  `channels.json`, and the in-process example channel; `inbox/` holds conversations, delegations, and
+  `inbox.sqlite`). Routes are plain `HttpRouter` routes under `/api/fork/channels` and
+  `/api/fork/inbox`, authenticated with `authenticateMediaRequest` like the device hub proxy.
+- Web: `apps/web/src/fork/`, plus the thin routes `_chat.inbox.tsx` and
+  `_chat.settings.channels.tsx`. `forkApiAccess.ts` mints the per-environment media ticket, so
+  remote environments work.
+- Shared client code: `packages/fork-client` holds the bot types and row status rules used by web
+  and mobile.
+- State: `<stateDir>/channels/` only (`channels.json`, `inbox.sqlite`, `items/<delegationId>/`). No
+  contracts, `settings.json`, or main-database changes.
+
+The adapter protocol (v2) is defined by `apps/server/src/fork/channels/protocol.ts` alone;
+[docs/fork/channel-protocol.md](docs/fork/channel-protocol.md) explains it, and
+`channels/fixtures/` holds a valid answer per endpoint for adapters' contract tests. The example
+channel (`channels/example/exampleChannel.ts`) implements all of it with made-up data.
+[docs/fork/inbox-architecture.md](docs/fork/inbox-architecture.md) shows where the inbox sits in
+T3 Code and how a request moves through it.
+[docs/fork/inbox-design.md](docs/fork/inbox-design.md) is the design rule for inbox UI: chat-app
+behavior, T3 Code primitives and theme colors. Read it before changing a screen.
+
+### Inbox seams
+
+Upstream files the inbox touches. Keep these in one `fork(inbox): wire seams` commit.
+
+| File                                                      | Change                                                               |
+| --------------------------------------------------------- | -------------------------------------------------------------------- |
+| `apps/server/src/server.ts`                               | Import `ForkExtensions`; `ForkExtensions.layer` in `layerMakeRoutes` |
+| `apps/web/src/components/settings/settingsSearch.ts`      | `ForkSettingsPath` in `SettingsPath`; spread the four fork tables    |
+| `apps/web/src/components/settings/SettingsSidebarNav.tsx` | Spread `FORK_SETTINGS_ICONS`                                         |
+| `apps/web/src/components/Sidebar.tsx`                     | `<ForkSidebarGroups>` above projects; bot work threads left out      |
+| `apps/web/src/routeTree.gen.ts`                           | Generated; never merge by hand                                       |
+| `package.json`                                            | `fork:inbox-seam-check` script                                       |
+| `vite.config.ts`                                          | `apps/web/src/fork/**` skips `no-untranslated-copy` (not translated) |
+
+`settingsSearch.ts` has a fifth table the plan did not list: `SETTINGS_CATEGORY_SCOPES` is a
+`Record<SettingsPath, …>` too, so it spreads `FORK_SETTINGS_CATEGORY_SCOPES`. The sidebar groups
+are imported from `fork/sidebar/ForkSidebarGroups.tsx` rather than `fork/registry.ts`, so the
+settings tables do not pull React views into `settingsSearch.ts`.
+
+### Syncing with the inbox
+
+The inbox is two commits on `r/main` (`feat(inbox)` and `fork(inbox): wire seams`) and syncs
+with it. After the usual sync:
+
+```bash
+# routeTree.gen.ts conflict: take either side, then regenerate it from the route files
+git checkout --theirs apps/web/src/routeTree.gen.ts
+node scripts/inbox-seam-check.ts regen-route-tree && git add apps/web/src/routeTree.gen.ts
+
+node scripts/inbox-seam-check.ts --since v0.1.8 --to v0.1.9   # both old and new upstream tags
+vp run typecheck   # plus lint, knip, and: vp test run apps/server/src/fork
+```
+
+The check lists each seam, the upstream symbols and behavior the fork relies on, and paths
+upstream might have claimed, with where to fix a failure, then the upstream commits that touched
+seam files. Then try the example channel end to end in a browser before releasing.
+
+### Delegation details
+
+- Threads start in process through `ThreadMessageIntake.launchThread` with
+  `creationSource: "server"` and `createdBy: "user"`. The default model is the project's, through
+  the shared `resolveNewThreadModelSelection`, else the first ready provider's default model. The
+  title is `<sender>: <summary>`, cut at a word or sentence near 48 characters.
+- The first message is T3's: the context file, the user's request from the dialog, the link,
+  and the draft rule. There are no adapter templates; a fixed prompt fought the request the user
+  writes anyway. "Do not change anything" in the default request is an instruction to the agent;
+  the thread runs in the project's default runtime mode.
+- Each thread gets its own context folder, `items/<delegationId>/<thread>/`, so a newer thread
+  never shows an older thread's files and an older thread that finishes late cannot overwrite
+  them. Only the delegation's current thread drives its state and offers its draft. One launch per delegation runs at a time, and
+  "Start a new thread" replaces only the thread the dialog showed. A reply thread longer than the
+  page cap, or a range whose first message is further back than the inbox reads, is refused
+  rather than delegated with part of it.
+- The dialog chooses the thread's checkout: the project's, a new worktree, or an existing one.
+  Delegating the same messages again defaults to the worktree its last thread worked in, read
+  from that thread rather than stored.
+- The delegation pane embeds the thread's own chat (`ChatView`, as a side chat is), so the
+  findings, requests, approvals, and launched threads read as they do in the thread, and the user
+  talks to the agent in its own composer. The inbox adds only the draft; the delegated messages
+  are the conversation beside it, not repeated in the pane. The first message carries
+  one rule: write `draft.md` only when a message asks
+  for the reply. The delegation shows the draft in an editable box and sends it from there, to
+  the message it answers. When the thread cannot
+  write there (a sandbox limited to the workspace), it ends its reply with `<draft>` tags; the inbox
+  reads each finished run once and writes the file (`.fallback.json` records the run and what it
+  wrote). A later run's tags replace an earlier run's; a draft the thread wrote itself always
+  wins.
+- A reply sent from a delegation's draft is kept as `items/<delegationId>/sent.<time>.<hash>.md`: the text as sent, its message
+  id, and whether it was the draft, an edited draft, or typed. An adapter answer without a message
+  id leaves the draft in place and reports the delivery as unknown. A send whose copy cannot be
+  written still succeeds and says so. The newest record marks the delegation as replied.
+- What a reply can carry depends on the adapter's `capabilities`. With `mentions`, it mentions
+  whoever its `@Name` matches among the people who wrote in the conversation; the reply box shows
+  who will be notified before sending, and a mention the chat app refused is reported after. With
+  `markdown`, a draft is asked for and sent as Markdown, and typed text stays text unless
+  switched. With `attachments`, picked or pasted files are uploaded to the adapter at once and
+  named in the send; they are not kept with the saved reply.
+- Replies the chat app keeps inside a thread (`inThread`) are folded under their root in the chat
+  view, and a range delegation takes them only together with their thread.
+- Linked threads' run, archive, and delete events refresh the inbox; nothing else in orchestration
+  is followed.
+- The example channel's settings offer **Simulate**, to see each adapter state in the browser.
+- Which providers can write to `<stateDir>/channels/items/` from their sandbox has not been
+  measured yet. Record it here per provider and mode once tried.

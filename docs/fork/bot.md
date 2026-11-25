@@ -49,8 +49,9 @@ Nothing is shared between bots except skills a bot writes to the shared folder (
 
 ## Creating a bot
 
-Creating a bot asks only for a name and a model. Everything else comes from talking to it: the bot
-turns what the user says into its notebook, and the user can read and edit that notebook directly.
+Name the bot and tell it what to do in the creation dialog or later in its chat. A job description
+entered during creation is sent as the first chat message and starts the bot's first turn. The bot
+can propose role rules for your approval and keep track of details in its notebook.
 
 ## The notebook
 
@@ -59,16 +60,23 @@ edit every part of it on the Bots page.
 
 | Part     | Holds                                                                                               |
 | -------- | --------------------------------------------------------------------------------------------------- |
-| Role     | Who it is, what it is responsible for, and how to behave, in the user's terms, including its rules  |
+| Role     | What the user wants from it: its job, scope, and rules for how to act. The user owns it             |
 | Scope    | Projects it may work in and read                                                                    |
 | Routines | Its own scheduled tasks ("09:00 daily: open PRs and CI"), which it creates and edits itself         |
 | Items    | Concrete pieces of work, one line each with status, next step, linked threads, and what it waits on |
-| Memory   | Lasting notes, one fact per line, at most 4 KB: preferences, project conventions, past mistakes     |
+| Memory   | Facts the bot found, one per line, at most 4 KB: paths, ids, who owns what, how things are set up   |
 | Notes    | Longer Markdown files in the bot's own folder, read when needed; memory lines can point to them     |
 | Skills   | How-tos the bot writes for itself as `SKILL.md` folders, its own or shared with every bot           |
 
-Role, routines, and items are written by the bot from the conversation and corrected by the user
-either by telling the bot or by editing the file. An item that waits on someone outside the bot is
+The line between role and memory is who decides. A rule the user states ("always", "never", "ask me
+before") goes in the role, which the bot changes only with the user's approval: `role add` appends
+one rule, so approving it means reading one line. What the bot learns about the world goes in
+memory, which it keeps up itself. Steps for how to do a task go in a skill, even when the user gave
+them. A rule the bot filed as memory has **Move to role** on the Bots page. The
+[bot-notebook eval](../../evals/bot-notebook/) checks this split.
+
+Routines and items are written by the bot from the conversation and corrected by the user either by
+telling the bot or by editing them. An item that waits on someone outside the bot is
 a line in it (`waiting: product confirms the copy`), not a separate state.
 
 Each routine has **Run now** on the Bots page, to try a new routine or rerun one without waiting
@@ -86,7 +94,8 @@ The notebook stays small, because every turn reads it:
 
 ## Talking to a bot
 
-Bots have their own page (sidebar, beside Inbox and Pull requests), not a place in the inbox.
+Each bot has its own page, opened from its row in the sidebar's Bots group, pinned above the
+projects; it is not a place in the inbox.
 A bot spans projects and works for users with no chat adapter at all; the inbox stays a mirror of
 the chat app. Where the user talks to a bot and what the bot can read are separate: any bot can
 read any conversation of the chat channel through the service, whatever page the user is on.
@@ -94,7 +103,8 @@ read any conversation of the chat channel through the service, whatever page the
 - Each bot has one chat with the user. The user asks; the bot answers from its notebook and, when
   needed, by reading its threads or conversations.
 - The bot posts there when it finishes something worth knowing or needs a decision. A question
-  blocks only that item, not the bot. Unread bot chats are counted on the Bots entry only.
+  blocks only that item, not the bot. The bot's sidebar row shows one status, the most pressing:
+  a waiting question (Input), unread posts, Working, or Paused.
 - It stays quiet otherwise. A routine or a thread event that brings nothing new posts nothing:
   no "all good", no repeat of an earlier reminder. Only a message from the user always gets a
   reply.
@@ -102,7 +112,14 @@ read any conversation of the chat channel through the service, whatever page the
   end.
 - The chat is a log, not the bot's memory. A turn sees the recent messages plus the notebook.
 
-Two bridges connect bots and the inbox, so each signal still has one place:
+Bots and the inbox connect so each signal still has one place:
+
+- **Bot to inbox.** When a bot cites or answers a chat message, its chat shows a quote that opens
+  that conversation in the inbox. What it sends to the chat app shows up in the inbox as the
+  user's own message with its signature, if it has one.
+
+Planned, not built (see [Planned: bots](./inbox-design.md#planned-bots)); the integration is
+still being weighed:
 
 - **Inbox to bot.** A [follow-up](./inbox-design.md#follow-ups) can be handled by a bot instead
   of a new thread, from the start or handed over later with its thread. The bot gets it as an
@@ -110,14 +127,11 @@ Two bridges connect bots and the inbox, so each signal still has one place:
   A mention the bot takes on its own opens a follow-up too.
 - **Work on a follow-up happens in the inbox.** The bot's draft reply lands in the follow-up's
   reply box, and the user sends it there; its questions about the follow-up show and are answered
-  in the follow-up's panel, and count on the inbox, not on the Bots entry. The bot's chat keeps a
+  in the follow-up's panel, and count on the inbox, not on the bot's row. The bot's chat keeps a
   one-line reference to each (asked, answered, sent) that opens the conversation, so the chat still
   reads as a full log, and the answer reaches the bot's next wake as it would from its chat.
 - **Settling is the user's.** The bot may propose settling a follow-up; the user confirms it. A
   per-bot permission to settle follow-ups without asking can come later.
-- **Bot to inbox.** When a bot cites or answers a chat message outside a follow-up, its chat shows
-  a quote that opens that conversation in the inbox. What it sends to the chat app shows up in the
-  inbox as the user's own message with its signature, if it has one.
 
 ## The loop
 
@@ -200,9 +214,8 @@ from the thread's runtime mode and branch protection on the forge.
 Every bot has a pause switch and a budget (turns per day, concurrent threads, retries per step).
 A paused bot keeps its events and runs nothing until resumed.
 
-The settings show only what a user decides: the permission mode, whether it may start and run
-threads (allow or ask), the two limits, and its chat channels (below). Editing its role always asks and is not a setting. There is no deny: to stop
-a bot, pause it.
+Settings let you choose the permission mode, set the daily turn and concurrent thread limits, and
+configure chat channels. Editing its role always asks. To stop a bot, pause it.
 
 ## Ownership
 
@@ -258,8 +271,7 @@ database changes, a few seams.
 - Server: `apps/server/src/fork/bot/`. It subscribes to `streamDomainEvents`, starts threads with
   `launchThread`, runs its own timer for routines, and reads and sends chat messages through the inbox's
   operations and `ChannelHub`.
-- Web: `apps/web/src/fork/bot/`: the Bots page (bot list, chat, notebook, owned threads) and a
-  bot target in the inbox's delegate dialog. The
+- Web: `apps/web/src/fork/bot/`: the Bots page (bot list, chat, notebook, owned threads). The
   chat view reuses the inbox's message list and `ReplyBox`. Permissions, budget, and pause live on
   the same page.
 - Tools: the `t3bot` CLI becomes the bot's tool surface, calling `/api/fork/bots/*` with a per-bot

@@ -3,6 +3,9 @@ import type { ReactNode } from "react";
 
 import { SidebarMenuButton, SidebarMenuItem } from "../../components/ui/sidebar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../../components/ui/tooltip";
+import { UnreadCount } from "../presentation";
+import { useEnvironmentReads } from "../useEnvironmentReads";
+import type { ForkEvent } from "../useForkResource";
 import { useInboxOverviews } from "./useInboxOverviews";
 
 /** The fork's entries in the sidebar footer: Bots always, Inbox once a channel is enabled. */
@@ -15,15 +18,35 @@ export function ForkSidebarItems({ onNavigate }: { readonly onNavigate: () => vo
   );
 }
 
+/** Each environment's bot posts the user has not seen, and questions waiting for them. */
+const toBotsUnread = (listing: { readonly bots: ReadonlyArray<{ readonly unread?: number }> }) =>
+  listing.bots.reduce((sum, bot) => sum + (bot.unread ?? 0), 0);
+const isBotEvent = (event: ForkEvent) => event.type === "bots";
+
+function SidebarCount({ count }: { readonly count: number }) {
+  return (
+    <UnreadCount
+      aria-hidden
+      count={count}
+      className="pointer-events-none absolute -top-0.5 -right-0.5"
+    />
+  );
+}
+
 function BotsItem({ onNavigate }: { readonly onNavigate: () => void }) {
   const navigate = useNavigate();
+  const unread = useEnvironmentReads("/bots", toBotsUnread, isBotEvent).reduce(
+    (sum, count) => sum + count,
+    0,
+  );
+  const label = unread > 0 ? `Bots, ${unread} unread` : "Bots";
   return (
     <SidebarMenuItem className="relative shrink-0">
       <Tooltip>
         <TooltipTrigger
           render={
             <SidebarMenuButton
-              aria-label="Bots"
+              aria-label={label}
               onClick={() => {
                 onNavigate();
                 void navigate({ to: "/bots" });
@@ -34,8 +57,9 @@ function BotsItem({ onNavigate }: { readonly onNavigate: () => void }) {
             </SidebarMenuButton>
           }
         />
-        <TooltipPopup side="top">Bots</TooltipPopup>
+        <TooltipPopup side="top">{label}</TooltipPopup>
       </Tooltip>
+      {unread > 0 ? <SidebarCount count={unread} /> : null}
     </SidebarMenuItem>
   );
 }
@@ -65,14 +89,7 @@ function InboxItem({ onNavigate }: { readonly onNavigate: () => void }) {
         />
         <TooltipPopup side="top">{label}</TooltipPopup>
       </Tooltip>
-      {unread > 0 ? (
-        <span
-          aria-hidden
-          className="pointer-events-none absolute -top-0.5 -right-0.5 min-w-4 rounded-full bg-primary px-1 text-center text-3xs leading-4 font-medium text-primary-foreground tabular-nums"
-        >
-          {unread > 99 ? "99+" : unread}
-        </span>
-      ) : null}
+      {unread > 0 ? <SidebarCount count={unread} /> : null}
     </SidebarMenuItem>
   );
 }

@@ -246,6 +246,7 @@ interface ChatMarkdownProps {
   /** Folders the agent worked in before writing `text`, the latest first; read when a link opens. */
   agentDirectories?: (() => ReadonlyArray<string>) | undefined;
   threadRef?: ScopedThreadRef | undefined;
+  onOpenFileInPanel?: ((path: string, line?: number) => void) | undefined;
   pullRequestPanelRef?: ScopedThreadRef | undefined;
   environmentId?: EnvironmentId | undefined;
   onTaskListChange?: ((input: { markerOffset: number; checked: boolean }) => void) | undefined;
@@ -581,6 +582,7 @@ function useChatMarkdownState(
     inline = false,
     cwd,
     agentDirectories,
+    onOpenFileInPanel,
     threadRef,
     pullRequestPanelRef,
     environmentId: explicitEnvironmentId,
@@ -604,6 +606,7 @@ function useChatMarkdownState(
   const resolvedTheme = useRenderedAppearance();
   const markdownRef = useRef<HTMLElement>(null);
   const mediaRequestId = useRef(0);
+  const fileRequestId = useRef(0);
   const mediaScopeKey = [
     threadRef?.environmentId,
     threadRef?.threadId,
@@ -631,6 +634,7 @@ function useChatMarkdownState(
   useLayoutEffect(
     () => () => {
       mediaRequestId.current += 1;
+      fileRequestId.current += 1;
     },
     // oxlint-disable-next-line react/exhaustive-effect-dependencies -- Leaving the scope invalidates media requests still loading for it.
     [mediaScopeKey],
@@ -946,6 +950,22 @@ function useChatMarkdownState(
     return findAgentDirectoryMatch(workspaceRelativePath, agentRoots, searchRoot);
   };
   const openFileInPanel = (fileLinkMeta: MarkdownFileLinkMeta, panelPath: string) => {
+    if (onOpenFileInPanel) {
+      const request = ++fileRequestId.current;
+      if (
+        fileLinkMeta.workspaceLookupPath === null ||
+        !cwd ||
+        workspaceLinkLookupQuery(panelPath, cwd) === null
+      ) {
+        onOpenFileInPanel(panelPath, fileLinkMeta.line);
+      } else {
+        void findWorkspaceFileMatch(fileLinkMeta).then((match) => {
+          if (fileRequestId.current === request)
+            onOpenFileInPanel(match ?? panelPath, fileLinkMeta.line);
+        });
+      }
+      return;
+    }
     if (!threadRef) return;
     // The panel reads relative paths from the thread's folder. A pull request body's `cwd` is the
     // checkout of its repository, which can be another folder.
@@ -1026,7 +1046,14 @@ function useChatMarkdownState(
         }
         isAppBundle={isAppBundle}
         workspaceRelativePath={fileLinkMeta.workspaceRelativePath}
-        panelPath={isAppBundle ? null : panelPath}
+        panelPath={
+          isAppBundle
+            ? null
+            : onOpenFileInPanel
+              ? (fileLinkMeta.workspaceRelativePath ?? fileLinkMeta.filePath)
+              : panelPath
+        }
+        panelAvailable={onOpenFileInPanel !== undefined}
         line={fileLinkMeta.line}
         label={fileLinkLabel(
           {
