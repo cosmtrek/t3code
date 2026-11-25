@@ -54,6 +54,8 @@ const QUOTA_EXHAUSTED = /\breason:QUOTA_EXHAUSTED\b/;
 // history, so every later prompt to that session fails the same way.
 const INVALID_THINKING_SIGNATURE =
   /\bmessages\.\d+\.content\.\d+(?:\.thinking\.signature: Field required|: Invalid `signature` in `thinking` block)/;
+// The harness lost a checkpoint the session database still points at; every later prompt fails.
+const CHECKPOINT_CORRUPTED = /could not find doneCh for checkpoint/i;
 const RESET_TIMESTAMP = /\bquotaResetTimeStamp:([^\s\]]+)/;
 const RESET_DELAY = /\bquotaResetDelay:((?:\d+(?:\.\d+)?(?:ns|us|µs|μs|ms|h|m|s))+)(?=[\s\]])/;
 // google.rpc.RetryInfo, which plain rate limits carry instead of a quota reset.
@@ -235,6 +237,18 @@ function turnFailure(
         message:
           "Antigravity's saved conversation can no longer be sent to the model. The next message starts a fresh Antigravity session with this thread's context.",
         code: "INVALID_THINKING_SIGNATURE",
+        retryable: true,
+      }),
+      threadDisposition: "broken",
+    };
+  }
+  if (CHECKPOINT_CORRUPTED.test(text)) {
+    return {
+      failure: makeProviderFailure({
+        class: "provider_error",
+        message:
+          "Antigravity lost this session's checkpoint. The next message starts a fresh Antigravity session with this thread's context.",
+        code: "SESSION_CORRUPTED",
         retryable: true,
       }),
       threadDisposition: "broken",
