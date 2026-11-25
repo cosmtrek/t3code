@@ -23,12 +23,20 @@ import {
   Trash2Icon,
   XIcon,
 } from "lucide-react";
-import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type MouseEvent,
+  type ReactNode,
+} from "react";
 
 import {
   resolveRuntimeModeOption,
   runtimeModeOptions,
 } from "../../components/chat/runtimeModeConfig";
+import { AssistantSelectionToolbar } from "../../components/chat/AssistantSelectionToolbar";
 import ChatMarkdown from "../../components/ChatMarkdown";
 import { RightPanelResizeHandle } from "../../components/preview/RightPanelResizeHandle";
 import { Badge } from "../../components/ui/badge";
@@ -84,7 +92,6 @@ import { ForkApiError, forkRequest } from "../forkApiAccess";
 import { DelegateModelPicker } from "../inbox/DelegateDialog";
 import { IconAction } from "../inbox/IconAction";
 import { PaneHeader } from "../inbox/PaneHeader";
-import { ReplyBox, useSendKey } from "../inbox/ReplyBox";
 import { formatSince, UnreadCount } from "../presentation";
 import type {
   BotChannelOption,
@@ -98,6 +105,8 @@ import type {
   BotSummary,
 } from "../types";
 import { useForkResource, type ForkEvent } from "../useForkResource";
+import { BotComposer, type BotComposerHandle } from "./BotComposer";
+import { revealCitedText } from "./revealCitedText";
 
 const ENVIRONMENT_STORAGE_KEY = "t3code:bots-environment";
 const BOT_STORAGE_KEY = "t3code:bots-selected";
@@ -456,8 +465,8 @@ function BotChat({
     `/bots/bot?botId=${encodeURIComponent(botId)}`,
     (event) => isBotEvent(event) && event.botId === botId,
   );
-  const sendKey = useSendKey();
-  const [text, setText] = useState("");
+  const composerRef = useRef<BotComposerHandle>(null);
+  const [chatViewport, setChatViewport] = useState<HTMLDivElement | null>(null);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -491,9 +500,7 @@ function BotChat({
   }, [environmentId, botId, lastPostId]);
   const workThreadId = data?.bot.workThreadId ?? null;
 
-  const send = async () => {
-    const message = text.trim();
-    if (message === "" || sending) return;
+  const send = async (message: string) => {
     setSending(true);
     setError(null);
     try {
@@ -501,12 +508,14 @@ function BotChat({
         method: "POST",
         body: { botId, text: message },
       });
-      setText("");
-      await detail.refresh();
+      setSending(false);
+      void detail.refresh();
+      return true;
     } catch (cause) {
       setError(errorText(cause));
+      setSending(false);
+      return false;
     }
-    setSending(false);
   };
 
   const setPaused = async (paused: boolean) => {
@@ -516,6 +525,13 @@ function BotChat({
     } catch (cause) {
       setError(errorText(cause));
     }
+  };
+
+  // A citation links to a thread; here its source is a post in this chat.
+  const revealOnCitationClick = (event: MouseEvent) => {
+    if (!revealCitedText(event.target)) return;
+    event.preventDefault();
+    event.stopPropagation();
   };
 
   const openWorkThread = () => {
@@ -574,8 +590,21 @@ function BotChat({
             </MenuPopup>
           </Menu>
         </PaneHeader>
+        <AssistantSelectionToolbar
+          viewport={chatViewport}
+          // Citations name a thread; here it stands for the bot's chat, which owns the message ids.
+          threadRef={{ environmentId, threadId: ThreadId.make(botId) }}
+          onCite={(citation, sourceAnchor) =>
+            composerRef.current?.cite(citation, sourceAnchor) ?? false
+          }
+        />
         {/* Reversed, so the newest message stays in view as messages arrive. */}
-        <div className="flex min-h-0 flex-1 scrollbar-gutter-both flex-col-reverse overflow-y-auto">
+        <div
+          ref={setChatViewport}
+          data-assistant-citation-viewport=""
+          className="flex min-h-0 flex-1 scrollbar-gutter-both flex-col-reverse overflow-y-auto"
+          onClickCapture={revealOnCitationClick}
+        >
           <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 py-6">
             {data?.chat.length === 0 ? (
               <p className="py-10 text-center text-sm text-muted-foreground">
@@ -583,7 +612,12 @@ function BotChat({
               </p>
             ) : null}
             {data?.chat.map((message) => (
-              <ChatLine key={message.id} message={message} />
+              <ChatLine
+                key={message.id}
+                message={message}
+                environmentId={environmentId}
+                botId={botId}
+              />
             ))}
             {data?.questions.map((question) => (
               <QuestionCard
@@ -595,28 +629,15 @@ function BotChat({
             ))}
           </div>
         </div>
-        <form
-          className="mx-auto w-full max-w-3xl px-4 pb-4"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void send();
-          }}
-        >
-          <ReplyBox
-            value={text}
+        <div className="mx-auto w-full max-w-3xl px-4 pb-4" onClickCapture={revealOnCitationClick}>
+          <BotComposer
+            ref={composerRef}
             placeholder={data ? `Message ${data.bot.name}` : ""}
-            onChange={(event) => setText(event.target.value)}
-            onKeyDown={(event) => {
-              if (sendKey.isSend(event)) {
-                event.preventDefault();
-                void send();
-              }
-            }}
             status={error ? <span className="text-destructive-foreground">{error}</span> : null}
             sending={sending}
-            canSend={text.trim() !== ""}
+            onSend={send}
           />
-        </form>
+        </div>
       </section>
       {data && notebookOpen ? (
         <NotebookPanel
@@ -651,12 +672,28 @@ function BotChat({
   );
 }
 
-function ChatLine({ message }: { readonly message: BotChatMessage }) {
+function ChatLine({
+  message,
+  environmentId,
+  botId,
+}: {
+  readonly message: BotChatMessage;
+  readonly environmentId: EnvironmentId;
+  readonly botId: string;
+}) {
   if (message.role === "user") {
     return (
       <div className="flex flex-col items-end gap-1">
-        <div className="max-w-[85%] rounded-2xl bg-secondary px-3.5 py-2 text-sm whitespace-pre-wrap wrap-anywhere">
-          {message.text}
+        <div className="max-w-[85%] rounded-2xl bg-secondary px-3.5 py-2">
+          {/* As a thread draws a user message, so citations show as their cards. */}
+          <ChatMarkdown
+            text={message.text}
+            cwd={undefined}
+            className="text-sm user-message-markdown"
+            lineBreaks
+            parseRawHtml={false}
+            extensions={USER_MESSAGE_MARKDOWN}
+          />
         </div>
         <span className="text-xs text-muted-foreground">
           {message.turnRunId === null ? "Waiting for the bot" : formatSince(message.createdAt)}
@@ -667,8 +704,18 @@ function ChatLine({ message }: { readonly message: BotChatMessage }) {
   if (message.role === "error") {
     return <p className="text-sm text-destructive-foreground">{message.text}</p>;
   }
-  return <ChatMarkdown text={message.text} cwd={undefined} className="text-sm" />;
+  return (
+    <div
+      data-assistant-citation-source={message.id}
+      data-assistant-citation-environment={environmentId}
+      data-assistant-citation-thread={botId}
+    >
+      <ChatMarkdown text={message.text} cwd={undefined} className="text-sm" />
+    </div>
+  );
 }
+
+const USER_MESSAGE_MARKDOWN = { userMessage: true, leadingWhitespace: true } as const;
 
 const DAY_NAMES = ["", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 

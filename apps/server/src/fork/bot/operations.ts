@@ -9,6 +9,11 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 
 import {
+  assistantCitationsToPlainText,
+  expandAssistantCitationsForProvider,
+} from "@t3tools/shared/assistantCitations";
+
+import {
   CommandId,
   MessageId,
   ModelSelection,
@@ -213,7 +218,13 @@ export const listBots = Effect.fn("ForkBot.listBots")(function* () {
       modelSelection: bot.modelSelection,
       working: store!.getTurn(bot.id) !== null,
       paused: bot.paused,
-      lastMessage: last ? { role: last.role, text: last.text, createdAt: last.createdAt } : null,
+      lastMessage: last
+        ? {
+            role: last.role,
+            text: assistantCitationsToPlainText(last.text),
+            createdAt: last.createdAt,
+          }
+        : null,
       unread: store!.unseenCount(bot.id) + store!.openQuestions(bot.id).length,
     };
   });
@@ -420,7 +431,7 @@ const steer = Effect.fn("ForkBot.steer")(function* (bot: Bot, messageId: string,
           commandId: CommandId.make(newId("fork-bot")),
           threadId: ThreadId.make(turn.threadId),
           messageId: MessageId.make(NodeCrypto.randomUUID()),
-          text: `The user, while you work:\n${text}`,
+          text: `The user, while you work:\n${expandAssistantCitationsForProvider(text)}`,
           attachments: [],
           mode: "steer",
           createdBy: "system",

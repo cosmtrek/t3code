@@ -124,7 +124,7 @@ export function useSendKey() {
   };
 }
 
-function SendButton({
+export function SendButton({
   sending,
   disabled,
   label,

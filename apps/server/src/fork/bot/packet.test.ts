@@ -1,6 +1,9 @@
 // @effect-diagnostics globalDate:off - Packets render plain Dates; the inputs are fixed instants.
 import { describe, expect, it } from "@effect/vitest";
 
+import { EnvironmentId, MessageId, ThreadId } from "@t3tools/contracts";
+import { serializeAssistantCitation } from "@t3tools/shared/assistantCitations";
+
 import { buildPacket, type PacketInput } from "./packet.ts";
 import type { ChatMessage, Item } from "./store.ts";
 
@@ -103,5 +106,27 @@ describe("wake packet", () => {
     expect(next).toContain("2: New fact");
     expect(next).toContain("question 3: Delete it?");
     expect(next).toContain("Go on");
+  });
+
+  it("expands citations as a thread turn does, cutting only the user's words", () => {
+    const citation = serializeAssistantCitation({
+      version: 1,
+      environmentId: EnvironmentId.make("env"),
+      threadId: ThreadId.make("bot"),
+      messageId: MessageId.make("m1"),
+      text: "Pick A.",
+      start: 0,
+      end: 7,
+      prefix: "",
+      suffix: " It is faster.",
+      comment: "Why not B?",
+    });
+    const text = buildPacket(
+      input({ newMessages: [chat(2, `${citation} ${"x".repeat(3_000)}`)] }),
+    ).text;
+    const words = `[assistant-quote-1] ${"x".repeat(3_000)}`.slice(0, 2_000);
+    expect(text).toContain(`${words}… (cut)\n\n<assistant_citations>`);
+    expect(text).toContain('"text": "Pick A."');
+    expect(text).toContain('"comment": "Why not B?"');
   });
 });

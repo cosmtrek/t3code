@@ -3,6 +3,8 @@
  * earlier session left; within a session, only what changed. Pure, so its shape and caps are
  * tested without a server.
  */
+import { expandAssistantCitationsForProvider } from "@t3tools/shared/assistantCitations";
+
 import { describeSchedule } from "./routines.ts";
 import type { Skill } from "./skills.ts";
 import type { ChatMessage, Item, MemoryNote, OwnedThread, Question, Routine } from "./store.ts";
@@ -82,8 +84,14 @@ const clip = (value: string, chars = MESSAGE_CHARS) =>
 const speaker = (message: ChatMessage) =>
   message.role === "user" ? "the user" : message.role === "bot" ? "you" : "error";
 
-const line = (message: ChatMessage) =>
-  `- ${speaker(message)} (${message.createdAt}): ${clip(message.text)}`;
+/** Citations expand as they do for a thread turn; only the user's own words are cut. */
+const line = (message: ChatMessage) => {
+  const expanded = expandAssistantCitationsForProvider(message.text);
+  const data = expanded.indexOf("\n\n<assistant_citations>");
+  const words = data === -1 ? expanded : expanded.slice(0, data);
+  const citations = data === -1 ? "" : expanded.slice(data);
+  return `- ${speaker(message)} (${message.createdAt}): ${clip(words)}${citations}`;
+};
 
 /** The open notebook: what `t3bot notebook` prints and every packet carries. */
 export function renderNotebook(notebook: Notebook): string {
