@@ -4,7 +4,7 @@ import { describe, expect, it } from "@effect/vitest";
 import { EnvironmentId, MessageId, ThreadId } from "@t3tools/contracts";
 import { serializeAssistantCitation } from "@t3tools/shared/assistantCitations";
 
-import { buildPacket, type PacketInput } from "./packet.ts";
+import { buildPacket, chatPreview, type PacketInput } from "./packet.ts";
 import type { ChatMessage, Item } from "./store.ts";
 
 const NOW = new Date("2026-11-23T09:00:00Z");
@@ -128,5 +128,24 @@ describe("wake packet", () => {
     expect(text).toContain(`${words}… (cut)\n\n<assistant_citations>`);
     expect(text).toContain('"text": "Pick A."');
     expect(text).toContain('"comment": "Why not B?"');
+  });
+
+  it("previews a message with its citations as quoted words, spaced from the text", () => {
+    const cite = (text: string, comment?: string) =>
+      serializeAssistantCitation({
+        version: 1,
+        environmentId: EnvironmentId.make("env"),
+        threadId: ThreadId.make("bot"),
+        messageId: MessageId.make("m1"),
+        text,
+        start: 0,
+        end: text.length,
+        prefix: "",
+        suffix: "",
+        ...(comment ? { comment } : {}),
+      });
+    expect(chatPreview(`For ${cite("Pick A.\n", "why?")}and ${cite("B")}then go.`)).toBe(
+      'For "Pick A." (why?) and "B" then go.',
+    );
   });
 });

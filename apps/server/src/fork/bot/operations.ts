@@ -8,10 +8,7 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 
-import {
-  assistantCitationsToPlainText,
-  expandAssistantCitationsForProvider,
-} from "@t3tools/shared/assistantCitations";
+import { expandAssistantCitationsForProvider } from "@t3tools/shared/assistantCitations";
 
 import {
   CommandId,
@@ -38,7 +35,7 @@ import { channelAccess, type ChannelView } from "../channels/hub.ts";
 import { InboxRuntime } from "../inbox/InboxRuntime.ts";
 import { firstProviderDefault, ForkHttpError } from "../inbox/operations.ts";
 import { BotRuntime, type BotRuntimeShape } from "./BotRuntime.ts";
-import { buildPacket, RECENT_CHAT_LIMIT, type Notebook } from "./packet.ts";
+import { buildPacket, chatPreview, RECENT_CHAT_LIMIT, type Notebook } from "./packet.ts";
 import { nextDueAt } from "./routines.ts";
 import { listSkills, ownSkillsPath, sharedSkillsPath } from "./skills.ts";
 import {
@@ -221,7 +218,7 @@ export const listBots = Effect.fn("ForkBot.listBots")(function* () {
       lastMessage: last
         ? {
             role: last.role,
-            text: assistantCitationsToPlainText(last.text),
+            text: chatPreview(last.text),
             createdAt: last.createdAt,
           }
         : null,

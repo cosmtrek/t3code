@@ -8,6 +8,7 @@ import {
 } from "../../components/ComposerPromptEditorTiptap";
 import { EMPTY_COMPOSER_CONTEXT_RECORDS } from "../../components/composerContextPresentation";
 import {
+  collapseExpandedComposerCursor,
   composerRequiresModifier,
   extendReplacementRangeForTrailingSpace,
   formatAssistantCitationForComposer,
@@ -17,6 +18,9 @@ import { useClientSettings } from "../../hooks/useSettings";
 import type { AssistantCitationSourceAnchor } from "../../lib/assistantTextSelection";
 import { isMacPlatform } from "../../lib/utils";
 import { SendButton } from "../inbox/ReplyBox";
+
+/** Unsent text per bot, so switching bots keeps what was being written. */
+const drafts = new Map<string, string>();
 
 export interface BotComposerHandle {
   /** Puts the citation at the caret and opens its comment beside the cited text, as a thread does. */
@@ -29,12 +33,14 @@ export interface BotComposerHandle {
  */
 export function BotComposer({
   ref,
+  draftKey,
   placeholder,
   status,
   sending,
   onSend,
 }: {
   readonly ref: Ref<BotComposerHandle>;
+  readonly draftKey: string;
   readonly placeholder: string;
   readonly status?: ReactNode;
   readonly sending: boolean;
@@ -42,15 +48,18 @@ export function BotComposer({
   readonly onSend: (prompt: string) => Promise<boolean>;
 }) {
   const editorRef = useRef<ComposerPromptEditorHandle>(null);
-  const [prompt, setPrompt] = useState("");
+  const [prompt, setPrompt] = useState(() => drafts.get(draftKey) ?? "");
   // Saving a citation comment and sending happen in one event, before a render would show it.
-  const promptRef = useRef("");
+  const promptRef = useRef(prompt);
   const write = (next: string) => {
     promptRef.current = next;
     setPrompt(next);
+    if (next === "") drafts.delete(draftKey);
+    else drafts.set(draftKey, next);
   };
-  const [cursor, setCursor] = useState(0);
+  const [cursor, setCursor] = useState(() => collapseExpandedComposerCursor(prompt, prompt.length));
   const sendShortcut = useClientSettings((settings) => settings.sendShortcut);
+  const richTextEnabled = useClientSettings((settings) => settings.composerRichTextEnabled);
   const needsModifier = composerRequiresModifier(sendShortcut, prompt);
   const canSend = prompt.trim() !== "" && !sending;
 
@@ -100,6 +109,8 @@ export function BotComposer({
             <div className="px-1 pt-1.5">
               <ComposerPromptEditor
                 editorRef={editorRef}
+                draftKey={draftKey}
+                richTextEnabled={richTextEnabled}
                 ariaLabel={placeholder}
                 value={prompt}
                 cursor={cursor}

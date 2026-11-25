@@ -632,6 +632,7 @@ function BotChat({
         <div className="mx-auto w-full max-w-3xl px-4 pb-4" onClickCapture={revealOnCitationClick}>
           <BotComposer
             ref={composerRef}
+            draftKey={`${environmentId}:${botId}`}
             placeholder={data ? `Message ${data.bot.name}` : ""}
             status={error ? <span className="text-destructive-foreground">{error}</span> : null}
             sending={sending}

@@ -1,5 +1,6 @@
 import { collectAssistantCitations } from "@t3tools/shared/assistantCitations";
 
+import { toastManager } from "../../components/ui/toast";
 import { findAssistantCitationSourceAnchor } from "../../lib/assistantTextSelection";
 
 const HIGHLIGHT = "t3-assistant-citation";
@@ -15,7 +16,15 @@ export function revealCitedText(target: EventTarget | null): boolean {
   const citation = collectAssistantCitations(holder?.dataset.markdownCopy ?? "")[0]?.citation;
   if (!citation) return false;
   const anchor = findAssistantCitationSourceAnchor(document, citation);
-  if (!anchor) return true;
+  if (!anchor) {
+    // The chat shows only its latest posts; older ones and edited-away text cannot be shown.
+    toastManager.add({
+      type: "warning",
+      title: "The cited response is unavailable",
+      description: "It is older than the chat shows, or no longer says this.",
+    });
+    return true;
+  }
   anchor.source.scrollIntoView({ block: "center", behavior: "smooth" });
   if (typeof CSS === "undefined" || !("highlights" in CSS)) return true;
   const highlight = new Highlight(anchor.range);

@@ -3,7 +3,10 @@
  * earlier session left; within a session, only what changed. Pure, so its shape and caps are
  * tested without a server.
  */
-import { expandAssistantCitationsForProvider } from "@t3tools/shared/assistantCitations";
+import {
+  collectAssistantCitations,
+  expandAssistantCitationsForProvider,
+} from "@t3tools/shared/assistantCitations";
 
 import { describeSchedule } from "./routines.ts";
 import type { Skill } from "./skills.ts";
@@ -92,6 +95,18 @@ const line = (message: ChatMessage) => {
   const citations = data === -1 ? "" : expanded.slice(data);
   return `- ${speaker(message)} (${message.createdAt}): ${clip(words)}${citations}`;
 };
+
+/** A message as one line of plain text, its citations as their quoted words and comments. */
+export function chatPreview(text: string): string {
+  let plain = "";
+  let cursor = 0;
+  for (const { citation, start, end } of collectAssistantCitations(text)) {
+    const comment = citation.comment ? ` (${citation.comment})` : "";
+    plain += `${text.slice(cursor, start)} "${citation.text.trim()}"${comment} `;
+    cursor = end;
+  }
+  return `${plain}${text.slice(cursor)}`.replace(/\s+/g, " ").trim();
+}
 
 /** The open notebook: what `t3bot notebook` prints and every packet carries. */
 export function renderNotebook(notebook: Notebook): string {
