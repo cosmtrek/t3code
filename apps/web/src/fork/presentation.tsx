@@ -1,3 +1,5 @@
+import type { ComponentProps } from "react";
+
 import { cn } from "../lib/utils";
 import { useClientSettings } from "../hooks/useSettings";
 import { formatDayAwareTimestamp, formatRelativeElapsed } from "../timestampFormat";
@@ -65,4 +67,28 @@ export function formatSince(iso: string | null, now = Date.now()): string {
 export function useFormatTimestamp(): (iso: string) => string {
   const timestampFormat = useClientSettings((settings) => settings.timestampFormat);
   return (iso) => formatDayAwareTimestamp(iso, timestampFormat);
+}
+
+/** The unread count the fork's lists and sidebar entries show; muted for a muted source. */
+export function UnreadCount({
+  count,
+  muted = false,
+  className,
+  ...props
+}: ComponentProps<"span"> & { readonly count: number; readonly muted?: boolean }) {
+  return (
+    <span
+      aria-label={`${count} unread`}
+      {...props}
+      className={cn(
+        "min-w-4 shrink-0 rounded-full px-1 text-center text-3xs leading-4 font-medium tabular-nums",
+        muted
+          ? "bg-muted-foreground/20 text-muted-foreground"
+          : "bg-primary text-primary-foreground",
+        className,
+      )}
+    >
+      {count > 99 ? "99+" : count}
+    </span>
+  );
 }

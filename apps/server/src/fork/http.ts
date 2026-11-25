@@ -179,7 +179,7 @@ const eventsRoute = (runtime: InboxRuntimeShape, bots: BotRuntimeShape) =>
   );
 
 /** The `t3bot` CLI in a bot's work thread: no session, the bot's own token instead. */
-const toolRoute = (bots: BotRuntimeShape) =>
+const toolRoute = (runtime: InboxRuntimeShape, bots: BotRuntimeShape) =>
   HttpRouter.add(
     "POST",
     `${BOTS}/tool`,
@@ -190,6 +190,7 @@ const toolRoute = (bots: BotRuntimeShape) =>
       return ok({ output: yield* runTool(tool) });
     }).pipe(
       Effect.provideService(BotRuntime, bots),
+      Effect.provideService(InboxRuntime, runtime),
       Effect.catchTags({ ForkHttpError: (error) => Effect.succeed(errorResponse(error)) }),
     ),
   );
@@ -383,6 +384,12 @@ const routes = (runtime: InboxRuntimeShape, bots: BotRuntimeShape) => {
     ),
     route(
       "POST",
+      `${BOTS}/seen`,
+      AuthOrchestrationOperateScope,
+      body.pipe(Effect.flatMap(Bots.markSeen)),
+    ),
+    route(
+      "POST",
       `${BOTS}/pause`,
       AuthOrchestrationOperateScope,
       body.pipe(Effect.flatMap(Bots.setPaused)),
@@ -405,7 +412,7 @@ const routes = (runtime: InboxRuntimeShape, bots: BotRuntimeShape) => {
       AuthOrchestrationOperateScope,
       body.pipe(Effect.flatMap(answerQuestion)),
     ),
-    toolRoute(bots),
+    toolRoute(runtime, bots),
     eventsRoute(runtime, bots),
   );
 };

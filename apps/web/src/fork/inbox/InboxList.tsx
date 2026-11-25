@@ -21,6 +21,7 @@ import { Button } from "../../components/ui/button";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../../components/ui/menu";
 import { useNowMinute } from "../../hooks/useNowMinute";
 import { cn } from "../../lib/utils";
+import { UnreadCount } from "../presentation";
 import type { ConversationKind, InboxConversation, InboxDelegation } from "../types";
 import {
   agoLabel,
@@ -241,19 +242,7 @@ function ConversationRow({
               ) : null}
               {lastMessageLine(conversation)}
             </span>
-            {badge > 0 ? (
-              <span
-                className={cn(
-                  "shrink-0 rounded-full px-1.5 text-3xs leading-4 font-medium tabular-nums",
-                  conversation.muted
-                    ? "bg-muted-foreground/20 text-muted-foreground"
-                    : "bg-primary text-primary-foreground",
-                )}
-                aria-label={`${badge} unread`}
-              >
-                {badge > 99 ? "99+" : badge}
-              </span>
-            ) : null}
+            {badge > 0 ? <UnreadCount count={badge} muted={conversation.muted} /> : null}
             {conversation.muted ? (
               <BellOffIcon
                 className="size-3.5 shrink-0 text-muted-foreground/70"

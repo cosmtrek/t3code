@@ -302,16 +302,38 @@ export interface BotSummary {
   readonly working: boolean;
   readonly paused: boolean;
   readonly lastMessage: Pick<BotChatMessage, "role" | "text" | "createdAt"> | null;
+  /** Its posts the user has not seen, plus its questions waiting for an answer. */
+  readonly unread: number;
 }
 
-export type BotPermission = "allow" | "ask" | "deny";
-export type BotGatedAction = "role.edit" | "thread.start" | "thread.send";
+export type BotPermission = "allow" | "ask";
+
+export interface BotChannelSettings {
+  readonly send: BotPermission;
+  /** It wakes when someone mentions the user there; one bot per channel at most. */
+  readonly mentions: boolean;
+}
 
 export interface BotSettings {
-  readonly permissions: Readonly<Record<BotGatedAction, BotPermission>>;
+  /** Starting threads and messaging its own; editing its role always asks. */
+  readonly threads: BotPermission;
   readonly turnsPerDay: number;
   readonly maxThreads: number;
   readonly runtimeMode: RuntimeMode;
+  /** Off: the bot has no chat tools at all. */
+  readonly channelsEnabled: boolean;
+  /** Appended to what it sends; empty sends the text as written. `{bot}` is its name. */
+  readonly signature: string;
+  /** By channel id; a channel missing here asks before sending and takes no mentions. */
+  readonly channels: Readonly<Record<string, BotChannelSettings>>;
+}
+
+/** A chat channel of the environment, for a bot's settings. */
+export interface BotChannelOption {
+  readonly id: string;
+  readonly name: string;
+  /** The bot that wakes on the user's mentions there now. */
+  readonly mentionBot: { readonly id: string; readonly name: string } | null;
 }
 
 /** An action the bot asked to take; approving runs exactly it. */
@@ -364,17 +386,13 @@ export interface BotDetail {
     readonly folder: string;
     readonly path: string;
   }>;
+  /** The environment's chat channels; empty where none is configured. */
+  readonly channels: ReadonlyArray<BotChannelOption>;
 }
 
 export interface BotNotebook {
-  readonly goals: ReadonlyArray<{
-    readonly id: number;
-    readonly title: string;
-    readonly done: boolean;
-  }>;
   readonly items: ReadonlyArray<{
     readonly id: number;
-    readonly goalId: number | null;
     readonly title: string;
     readonly status: "open" | "waiting" | "done";
     readonly note: string;

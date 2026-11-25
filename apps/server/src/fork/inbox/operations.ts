@@ -498,7 +498,7 @@ const listingMemos = new WeakMap<ChannelHub, Map<string, ListingMemo>>();
  * read of the channel, reused until the hub's revision for it moves (an adapter event, a read, a
  * link, a thread's run) or it gets old.
  */
-const readChannel = Effect.fn("ForkInbox.readChannel")(function* (channelId: string) {
+export const readChannel = Effect.fn("ForkInbox.readChannel")(function* (channelId: string) {
   const { hub } = yield* InboxRuntime;
   let memos = listingMemos.get(hub);
   if (memos === undefined) {
@@ -745,7 +745,7 @@ interface ScopeMessages {
   readonly stale: boolean;
 }
 
-const readChain = Effect.fn("ForkInbox.readChain")(function* (
+export const readChain = Effect.fn("ForkInbox.readChain")(function* (
   channelId: string,
   conversationId: string,
   rootId: string,
