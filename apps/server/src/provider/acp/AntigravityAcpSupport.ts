@@ -57,6 +57,8 @@ export interface AntigravityAcpRuntimeInput extends Omit<
   /** Conversational sessions only; helpers and probes leave the system prompt untouched. */
   readonly sessionSystemPromptAppend?: string;
   readonly authMethod?: AntigravityAuthMethod;
+  /** Launch agy auto-approving every tool call, its subagents' included. */
+  readonly skipPermissions?: boolean;
 }
 
 function parseAntigravityVersion(version: string | null | undefined) {
@@ -170,7 +172,8 @@ export function antigravityPermissionMode(runtimeMode: RuntimeMode): string {
 /**
  * The agy CLI rejects `yolo` and `auto_edit`, and sessions without native Auto reject `auto`.
  * Those stay in `default`, where it asks before acting and T3 answers from the live runtime
- * policy, so permission changes apply on the next turn without a restart.
+ * policy. Subagents' prompts never reach T3, so `auto_edit` uses agy's own `accept-edits` and
+ * full access is a launch flag (`skipPermissions`).
  */
 export function antigravitySessionMode(
   modeId: string,
@@ -181,7 +184,9 @@ export function antigravitySessionMode(
       ? "auto"
       : "default";
   }
-  return modeId === "yolo" || modeId === "auto_edit" ? "default" : modeId;
+  const offered = (id: string) => modeState?.availableModes.some((mode) => mode.id === id) === true;
+  if (modeId === "auto_edit") return offered("accept-edits") ? "accept-edits" : "default";
+  return modeId === "yolo" ? "default" : modeId;
 }
 
 // Only calls that name T3's server: before agy 1.5.8 "Running <tool>" names no server, so another
@@ -232,6 +237,7 @@ export function antigravityRuntimeModeForSessionMode(modeId: string): RuntimeMod
     case "yolo":
       return "full-access";
     case "auto_edit":
+    case "accept-edits":
       return "auto-accept-edits";
     case "auto":
       return "auto";

@@ -556,6 +556,7 @@ export function buildAntigravityAcpSpawnInput(input: {
   readonly baseEnv?: NodeJS.ProcessEnv;
   readonly auth?: AntigravityAuthConfig;
   readonly runtimeTempDirectory?: string;
+  readonly skipPermissions?: boolean;
 }): AcpSessionRuntime.AcpSpawnInput {
   return {
     command: input.installation.executablePath,
@@ -566,6 +567,8 @@ export function buildAntigravityAcpSpawnInput(input: {
       "--app-data-dir",
       // The CLI joins this beneath gemini-dir, including when the value is absolute.
       "antigravity-acp",
+      // Subagents' permission prompts never reach the ACP client, so full access is a flag.
+      ...(input.skipPermissions === true ? ["--dangerously-skip-permissions"] : []),
     ],
     cwd: input.cwd,
     env: antigravityEnvironment(
