@@ -41,7 +41,7 @@ const THREAD_STATUS_LABELS: Readonly<
 };
 
 /** The sidebar row's status words, icons and colors, so a thread reads the same in both places. */
-const SIDEBAR_STATUS: Readonly<
+export const SIDEBAR_STATUS: Readonly<
   Record<
     Exclude<SidebarThreadStatus, "ready">,
     { label: string; icon: LucideIcon; className: string }
@@ -62,7 +62,7 @@ const SIDEBAR_STATUS: Readonly<
 };
 
 /** Thread states that wait on the user: the list ranks them as Needs you and shows only these. */
-const NEEDS_YOU_STATUSES: ReadonlySet<SidebarThreadStatus> = new Set([
+export const NEEDS_YOU_STATUSES: ReadonlySet<SidebarThreadStatus> = new Set([
   "approval",
   "input",
   "request",

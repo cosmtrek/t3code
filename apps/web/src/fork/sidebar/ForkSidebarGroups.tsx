@@ -11,6 +11,7 @@ import { plainPreview } from "@t3tools/fork-client/text";
 import { useLocation, useNavigate, useSearch } from "@tanstack/react-router";
 import * as Schema from "effect/Schema";
 import {
+  ArrowUpRightIcon,
   BotMessageSquareIcon,
   ChevronDownIcon,
   MessagesSquareIcon,
@@ -19,6 +20,13 @@ import {
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
+import { EnvironmentMachineIcon } from "../../components/EnvironmentMachineIcon";
+import { ThreadHoverCard, ThreadHoverCardPopup } from "../../components/ThreadHoverCard";
+import { ProviderInstanceIcon } from "../../components/chat/ProviderInstanceIcon";
+import { getTriggerDisplayModelName } from "../../components/chat/providerIconUtils";
+import { Tooltip, TooltipTrigger } from "../../components/ui/tooltip";
+import { deriveProviderInstanceEntries, shouldShowInstanceBadge } from "../../providerInstances";
+import { useEnvironmentMachines, useEnvironmentProviders } from "../../state/environments";
 import { Button } from "../../components/ui/button";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../../components/ui/menu";
 import { useSidebar } from "../../components/ui/sidebar";
@@ -114,7 +122,6 @@ function GroupHeader({
   collapsed,
   dot,
   count,
-  onOpen,
   onToggle,
   action,
 }: {
@@ -124,7 +131,6 @@ function GroupHeader({
   /** While collapsed, the most pressing hidden status and how many rows are hidden. */
   readonly dot: GroupDot | null;
   readonly count: number;
-  readonly onOpen: () => void;
   readonly onToggle: () => void;
   readonly action?: ReactNode;
 }) {
@@ -132,8 +138,9 @@ function GroupHeader({
     <li className="group/fork-group relative mt-2 flex list-none items-center first:mt-0">
       <button
         type="button"
-        onClick={onOpen}
-        className="flex h-8 min-w-0 flex-1 cursor-pointer items-center gap-2.5 rounded-(--control-radius) ps-(--sidebar-row-content-inset) pe-8 text-left outline-none hover:bg-sidebar-row-hover focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+        onClick={onToggle}
+        aria-expanded={!collapsed}
+        className="flex h-8 min-w-0 flex-1 cursor-pointer items-center gap-2.5 rounded-(--control-radius) px-(--sidebar-row-content-inset) text-left outline-none hover:bg-sidebar-row-hover focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
       >
         <span className="flex size-4 shrink-0 items-center justify-center text-sidebar-foreground/90 [&_svg]:size-4">
           {icon}
@@ -157,23 +164,17 @@ function GroupHeader({
             {count}
           </span>
         ) : null}
-      </button>
-      <span className="absolute inset-y-0 right-7 flex items-center opacity-0 focus-within:opacity-100 group-hover/fork-group:opacity-100 pointer-coarse:opacity-100">
-        {action}
-      </span>
-      <Button
-        size="icon-xs"
-        variant="ghost-muted"
-        aria-expanded={!collapsed}
-        aria-label={collapsed ? `Show ${label}` : `Hide ${label}`}
-        onClick={onToggle}
-        className="absolute right-1"
-      >
         <ChevronDownIcon
           aria-hidden
-          className={cn("size-3 transition-transform", collapsed && "-rotate-90")}
+          className={cn(
+            "size-3 shrink-0 text-sidebar-muted-foreground transition-transform",
+            collapsed && "-rotate-90",
+          )}
         />
-      </Button>
+      </button>
+      <span className="absolute inset-y-0 right-6 flex items-center opacity-0 group-focus-within/fork-group:opacity-100 group-hover/fork-group:opacity-100 pointer-coarse:opacity-100">
+        {action}
+      </span>
     </li>
   );
 }
@@ -185,39 +186,178 @@ function GroupRow({
   preview,
   active = false,
   onClick,
+  botStatus,
+  empty = false,
+  error = false,
+  provider,
+  tooltip,
 }: {
+  readonly botStatus?: BotRowStatus<string>;
+  readonly empty?: boolean;
+  readonly error?: boolean;
+  readonly provider?: ReactNode;
+  readonly tooltip?: ReactNode;
   readonly title: string;
   readonly status: ReactNode;
   readonly preview: ReactNode;
   readonly active?: boolean;
   readonly onClick: () => void;
 }) {
+  const row = (
+    <button
+      type="button"
+      aria-current={active ? "page" : undefined}
+      onClick={onClick}
+      className={cn(
+        "group/sidebar-row flex w-full cursor-pointer flex-col justify-center rounded-md px-2.5 py-1.5 ps-9 text-left outline-none select-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+        botStatus?.kind === "paused" && "opacity-60",
+        active
+          ? "bg-sidebar-row-active text-sidebar-foreground light:ring-1 light:ring-inset light:ring-sidebar-border/70"
+          : "text-sidebar-foreground hover:bg-sidebar-row-hover",
+      )}
+    >
+      <span className="flex h-6 min-w-0 items-center gap-2.5">
+        <span
+          className={cn(
+            "min-w-0 flex-1 truncate text-sm font-medium",
+            botStatus?.kind === "working" ? "text-muted-foreground" : "text-foreground",
+          )}
+        >
+          {title}
+        </span>
+        <span className="flex shrink-0 items-center tabular-nums text-xs text-secondary-label">
+          {status}
+        </span>
+      </span>
+      {!botStatus && (preview === "" || preview === null) ? null : (
+        <span className="mt-0.5 flex w-full min-w-0 items-center gap-2 text-xs">
+          <span
+            className={cn(
+              "min-w-0 flex-1 truncate",
+              empty
+                ? "text-secondary-label italic"
+                : error
+                  ? "text-error-foreground"
+                  : botStatus?.kind === "question" || botStatus?.kind === "unread"
+                    ? "text-foreground/85"
+                    : "text-secondary-label",
+            )}
+          >
+            {preview}
+          </span>
+          {provider}
+        </span>
+      )}
+    </button>
+  );
   return (
     <li className="list-none">
-      <button
-        type="button"
-        aria-current={active ? "page" : undefined}
-        onClick={onClick}
-        className={cn(
-          "group/sidebar-row flex w-full cursor-pointer flex-col justify-center rounded-md px-2.5 py-1.5 ps-9 text-left outline-none select-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
-          active
-            ? "bg-sidebar-row-active text-sidebar-foreground light:ring-1 light:ring-inset light:ring-sidebar-border/70"
-            : "text-sidebar-foreground hover:bg-sidebar-row-hover",
-        )}
-      >
-        <span className="flex h-6 min-w-0 items-center gap-2.5">
-          <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
-            {title}
-          </span>
-          <span className="flex shrink-0 items-center tabular-nums text-xs text-secondary-label">
-            {status}
-          </span>
-        </span>
-        {preview === "" || preview === null ? null : (
-          <span className="mt-0.5 min-w-0 truncate text-xs text-secondary-label">{preview}</span>
-        )}
-      </button>
+      {tooltip ? (
+        <Tooltip>
+          <TooltipTrigger render={row} />
+          {tooltip}
+        </Tooltip>
+      ) : (
+        row
+      )}
     </li>
+  );
+}
+
+function BotRow({
+  listing,
+  bot,
+  status,
+  now,
+  active,
+  onClick,
+}: {
+  readonly listing: EnvironmentBots;
+  readonly bot: BotSummary;
+  readonly status: BotRowStatus<Exclude<SidebarThreadStatus, "ready">>;
+  readonly now: number;
+  readonly active: boolean;
+  readonly onClick: () => void;
+}) {
+  const providers = useEnvironmentProviders();
+  const machines = useEnvironmentMachines();
+  const entries = deriveProviderInstanceEntries(providers.get(listing.environmentId) ?? []);
+  const entry = entries.find((candidate) => candidate.instanceId === bot.modelSelection.instanceId);
+  const badge = entry !== undefined && shouldShowInstanceBadge(entry, entries);
+  const model = entry?.models.find((candidate) => candidate.slug === bot.modelSelection.model);
+  const modelLabel = model
+    ? getTriggerDisplayModelName(model, entry?.driverKind)
+    : bot.modelSelection.model;
+  const message = bot.lastMessage;
+  const preview = message
+    ? `${message.role === "user" ? "You: " : ""}${plainPreview(message.text)}`
+    : "No messages yet";
+  return (
+    <GroupRow
+      title={bot.name}
+      status={<BotStatus status={status} now={now} />}
+      botStatus={status}
+      empty={message === null}
+      error={message?.role === "error"}
+      preview={preview}
+      active={active}
+      onClick={onClick}
+      provider={
+        entry ? (
+          <ProviderInstanceIcon
+            {...entry}
+            showBadge={badge}
+            size="compact"
+            iconClassName="opacity-60"
+          />
+        ) : null
+      }
+      tooltip={
+        <ThreadHoverCardPopup side="right" align="start" sideOffset={4}>
+          <ThreadHoverCard
+            title={bot.name}
+            footer={
+              message ? (
+                <div className="border-t border-border/60 pt-2 text-xs text-muted-foreground">
+                  <p className="line-clamp-3 whitespace-pre-wrap wrap-break-word">
+                    {message.role === "user" ? "You: " : ""}
+                    {message.text}
+                  </p>
+                  <div className="mt-1">{agoLabel(message.createdAt, now)}</div>
+                </div>
+              ) : null
+            }
+          >
+            <div className="flex min-w-0 items-start gap-2">
+              <EnvironmentMachineIcon
+                kind={machines.get(listing.environmentId) ?? "server"}
+                className="size-3 shrink-0 stroke-muted-foreground"
+              />
+              <span className="min-w-0 wrap-break-word">{listing.label}</span>
+            </div>
+            <div className="flex min-w-0 items-center gap-2">
+              {entry ? (
+                <ProviderInstanceIcon
+                  {...entry}
+                  showBadge={badge && entry.accentColor !== undefined}
+                  badgeContent="none"
+                  badgeClassName="h-2 min-w-2 px-0"
+                  iconClassName="size-3 shrink-0 opacity-60"
+                />
+              ) : null}
+              <span className="min-w-0 wrap-break-word">
+                {badge && entry ? `${modelLabel} · ${entry.displayName}` : modelLabel}
+              </span>
+            </div>
+            {status.kind !== "none" && status.kind !== "age" ? (
+              <div className="flex items-center">
+                <BotStatus status={status} now={now} />
+              </div>
+            ) : null}
+          </ThreadHoverCard>
+        </ThreadHoverCardPopup>
+      }
+    />
   );
 }
 
@@ -230,7 +370,6 @@ function BotsGroup({ listings }: { readonly listings: ReadonlyArray<EnvironmentB
   const [collapsed, setCollapsed] = useLocalStorage(BOTS_COLLAPSED_KEY, false, Schema.Boolean);
   const [creatingIn, setCreatingIn] = useState<EnvironmentId | null>(null);
   const threadStatus = useThreadStatuses();
-  const named = listings.length > 1;
   const rows = listings.flatMap((listing) =>
     listing.bots.map((bot) => ({
       listing,
@@ -289,31 +428,26 @@ function BotsGroup({ listings }: { readonly listings: ReadonlyArray<EnvironmentB
         collapsed={collapsed}
         dot={mostPressing(rows.map(({ status }) => botAttention(status)))}
         count={rows.length}
-        onOpen={() => open(undefined, undefined)}
         onToggle={() => setCollapsed((value) => !value)}
         action={newBot}
       />
       {collapsed
         ? null
-        : rows.map(({ listing, bot, status }) => {
-            const preview = bot.lastMessage
-              ? plainPreview(bot.lastMessage.text)
-              : "No messages yet";
-            return (
-              <GroupRow
-                key={`${listing.environmentId}:${bot.id}`}
-                title={bot.name}
-                status={<BotStatus status={status} now={now} />}
-                preview={named ? `${listing.label} · ${preview}` : preview}
-                active={
-                  pathname === "/bots" &&
-                  search.environmentId === listing.environmentId &&
-                  search.botId === bot.id
-                }
-                onClick={() => open(listing.environmentId, bot.id)}
-              />
-            );
-          })}
+        : rows.map(({ listing, bot, status }) => (
+            <BotRow
+              key={`${listing.environmentId}:${bot.id}`}
+              listing={listing}
+              bot={bot}
+              status={status}
+              now={now}
+              active={
+                pathname === "/bots" &&
+                search.environmentId === listing.environmentId &&
+                search.botId === bot.id
+              }
+              onClick={() => open(listing.environmentId, bot.id)}
+            />
+          ))}
       {creatingIn === null ? null : (
         <CreateBotDialog
           environmentId={creatingIn}
@@ -415,7 +549,16 @@ function InboxGroup() {
         collapsed={collapsed}
         dot={items.length > 0 ? "attention" : null}
         count={items.length}
-        onOpen={() => open(null)}
+        action={
+          <Button
+            size="icon-xs"
+            variant="ghost-muted"
+            aria-label="Open Inbox"
+            onClick={() => open(null)}
+          >
+            <ArrowUpRightIcon aria-hidden />
+          </Button>
+        }
         onToggle={() => setCollapsed((value) => !value)}
       />
       {collapsed ? null : (
@@ -453,14 +596,14 @@ function InboxGroup() {
               onClick={() => open(item)}
             />
           ))}
-          {more > 0 ? (
+          {more > 0 || items.length === 0 ? (
             <li className="list-none">
               <button
                 type="button"
                 onClick={() => open(null)}
                 className="flex h-7 w-full cursor-pointer items-center rounded-md px-2.5 ps-9 text-left text-xs text-secondary-label outline-none hover:bg-sidebar-row-hover hover:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
               >
-                {more} more
+                {more > 0 ? `${more} more` : "All conversations"}
               </button>
             </li>
           ) : null}

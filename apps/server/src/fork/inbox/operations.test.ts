@@ -445,16 +445,19 @@ describe("inbox listing", () => {
         messages.push({ id: "m2", minute: 2, author: THEM });
         h.runtime.hub.invalidate(h.channelId);
         expect(yield* row()).toMatchObject({ unread: true });
-        // An unread DM counts toward the badge.
-        const badge = () =>
+        // An unread DM counts toward the badge, and the sidebar lists it.
+        const summary = () =>
           Inbox.overview().pipe(
-            Effect.map(
-              (overview) =>
-                overview.channels.find((channel) => channel.id === h.channelId)?.unreadCount,
+            Effect.map((overview) =>
+              overview.channels.find((channel) => channel.id === h.channelId),
             ),
             Effect.provide(h.layer),
           );
+        const badge = () => summary().pipe(Effect.map((channel) => channel?.unreadCount));
         expect(yield* badge()).toBe(1);
+        expect((yield* summary())?.attention?.conversations.map(({ id }) => id)).toEqual([
+          key.conversationId,
+        ]);
         yield* Inbox.setRead({ ...key, read: true, lastMessageAt: at(2) }).pipe(
           Effect.provide(h.layer),
         );
@@ -465,6 +468,7 @@ describe("inbox listing", () => {
         );
         expect(yield* row()).toMatchObject({ unread: false });
         expect(yield* badge()).toBe(0);
+        expect((yield* summary())?.attention?.conversations).toEqual([]);
       }),
   );
 

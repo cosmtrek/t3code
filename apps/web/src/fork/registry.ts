@@ -1,9 +1,9 @@
 /**
  * Everything this fork adds to upstream's settings tables and sidebar, so each upstream file
- * carries a one-line spread. The sidebar entry lives in inbox/ForkSidebarItems.tsx, apart, so
+ * carries a one-line spread. The sidebar groups live in sidebar/ForkSidebarGroups.tsx, apart, so
  * the settings tables do not pull in React views. See "Inbox seams" in FORK.md.
  */
-import { MessagesSquareIcon } from "lucide-react";
+import { CableIcon } from "lucide-react";
 import type { ComponentType } from "react";
 
 import type {
@@ -22,7 +22,7 @@ export const FORK_SETTINGS_NAV_PATHS: ReadonlyArray<ForkSettingsPath> = ["/setti
 export const FORK_SETTINGS_ICONS: Readonly<
   Record<ForkSettingsPath, ComponentType<{ className?: string }>>
 > = {
-  "/settings/channels": MessagesSquareIcon,
+  "/settings/channels": CableIcon,
 };
 
 /** Channels shows every environment read-only under "all", so it needs no particular scope. */

@@ -24,7 +24,6 @@ import {
 } from "../SidebarStageBackdrop";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
-import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import {
   SidebarFooter,
   SidebarMenu,
@@ -39,14 +38,8 @@ import { IssueGlyph } from "../issue/issuePresentation";
 import { isSidebarUtilityPage, useNavigateToMainApp } from "./mainAppLocation";
 import { SidebarThreadUndoNotice } from "./SidebarThreadUndoNotice";
 import { SidebarProviderUpdatePill } from "./SidebarProviderUpdatePill";
-import { SidebarUpdateArchitectureWarning, useSidebarUpdate } from "./SidebarUpdatePill";
+import { SidebarUpdateArchitectureWarning, SidebarUpdatePill } from "./SidebarUpdatePill";
 import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
-import { ForkSidebarItems } from "~/fork/inbox/ForkSidebarItems";
-import {
-  ForkUpdateDot,
-  ForkUpdateFooter,
-  ForkUpdateMenuItems,
-} from "~/fork/sidebar/ForkUpdateEntry";
 import { observeResize } from "~/lib/observeResize";
 import { SharedTooltipTrigger } from "../ui/shared-tooltip";
 
@@ -241,7 +234,6 @@ const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
   });
   const pullRequestsSupported = usePullRequestsSupported();
   const issuesSupported = useIssuesSupported();
-  const update = useSidebarUpdate();
   const closeMobileSidebar = () => {
     if (isMobile) {
       setOpenMobile(false);
@@ -264,13 +256,10 @@ const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
   };
 
   const handleUsageClick = () => {
-    closeMobileSidebar();
+    if (isMobile) {
+      setOpenMobile(false);
+    }
     void navigate({ to: "/usage" });
-  };
-  // The manual check lives on the About page; the sidebar only shows an update once there is one.
-  const handleUpdatesClick = () => {
-    closeMobileSidebar();
-    void navigate({ to: "/settings/about" });
   };
 
   const handleBackClick = () => {
@@ -291,7 +280,11 @@ const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
         </SidebarMenuItem>
       ) : (
         <>
-          <ForkSidebarItems onNavigate={closeMobileSidebar} />
+          <SidebarUtilityItem
+            icon={<SettingsIcon />}
+            label={gt("Settings")}
+            onClick={handleSettingsClick}
+          />
           {pullRequestsSupported ? (
             <SidebarUtilityItem
               icon={<PullRequestGlyph.pullRequest />}
@@ -306,45 +299,15 @@ const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
               onClick={handleIssuesClick}
             />
           ) : null}
+          <SidebarUtilityItem
+            icon={<ChartNoAxesColumnIcon />}
+            label={gt("Usage")}
+            onClick={handleUsageClick}
+          />
         </>
       )}
       <SidebarThreadUndoNotice />
-      <SidebarMenuItem aria-hidden className="ml-auto" />
-      <ForkUpdateFooter update={update} />
-      {isOnUtilityPage ? null : (
-        <SidebarMenuItem className="relative shrink-0">
-          <Menu>
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <MenuTrigger
-                    render={<SidebarMenuButton aria-label={gt("Settings")} size="icon" />}
-                  >
-                    <SettingsIcon />
-                  </MenuTrigger>
-                }
-              />
-              <TooltipPopup side="top">{gt("Settings")}</TooltipPopup>
-            </Tooltip>
-            <MenuPopup align="end" side="top">
-              <MenuItem onClick={handleSettingsClick}>
-                <SettingsIcon />
-                {gt("Settings")}
-              </MenuItem>
-              <MenuItem onClick={handleUsageClick}>
-                <ChartNoAxesColumnIcon />
-                {gt("Usage")}
-              </MenuItem>
-              <ForkUpdateMenuItems
-                update={update}
-                checkLabel={gt("Check for updates")}
-                onCheck={handleUpdatesClick}
-              />
-            </MenuPopup>
-          </Menu>
-          <ForkUpdateDot update={update} />
-        </SidebarMenuItem>
-      )}
+      <SidebarUpdatePill />
     </SidebarMenu>
   );
 });

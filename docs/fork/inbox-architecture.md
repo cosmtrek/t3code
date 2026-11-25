@@ -120,8 +120,8 @@ browser's revalidation gets a 304. `inbox.sqlite` stores only what cannot be der
 each conversation was read, the delegations, and links between delegations and threads.
 
 The overview waits 500 ms for each channel's listing. A slower one, such as a cold read from the
-adapter, answers with `unreadCount: null` so the sidebar entry does not wait on it; `counts`
-follows once the read lands, and the refetch reuses it.
+adapter, answers with `unreadCount: null` and `attention: null` so the sidebar does not wait on
+it; `counts` follows once the read lands, and the refetch reuses it.
 
 ## Two layers
 
@@ -161,8 +161,13 @@ last looked. Each mark moves forward only and compares with one kind of time:
 
 The client reports reads; fetching never does, since polls and background tabs fetch too. A
 message that arrives while a conversation is open stays unread until the user acts on it again.
-The sidebar badge counts unread DMs, groups with an unread mention, and unseen agent results;
-groups with only new messages show in Unread but are not counted. It means "waiting on me".
+The badge counts unread DMs, groups with an unread mention, and unseen agent results; groups
+with only new messages show in Unread but are not counted. It means "waiting on me". The
+sidebar's Inbox group lists the conversations that need you by the list's own rule, so the
+overview sends each channel's candidates (`attention`: unread DMs, mentions, and conversations
+with an open follow-up, with those follow-ups) and the client applies it, because a follow-up's
+blocked thread is client state. It shows the first three, follow-ups first, then DMs, then
+mentions.
 
 The Unread view follows the chat app instead: a muted conversation shows there only when it
 mentions me, and the tab counts unread messages, using the adapter's `unreadCount` and 1 when it

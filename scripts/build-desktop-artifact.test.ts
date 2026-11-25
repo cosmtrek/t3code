@@ -676,7 +676,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     });
   });
 
-  it.effect("declares Calendar and Apple Events access and seals unsigned macOS builds ad hoc", () =>
+  it.effect("declares macOS privacy strings and seals unsigned builds ad hoc", () =>
     Effect.gen(function* () {
       for (const version of ["0.1.0", "0.1.1-nightly.20261019.1"]) {
         for (const signed of [false, true]) {

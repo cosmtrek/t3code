@@ -656,13 +656,37 @@ export interface InboxChannelSummary {
   /** The optional parts of the protocol the adapter implements. */
   readonly capabilities: ReadonlyArray<string>;
   readonly unreadCount: number | null;
+  /** What may wait on the user, for the sidebar; null until the listing is read. */
+  readonly attention: ChannelAttention | null;
   readonly error: string | null;
+}
+
+/**
+ * Unread DMs, mentions, and conversations with an open follow-up, with those follow-ups. The
+ * client picks the ones that need the user, since a follow-up's blocked thread is client state.
+ */
+interface ChannelAttention {
+  readonly conversations: ReadonlyArray<InboxConversation>;
+  readonly delegations: ReadonlyArray<InboxDelegation>;
 }
 
 const badgeCount = (listing: ChannelListing) =>
   listing.conversations.filter((conversation) =>
     conversationCountsTowardBadge(conversation.kind, conversation),
   ).length + listing.delegations.filter((delegation) => delegation.agentUnseen).length;
+
+const attentionOf = (listing: ChannelListing): ChannelAttention => {
+  const delegations = listing.delegations.filter((delegation) => delegation.settledAt === null);
+  const followed = new Set(delegations.map((delegation) => delegation.conversationId));
+  return {
+    conversations: listing.conversations.filter(
+      (conversation) =>
+        followed.has(conversation.id) ||
+        conversationCountsTowardBadge(conversation.kind, conversation),
+    ),
+    delegations,
+  };
+};
 
 /** How long the overview waits on a channel's listing before answering without its count. */
 const OVERVIEW_WAIT = "500 millis";
@@ -708,6 +732,7 @@ export const overview = Effect.fn("ForkInbox.overview")(function* () {
           access,
           capabilities: channel.config?.capabilities ?? [],
           unreadCount: listing?.ok === true ? badgeCount(listing.result) : null,
+          attention: listing?.ok === true ? attentionOf(listing.result) : null,
           error:
             listing?.ok === false
               ? listing.error
