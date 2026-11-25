@@ -213,6 +213,7 @@ function DelegatedThreadChat({ threadRef }: { readonly threadRef: ScopedThreadRe
       params: { environmentId: threadRef.environmentId, threadId: threadRef.threadId },
     });
   const parentPanel: SideChatParentPanel = {
+    hostRef: threadRef,
     openToolDiff: (target) => {
       useDiffPanelStore.getState().selectToolCall(threadRef, target);
       useRightPanelStore.getState().open(threadRef, "diff");

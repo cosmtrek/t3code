@@ -198,10 +198,14 @@ export async function installLocalUpdate(
 }
 
 export function SidebarUpdatePill() {
-  return <SidebarUpdateControl />;
+  const update = useSidebarUpdate();
+  return update.visible ? <SidebarUpdateControl update={update} /> : null;
 }
 
-function SidebarUpdateControl() {
+export type SidebarUpdate = ReturnType<typeof useSidebarUpdate>;
+
+/** Update state and actions, shared by the footer pill and the fork's settings menu entry. */
+export function useSidebarUpdate() {
   const state = useDesktopUpdateState();
   const gt = useGT();
   const messages = useMessages();
@@ -212,10 +216,6 @@ function SidebarUpdateControl() {
   const isCheckingProviders = providerCheck === "button";
   const [isConfirmingEverything, setIsConfirmingEverything] = useState(false);
   const [checkAnimationKey, setCheckAnimationKey] = useState(0);
-  const [releaseNotesPopoverHandle] = useState(() => PopoverCreateHandle());
-  const suppressReleaseNotesFocusOpen = useRef(false);
-  const releaseNotesPopupRef = useRef<HTMLDivElement>(null);
-  const releaseNotesTriggerId = useId();
   const prefersReducedMotion = useMediaQuery("(prefers-reduced-motion: reduce)");
 
   const updateStatus = state?.status;
@@ -244,9 +244,10 @@ function SidebarUpdateControl() {
   const runsEverything = everything.hasUpdates && !isDownloading;
   const run = useUpdateEverythingRun();
   const isRunningEverything = run !== null;
+  const isChecking = state?.status === "checking" || isCheckingProviders;
   const showCheckIcon = shouldShowDesktopUpdateCheckIcon({
     isAnimationLatched: isCheckAnimationLatched,
-    isChecking: state?.status === "checking" || isCheckingProviders,
+    isChecking,
     prefersReducedMotion,
   });
   const { iconStatus, showUpdateDetails, showUpdateIconState } = resolveSidebarUpdatePresentation({
@@ -269,7 +270,8 @@ function SidebarUpdateControl() {
       : showCheckIcon
         ? gt("Checking for updates…")
         : (idleTooltip?.title ?? gt("Check for updates"));
-  const disabled = showCheckIcon
+  // The latch only finishes the icon's spin, and clears from that icon, which the settings menu never mounts.
+  const disabled = isChecking
     ? true
     : runsEverything
       ? false
@@ -279,16 +281,6 @@ function SidebarUpdateControl() {
   const isInteractionDisabled = disabled || isActionPending || isRunningEverything;
   const showReleaseNotesPopover =
     !isRunningEverything && shouldUseSidebarUpdateReleaseNotesPopover(showUpdateDetails, state);
-
-  const [releaseNotesOpen, setReleaseNotesOpen] = useState(false);
-  const [releaseNotesTriggerFocusVisible, setReleaseNotesTriggerFocusVisible] = useState(false);
-  // Release notes close when they stop applying, and open when they start
-  // applying while the trigger already holds keyboard focus.
-  const [releaseNotesShownBefore, setReleaseNotesShownBefore] = useState(showReleaseNotesPopover);
-  if (releaseNotesShownBefore !== showReleaseNotesPopover) {
-    setReleaseNotesShownBefore(showReleaseNotesPopover);
-    setReleaseNotesOpen(showReleaseNotesPopover && releaseNotesTriggerFocusVisible);
-  }
 
   const handleAction = async () => {
     const bridge = window.desktopBridge;
@@ -404,13 +396,11 @@ function SidebarUpdateControl() {
   const handleCheckAnimationIteration = () => {
     setIsCheckAnimationLatched(
       shouldContinueDesktopUpdateCheckAnimation({
-        isChecking: state?.status === "checking" || isCheckingProviders,
+        isChecking,
         prefersReducedMotion,
       }),
     );
   };
-
-  if (!isElectron && !runsEverything && !isRunningEverything) return null;
 
   const statusIcon = (
     <DesktopUpdateStatusIcon
@@ -434,6 +424,59 @@ function SidebarUpdateControl() {
     />
   );
 
+  return {
+    visible: showUpdateDetails || isRunningEverything,
+    state,
+    run,
+    machines: everything.machines,
+    action,
+    localUpdateVersion,
+    statusIcon,
+    confirmDialog,
+    tooltip,
+    idleTooltip,
+    disabled,
+    isInteractionDisabled,
+    showUpdateDetails,
+    showUpdateIconState,
+    showReleaseNotesPopover,
+    handleAction,
+  };
+}
+
+export function SidebarUpdateControl({ update }: { readonly update: SidebarUpdate }) {
+  const gt = useGT();
+  const {
+    state,
+    run,
+    machines,
+    action,
+    localUpdateVersion,
+    statusIcon,
+    confirmDialog,
+    tooltip,
+    idleTooltip,
+    disabled,
+    isInteractionDisabled,
+    showUpdateDetails,
+    showUpdateIconState,
+    showReleaseNotesPopover,
+    handleAction,
+  } = update;
+  const [releaseNotesPopoverHandle] = useState(() => PopoverCreateHandle());
+  const suppressReleaseNotesFocusOpen = useRef(false);
+  const releaseNotesPopupRef = useRef<HTMLDivElement>(null);
+  const releaseNotesTriggerId = useId();
+  const [releaseNotesOpen, setReleaseNotesOpen] = useState(false);
+  const [releaseNotesTriggerFocusVisible, setReleaseNotesTriggerFocusVisible] = useState(false);
+  // Release notes close when they stop applying, and open when they start
+  // applying while the trigger already holds keyboard focus.
+  const [releaseNotesShownBefore, setReleaseNotesShownBefore] = useState(showReleaseNotesPopover);
+  if (releaseNotesShownBefore !== showReleaseNotesPopover) {
+    setReleaseNotesShownBefore(showReleaseNotesPopover);
+    setReleaseNotesOpen(showReleaseNotesPopover && releaseNotesTriggerFocusVisible);
+  }
+
   if (run !== null) {
     const local: UpdateRunLocalState =
       run.localVersion === null
@@ -445,7 +488,7 @@ function SidebarUpdateControl() {
       <SidebarMenuItem className="@container/sidebar-update ml-auto flex min-w-8 flex-1">
         <SidebarUpdateCapsule
           run={run}
-          current={everything.machines}
+          current={machines}
           local={local}
           icon={statusIcon}
           {...(run.localVersion === null && action === "install" && window.desktopBridge
@@ -522,7 +565,7 @@ function SidebarUpdateControl() {
   );
 
   return (
-    <SidebarMenuItem className="ml-auto shrink-0">
+    <SidebarMenuItem className="shrink-0">
       <Popover
         handle={releaseNotesPopoverHandle}
         open={releaseNotesOpen && showReleaseNotesPopover}
