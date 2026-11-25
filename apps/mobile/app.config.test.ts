@@ -6,7 +6,14 @@ import assetLinks from "../web/public/.well-known/assetlinks.json";
 
 // Keep config parsing independent of local env files and build credentials.
 vi.mock("../../scripts/lib/public-config.ts", () => ({
-  loadRepoEnv: () => ({ APP_VARIANT: process.env.APP_VARIANT }),
+  loadRepoEnv: () => ({
+    APP_VARIANT: process.env.APP_VARIANT,
+    ...(process.env.T3CODE_ANDROID_PACKAGE
+      ? { T3CODE_ANDROID_PACKAGE: process.env.T3CODE_ANDROID_PACKAGE }
+      : {}),
+    ...(process.env.T3CODE_APP_NAME ? { T3CODE_APP_NAME: process.env.T3CODE_APP_NAME } : {}),
+    ...(process.env.T3CODE_APP_ICON ? { T3CODE_APP_ICON: process.env.T3CODE_APP_ICON } : {}),
+  }),
 }));
 
 afterEach(() => {
@@ -45,3 +52,21 @@ it.each([
   ]);
   expect(assetLinks.map((link) => link.target.package_name)).toContain(identifier);
 });
+
+it.each([
+  ["preview", "dev.example.t3code.preview", "com.t3tools.t3code.preview", "Fork Preview"],
+  ["production", "dev.example.t3code", "com.t3tools.t3code", "Fork"],
+])(
+  "uses fork identity overrides for APP_VARIANT=%j",
+  async (value, identifier, iosIdentifier, name) => {
+    vi.stubEnv("T3CODE_ANDROID_PACKAGE", "dev.example.t3code");
+    vi.stubEnv("T3CODE_APP_NAME", "Fork");
+    vi.stubEnv("T3CODE_APP_ICON", "nightly");
+    const config = await loadConfig(value);
+    expect(config.android?.package).toBe(identifier);
+    expect(config.ios?.bundleIdentifier).toBe(iosIdentifier);
+    expect(config.name).toBe(name);
+    expect(config.extra?.appIcon).toBe("nightly");
+    expect(config.android?.adaptiveIcon?.backgroundColor).toBe("#111533");
+  },
+);

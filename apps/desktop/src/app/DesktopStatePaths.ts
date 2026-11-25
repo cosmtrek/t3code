@@ -14,9 +14,16 @@ export function resolveDesktopBaseDir(input: {
   readonly homeDirectory: string;
   readonly joinPath: JoinPath;
   readonly t3Home: Option.Option<string>;
+  readonly dataSlug?: Option.Option<string>;
 }): string {
   return Option.getOrElse(normalizeConfiguredBaseDir(input.t3Home), () =>
-    input.joinPath(input.homeDirectory, ".t3"),
+    input.joinPath(
+      input.homeDirectory,
+      Option.match(input.dataSlug ?? Option.none(), {
+        onNone: () => ".t3",
+        onSome: (slug) => `.t3-${slug}`,
+      }),
+    ),
   );
 }
 
