@@ -90,6 +90,14 @@ export interface InboxChannelSummary {
   readonly capabilities: ReadonlyArray<string>;
   /** Unread DMs, groups that mention me, and unseen agent results. */
   readonly unreadCount: number | null;
+  /**
+   * Unread DMs, mentions, and conversations with an open follow-up, with those follow-ups; the
+   * sidebar picks the ones that need the user. Null until the listing is read.
+   */
+  readonly attention: {
+    readonly conversations: ReadonlyArray<InboxConversation>;
+    readonly delegations: ReadonlyArray<InboxDelegation>;
+  } | null;
   readonly error: string | null;
 }
 
@@ -305,8 +313,12 @@ export interface BotSummary {
   readonly working: boolean;
   readonly paused: boolean;
   readonly lastMessage: Pick<BotChatMessage, "role" | "text" | "createdAt"> | null;
-  /** Its posts the user has not seen, plus its questions waiting for an answer. */
+  /** Its posts the user has not seen. */
   readonly unread: number;
+  /** Its questions waiting for the user. */
+  readonly questions: number;
+  /** Its own thread, which the sidebar leaves out: the bot's row stands for it. */
+  readonly workThreadId: string | null;
 }
 
 export type BotPermission = "allow" | "ask";

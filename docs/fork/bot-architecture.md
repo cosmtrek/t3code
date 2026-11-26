@@ -41,18 +41,17 @@ flowchart TB
 
 ## Upstream footprint
 
-| Upstream file                                        | Change                                      | New?          |
-| ---------------------------------------------------- | ------------------------------------------- | ------------- |
-| `apps/server/src/server.ts`                          | none: bots merge into `fork/layer.ts`       | existing seam |
-| `apps/web/src/components/sidebar/SidebarChrome.tsx`  | none: Bots joins `<ForkSidebarItems>`       | existing seam |
-| `apps/web/src/components/sidebar/mainAppLocation.ts` | `/bots` is a sidebar utility page, one line | extends seam  |
-| `apps/web/src/routes/_chat.bots.tsx`                 | new thin route file                         | new file      |
-| `apps/web/src/routeTree.gen.ts`                      | regenerated                                 | generated     |
+| Upstream file                         | Change                                                | New?          |
+| ------------------------------------- | ----------------------------------------------------- | ------------- |
+| `apps/server/src/server.ts`           | none: bots merge into `fork/layer.ts`                 | existing seam |
+| `apps/web/src/components/Sidebar.tsx` | none: Bots is a group of `<ForkSidebarGroups>`        | existing seam |
+| `apps/web/src/routes/_chat.bots.tsx`  | new thin route file; `environmentId` and `botId` args | new file      |
+| `apps/web/src/routeTree.gen.ts`       | regenerated                                           | generated     |
 
 Bots have no Settings page and no component in the thread view: permissions, budget, pause, and
 Hand back all live on the Bots page, so neither needs another route or a slot in upstream views.
 Everything else is new files under `apps/server/src/fork/bot/` and `apps/web/src/fork/bot/`, plus
-a fork-only edit: `ForkSidebarItems` shows Bots even when no chat channel is configured.
+the sidebar's Bots group, which shows whenever an environment has bots, chat channel or not.
 
 Upstream modules are imported, never edited: `ThreadManagementService`, `ThreadMessageIntake`,
 `ManagedProjectFolders`, and the pure `nextScheduledRunAt` and `isMissedFixedTimeRun`.
@@ -199,8 +198,9 @@ was down are not delivered. The queue, the running turn, and pending questions a
 **One work thread per bot.** It is launched once, in the scratch project so it has no project,
 with the bot's own `workspace/` as its folder, and stays. When it grows past a message limit, or on the first turn of a new day, the turn is sent
 with `freshContext: true`, which starts a new provider session in the same thread. Nothing is
-lost, because every packet starts from the notebook. The thread never needs settling and adds one
-row to the sidebar per bot.
+lost, because every packet starts from the notebook. The thread never needs settling, and the
+sidebar leaves it out (`workThreadId` in the bot listing): the bot's row in the Bots group stands
+for it.
 
 Between rotations the provider session carries over, so earlier turns are a cached prefix and a
 turn's new input is its packet. The notebook is repeated in every packet, which the size caps

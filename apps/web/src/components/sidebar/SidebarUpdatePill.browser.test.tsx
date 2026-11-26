@@ -4,7 +4,7 @@ import { page, userEvent } from "vite-plus/test/browser";
 
 import "~/index.css";
 import { act, render } from "../../../test/render";
-import { SidebarUpdatePill, useSidebarUpdate } from "./SidebarUpdatePill";
+import { SidebarUpdatePill } from "./SidebarUpdatePill";
 import type { UpdateEverythingRow } from "./updateEverything.logic";
 
 const mocks = vi.hoisted(() => {
@@ -166,27 +166,5 @@ describe("SidebarUpdatePill update everything", () => {
     const row = table.getByRole("row", { name: new RegExp(label) });
     await expect.element(row.getByRole("cell", { name: label, exact: true })).toBeVisible();
     await expect.element(row.getByRole("cell", { name: "Claude", exact: true })).toBeVisible();
-  });
-});
-
-// The fork's settings menu uses the hook without mounting the animated status icon.
-function UpdateMenuProbe() {
-  const update = useSidebarUpdate();
-  return (
-    <button type="button" disabled={update.isInteractionDisabled}>
-      {update.tooltip}
-    </button>
-  );
-}
-
-describe("useSidebarUpdate without the status icon", () => {
-  it("enables the action once a startup check finishes", async () => {
-    setup({ ...nightlyUpdate([]), status: "checking" });
-    await using screen = await render(<UpdateMenuProbe />);
-    await expect.element(screen.getByRole("button")).toBeDisabled();
-
-    mocks.hasUpdates = true;
-    await publish({ ...nightlyUpdate([]), status: "up-to-date" });
-    await expect.element(screen.getByRole("button", { name: "Update everything" })).toBeEnabled();
   });
 });

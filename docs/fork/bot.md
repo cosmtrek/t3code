@@ -86,7 +86,8 @@ The notebook stays small, because every turn reads it:
 
 ## Talking to a bot
 
-Bots have their own page (sidebar, beside Inbox and Pull requests), not a place in the inbox.
+Each bot has its own page, opened from its row in the sidebar's Bots group, pinned above the
+projects; it is not a place in the inbox.
 A bot spans projects and works for users with no chat adapter at all; the inbox stays a mirror of
 the chat app. Where the user talks to a bot and what the bot can read are separate: any bot can
 read any conversation of the chat channel through the service, whatever page the user is on.
@@ -94,7 +95,8 @@ read any conversation of the chat channel through the service, whatever page the
 - Each bot has one chat with the user. The user asks; the bot answers from its notebook and, when
   needed, by reading its threads or conversations.
 - The bot posts there when it finishes something worth knowing or needs a decision. A question
-  blocks only that item, not the bot. Unread bot chats are counted on the Bots entry only.
+  blocks only that item, not the bot. The bot's sidebar row shows one status, the most pressing:
+  a waiting question (Input), unread posts, Working, or Paused.
 - It stays quiet otherwise. A routine or a thread event that brings nothing new posts nothing:
   no "all good", no repeat of an earlier reminder. Only a message from the user always gets a
   reply.
@@ -117,7 +119,7 @@ still being weighed:
   A mention the bot takes on its own opens a follow-up too.
 - **Work on a follow-up happens in the inbox.** The bot's draft reply lands in the follow-up's
   reply box, and the user sends it there; its questions about the follow-up show and are answered
-  in the follow-up's panel, and count on the inbox, not on the Bots entry. The bot's chat keeps a
+  in the follow-up's panel, and count on the inbox, not on the bot's row. The bot's chat keeps a
   one-line reference to each (asked, answered, sent) that opens the conversation, so the chat still
   reads as a full log, and the answer reaches the bot's next wake as it would from its chat.
 - **Settling is the user's.** The bot may propose settling a follow-up; the user confirms it. A

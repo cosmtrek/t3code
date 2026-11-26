@@ -1,5 +1,5 @@
-import { ThreadId } from "@t3tools/contracts";
-import { Link, useNavigate } from "@tanstack/react-router";
+import { type EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
   BotIcon,
@@ -15,7 +15,14 @@ import {
   Undo2Icon,
   XIcon,
 } from "lucide-react";
-import { useRef, useState, type CSSProperties, type ReactNode } from "react";
+import {
+  useEffect,
+  useEffectEvent,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 
 import { RightPanelResizeHandle } from "../../components/preview/RightPanelResizeHandle";
 import { Button } from "../../components/ui/button";
@@ -130,9 +137,20 @@ function useRemembered(environmentId: string) {
     ] as const;
 }
 
+/** A conversation to open, from a sidebar row. */
+export interface InboxSearch {
+  readonly environmentId?: EnvironmentId;
+  readonly channelId?: string;
+  readonly conversationId?: string;
+}
+
 export function InboxPage() {
   const inboxes = useInboxOverviews({ followSync: true });
+  const search = useSearch({ from: "/_chat/inbox" });
   const [chosenEnvironment, setChosenEnvironment] = useState<string | null>(readStoredEnvironment);
+  if (search.environmentId !== undefined && search.environmentId !== chosenEnvironment) {
+    setChosenEnvironment(search.environmentId);
+  }
   const inbox =
     inboxes.find((candidate) => candidate.environmentId === chosenEnvironment) ??
     inboxes[0] ??
@@ -244,8 +262,11 @@ function EnvironmentInboxView({
   });
   const remember = useRemembered(environmentId);
   const [channelId, setChannelId] = remember("channelId", null);
+  // A sidebar row links here with its conversation, which opens once the listing has it.
+  const search = useSearch({ from: "/_chat/inbox" });
+  const requested = search.environmentId === environmentId ? search : null;
   const channel =
-    inbox.channels.find((candidate) => candidate.id === channelId) ??
+    inbox.channels.find((candidate) => candidate.id === (requested?.channelId ?? channelId)) ??
     inbox.channels.find((candidate) => candidate.access.read) ??
     inbox.channels[0]!;
   const [filter, setFilter] = remember("filter", "all");
@@ -335,6 +356,19 @@ function EnvironmentInboxView({
     setHeldId(needsYou(target, followUpsOf(target.id), blockedThreadIds) ? target.id : null);
     void readConversation(target);
   };
+  const openRequested = useEffectEvent(() => {
+    const target = conversations.find((candidate) => candidate.id === requested?.conversationId);
+    setChannelId(channel.id);
+    if (target) selectConversation(target);
+    storeEnvironment(environmentId);
+    void navigate({ to: "/inbox", search: {}, replace: true });
+  });
+  const requestReady = requested !== null && listing.data !== null;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- a link's conversation opens once the async listing has loaded it
+  useEffect(() => {
+    // oxlint-disable-next-line react/set-state-in-effect -- opening reads the conversation on the server, as a click does
+    if (requestReady) openRequested();
+  }, [requestReady]);
   const selectDelegation = (target: InboxDelegation) => {
     setDelegationId(target.id);
     void seeDelegation(target);

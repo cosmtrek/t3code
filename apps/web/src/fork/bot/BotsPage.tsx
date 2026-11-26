@@ -5,7 +5,7 @@ import {
   type ModelSelection,
   type RuntimeMode,
 } from "@t3tools/contracts";
-import { useNavigate } from "@tanstack/react-router";
+import { useNavigate, useSearch } from "@tanstack/react-router";
 import {
   BotIcon,
   CheckIcon,
@@ -18,7 +18,6 @@ import {
   PauseIcon,
   PencilIcon,
   PlayIcon,
-  PlusIcon,
   SettingsIcon,
   Trash2Icon,
   XIcon,
@@ -101,7 +100,7 @@ import { ForkApiError, forkRequest } from "../forkApiAccess";
 import { DelegateModelPicker } from "../inbox/DelegateDialog";
 import { IconAction } from "../inbox/IconAction";
 import { PaneHeader } from "../inbox/PaneHeader";
-import { formatSince, UnreadCount } from "../presentation";
+import { formatSince } from "../presentation";
 import type {
   BotActivity,
   BotChatMessage,
@@ -142,13 +141,24 @@ const isBotEvent = (event: ForkEvent) => event.type === "bots";
 
 const errorText = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause));
 
+export interface BotsSearch {
+  readonly environmentId?: EnvironmentId;
+  readonly botId?: string;
+}
+
+/** The sidebar opens a bot by its link; the page reopens the last one opened. */
+export function rememberBot(environmentId: string, botId: string) {
+  store(ENVIRONMENT_STORAGE_KEY, environmentId);
+  store(BOT_STORAGE_KEY, botId);
+}
+
 export function BotsPage() {
+  const search = useSearch({ from: "/_chat/bots" });
   const { environments } = useEnvironments();
+  const chosen = search.environmentId ?? readStored(ENVIRONMENT_STORAGE_KEY);
   // Every known environment, so a reconnect does not unmount the page and its open dialog.
-  const connected = environments;
-  const [chosen, setChosen] = useState<string | null>(() => readStored(ENVIRONMENT_STORAGE_KEY));
   const environment =
-    connected.find((candidate) => candidate.environmentId === chosen) ?? connected[0] ?? null;
+    environments.find((candidate) => candidate.environmentId === chosen) ?? environments[0] ?? null;
 
   return (
     <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none">
@@ -157,34 +167,7 @@ export function BotsPage() {
           <EnvironmentBots
             key={environment.environmentId}
             environmentId={environment.environmentId}
-            environmentPicker={
-              connected.length > 1 ? (
-                <Select
-                  value={environment.environmentId}
-                  onValueChange={(value) => {
-                    if (!value) return;
-                    setChosen(value);
-                    store(ENVIRONMENT_STORAGE_KEY, value);
-                  }}
-                >
-                  <SelectTrigger
-                    aria-label="Environment"
-                    title={environment.label}
-                    size="xs"
-                    className="w-auto max-w-28 min-w-0"
-                  >
-                    <SelectValue>{environment.label}</SelectValue>
-                  </SelectTrigger>
-                  <SelectPopup>
-                    {connected.map((candidate) => (
-                      <SelectItem key={candidate.environmentId} value={candidate.environmentId}>
-                        {candidate.label}
-                      </SelectItem>
-                    ))}
-                  </SelectPopup>
-                </Select>
-              ) : null
-            }
+            botId={search.botId ?? readStored(BOT_STORAGE_KEY)}
           />
         ) : (
           <>
@@ -224,125 +207,63 @@ function BotsEmpty({
 
 function EnvironmentBots({
   environmentId,
-  environmentPicker,
+  botId,
 }: {
   readonly environmentId: EnvironmentId;
-  readonly environmentPicker: ReactNode;
+  readonly botId: string | null;
 }) {
+  const navigate = useNavigate();
   const listing = useForkResource<{ bots: ReadonlyArray<BotSummary> }>(
     environmentId,
     "/bots",
     isBotEvent,
   );
-  const [selected, setSelected] = useState<string | null>(() => readStored(BOT_STORAGE_KEY));
   const [creating, setCreating] = useState(false);
   const bots = listing.data?.bots ?? [];
-  const bot = bots.find((candidate) => candidate.id === selected) ?? bots[0] ?? null;
-  const select = (botId: string) => {
-    setSelected(botId);
-    store(BOT_STORAGE_KEY, botId);
-  };
+  const bot = bots.find((candidate) => candidate.id === botId) ?? bots[0] ?? null;
   const unsupported = listing.error?.status === 404;
-  const listWidth = useResizableWidth({
-    storageKey: "t3code:bots-list-width",
-    defaultWidth: 240,
-    minWidth: 200,
-    maxWidth: 400,
-    edge: "right",
-  });
 
-  return (
-    <div className="relative flex min-h-0 flex-1">
-      <aside
-        className="relative flex w-(--resizable-width) min-w-50 flex-col border-r max-md:hidden"
-        style={{ [RESIZABLE_WIDTH_PROPERTY]: `${listWidth.width}px` } as CSSProperties}
-      >
-        <RightPanelResizeHandle
-          handlers={listWidth.handlers}
-          label="Resize the bot list"
-          className="-right-1 left-auto any-pointer-coarse:-right-2 any-pointer-coarse:left-auto"
-        />
-        <PaneHeader edge="list">
-          <h1 className="flex-1 shrink-0 px-1 text-sm font-medium">Bots</h1>
-          {environmentPicker}
-          <Button
-            size="icon-xs"
-            variant="ghost"
-            aria-label="New bot"
-            disabled={unsupported}
-            onClick={() => setCreating(true)}
-          >
-            <PlusIcon />
-          </Button>
-        </PaneHeader>
-        <nav className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto p-2">
-          {bots.map((candidate) => (
-            <button
-              key={candidate.id}
-              type="button"
-              onClick={() => select(candidate.id)}
-              className={cn(
-                "flex min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-accent",
-                candidate.id === bot?.id && "bg-accent",
-              )}
-            >
-              <BotAvatar name={candidate.name} />
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-sm">{candidate.name}</span>
-                <span className="block truncate text-xs text-muted-foreground">
-                  {candidate.lastMessage
-                    ? candidate.lastMessage.text.replace(/[`*_#>]/g, "")
-                    : "New"}
-                </span>
-              </span>
-              {candidate.working ? (
-                <Spinner size="sm" aria-label="Working" />
-              ) : candidate.paused ? (
-                <PauseIcon aria-label="Paused" className="size-3 shrink-0 text-muted-foreground" />
-              ) : null}
-              {candidate.unread > 0 ? <UnreadCount count={candidate.unread} /> : null}
-            </button>
-          ))}
-        </nav>
-      </aside>
-      {bot ? (
+  if (bot) {
+    return (
+      <div className="relative flex min-h-0 flex-1">
         <BotChat key={bot.id} environmentId={environmentId} botId={bot.id} />
-      ) : (
-        <div className="flex min-w-0 flex-1 flex-col">
-          <PaneHeader edge="detail" className="md:hidden">
-            <h1 className="truncate px-1 text-sm font-medium">Bots</h1>
-          </PaneHeader>
-          {listing.data === null && listing.loading ? (
-            <div className="flex flex-1 items-center justify-center">
-              <Spinner />
-            </div>
-          ) : unsupported ? (
-            <BotsEmpty
-              title="No bots here"
-              description="This environment runs a T3 Code build without bots."
-            />
-          ) : listing.error ? (
-            <BotsEmpty title="Bots could not load" description={listing.error.message} />
-          ) : (
-            <BotsEmpty
-              title="No bots yet"
-              description="A bot is a teammate you tell its job in plain words."
-            >
-              <Button size="sm" onClick={() => setCreating(true)}>
-                New bot
-              </Button>
-            </BotsEmpty>
-          )}
+      </div>
+    );
+  }
+  return (
+    <div className="flex min-w-0 flex-1 flex-col">
+      <PaneHeader edge="list">
+        <h1 className="truncate px-1 text-sm font-medium">Bots</h1>
+      </PaneHeader>
+      {listing.data === null && listing.loading ? (
+        <div className="flex flex-1 items-center justify-center">
+          <Spinner />
         </div>
+      ) : unsupported ? (
+        <BotsEmpty
+          title="No bots here"
+          description="This environment runs a T3 Code build without bots."
+        />
+      ) : listing.error ? (
+        <BotsEmpty title="Bots could not load" description={listing.error.message} />
+      ) : (
+        <BotsEmpty
+          title="No bots yet"
+          description="A bot is a teammate you tell its job in plain words."
+        >
+          <Button size="sm" onClick={() => setCreating(true)}>
+            New bot
+          </Button>
+        </BotsEmpty>
       )}
       {creating ? (
         <CreateBotDialog
           environmentId={environmentId}
           onClose={() => setCreating(false)}
-          onCreated={(botId) => {
+          onCreated={(createdId) => {
             setCreating(false);
-            select(botId);
-            void listing.refresh();
+            rememberBot(environmentId, createdId);
+            void navigate({ to: "/bots", search: { environmentId, botId: createdId } });
           }}
         />
       ) : null}
@@ -361,7 +282,7 @@ function BotAvatar({ name }: { readonly name: string }) {
   );
 }
 
-function CreateBotDialog({
+export function CreateBotDialog({
   environmentId,
   onClose,
   onCreated,
@@ -580,7 +501,7 @@ function BotChat({
   return (
     <>
       <section className="flex min-w-72 flex-1 flex-col">
-        <PaneHeader edge="detail">
+        <PaneHeader edge="list">
           {data ? <BotAvatar name={data.bot.name} /> : null}
           <h2 className="min-w-0 flex-1 truncate px-1 text-sm font-medium">
             {data?.bot.name ?? ""}

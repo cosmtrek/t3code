@@ -278,15 +278,14 @@ Upstream files the inbox touches. Keep these in one `fork(inbox): wire seams` co
 | `apps/server/src/server.ts`                               | Import `ForkExtensions`; `ForkExtensions.layer` in `layerMakeRoutes` |
 | `apps/web/src/components/settings/settingsSearch.ts`      | `ForkSettingsPath` in `SettingsPath`; spread the four fork tables    |
 | `apps/web/src/components/settings/SettingsSidebarNav.tsx` | Spread `FORK_SETTINGS_ICONS`                                         |
-| `apps/web/src/components/sidebar/SidebarChrome.tsx`       | `<ForkSidebarItems>` beside Pull requests                            |
-| `apps/web/src/components/sidebar/mainAppLocation.ts`      | `/inbox` is a sidebar utility page (Back, like Pull requests)        |
+| `apps/web/src/components/Sidebar.tsx`                     | `<ForkSidebarGroups>` above projects; bot work threads left out      |
 | `apps/web/src/routeTree.gen.ts`                           | Generated; never merge by hand                                       |
 | `package.json`                                            | `fork:inbox-seam-check` script                                       |
 | `vite.config.ts`                                          | `apps/web/src/fork/**` skips `no-untranslated-copy` (not translated) |
 
 `settingsSearch.ts` has a fifth table the plan did not list: `SETTINGS_CATEGORY_SCOPES` is a
-`Record<SettingsPath, …>` too, so it spreads `FORK_SETTINGS_CATEGORY_SCOPES`. The sidebar entry
-is imported from `fork/inbox/ForkSidebarItems.tsx` rather than `fork/registry.ts`, so the
+`Record<SettingsPath, …>` too, so it spreads `FORK_SETTINGS_CATEGORY_SCOPES`. The sidebar groups
+are imported from `fork/sidebar/ForkSidebarGroups.tsx` rather than `fork/registry.ts`, so the
 settings tables do not pull React views into `settingsSearch.ts`.
 
 ### Syncing with the inbox

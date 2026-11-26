@@ -596,7 +596,17 @@ describe("bot turns", () => {
           const [question] = store.openQuestions(botId);
           expect(question?.text).toContain("Watch CI.");
           expect(yield* Effect.promise(() => roleOf().catch(() => ""))).toBe("");
+          // The sidebar shows a waiting question apart from unread posts.
+          const counts = () =>
+            Bots.listBots().pipe(
+              Effect.map(({ bots }) => ({
+                questions: bots[0]!.questions,
+                unread: bots[0]!.unread,
+              })),
+            );
+          expect(yield* counts()).toEqual({ questions: 1, unread: 0 });
           yield* answerQuestion({ botId, questionId: question!.id, approve: true });
+          expect((yield* counts()).questions).toBe(0);
           expect(yield* Effect.promise(roleOf)).toBe("Watch CI.");
           // The answer wakes the bot.
           expect(h.packets.at(-1)).toContain(

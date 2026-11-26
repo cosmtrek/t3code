@@ -173,8 +173,12 @@ export interface BotSummary {
   readonly working: boolean;
   readonly paused: boolean;
   readonly lastMessage: Pick<ChatMessage, "role" | "text" | "createdAt"> | null;
-  /** Its posts since the user last looked, plus its questions still waiting for an answer. */
+  /** Its posts since the user last looked. */
   readonly unread: number;
+  /** Its questions still waiting for an answer. */
+  readonly questions: number;
+  /** Its own thread, which the sidebar leaves out: the bot's row stands for it. */
+  readonly workThreadId: string | null;
 }
 
 export const listBots = Effect.fn("ForkBot.listBots")(function* () {
@@ -194,7 +198,9 @@ export const listBots = Effect.fn("ForkBot.listBots")(function* () {
             createdAt: last.createdAt,
           }
         : null,
-      unread: store!.unseenCount(bot.id) + store!.openQuestions(bot.id).length,
+      unread: store!.unseenCount(bot.id),
+      questions: store!.openQuestions(bot.id).length,
+      workThreadId: bot.workThreadId,
     };
   });
   return { bots };

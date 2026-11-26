@@ -34,7 +34,7 @@ const SEAM_FILES = [
   "apps/server/src/server.ts",
   "apps/web/src/components/settings/settingsSearch.ts",
   "apps/web/src/components/settings/SettingsSidebarNav.tsx",
-  "apps/web/src/components/sidebar/SidebarChrome.tsx",
+  "apps/web/src/components/Sidebar.tsx",
   "apps/web/src/routeTree.gen.ts",
   "package.json",
 ];
@@ -78,11 +78,13 @@ const seams: ReadonlyArray<Check> = [
     fix: "Add `ForkExtensions.layer` next to `GuestHttp.layer` in the routes Layer.mergeAll.",
   },
   {
-    name: "ForkSidebarItems sits in the sidebar footer",
-    file: "apps/web/src/components/sidebar/SidebarChrome.tsx",
+    name: "The sidebar pins the fork's groups and leaves out bot work threads",
+    file: "apps/web/src/components/Sidebar.tsx",
     ok: (text) =>
-      text.includes("<ForkSidebarItems") && text.includes("~/fork/inbox/ForkSidebarItems"),
-    fix: "Render `<ForkSidebarItems onNavigate={closeMobileSidebar} />` beside the Pull requests item.",
+      text.includes("~/fork/sidebar/ForkSidebarGroups") &&
+      text.includes("useBotSidebar(useQuietThreadShells())") &&
+      text.includes("<ForkSidebarGroups bots={botListings} />"),
+    fix: "Take `threads` and `botListings` from `useBotSidebar(useQuietThreadShells())` and render `<ForkSidebarGroups>` first in the thread list group.",
   },
   {
     name: "settingsSearch spreads the fork's settings tables",
