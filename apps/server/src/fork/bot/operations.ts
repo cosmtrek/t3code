@@ -21,6 +21,7 @@ import {
   RuntimeMode,
   ThreadId,
   type OrchestrationV2RunStatus,
+  type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -205,15 +206,38 @@ export const listBots = Effect.fn("ForkBot.listBots")(function* () {
   return { bots };
 });
 
+const ACTIVITY_CHARS = 240;
+
+/**
+ * The line a work-thread item gives the bot chat's status: the first line of a finished
+ * assistant message. Streamed text and tool calls are left out, so it moves once per message.
+ */
+export function activityLine(item: OrchestrationV2TurnItem): string | null {
+  if (item.type !== "assistant_message" || item.streaming) return null;
+  const line = item.text
+    .split("\n")
+    .map((part) => chatPreview(part.replace(/^\s*(?:[#>*-]+|\d+\.)\s+/, "")))
+    .find((part) => part !== "");
+  if (line === undefined) return null;
+  return line.length > ACTIVITY_CHARS ? `${line.slice(0, ACTIVITY_CHARS - 1)}…` : line;
+}
+
+const activityOf = (runtime: BotRuntimeShape, botId: string, turn: Turn | null) => {
+  const latest = runtime.activity.get(botId);
+  return turn !== null && latest?.runId === turn.runId ? latest.text : null;
+};
+
 export const readBot = Effect.fn("ForkBot.readBot")(function* (params: URLSearchParams) {
   const runtime = yield* BotRuntime;
   const bot = yield* requireBot(params.get("botId") ?? "");
   const store = runtime.store();
+  const turn = store.getTurn(bot.id);
   return {
     // A count from an earlier day is spent: today starts at zero.
     bot: { ...bot, turnsToday: bot.lastTurnDay === localDay(new Date()) ? bot.turnsToday : 0 },
     role: yield* readRole(runtime.botsDir, bot.id),
-    workingSince: store.getTurn(bot.id)?.startedAt ?? null,
+    workingSince: turn?.startedAt ?? null,
+    activity: activityOf(runtime, bot.id, turn),
     chat: store.recentChat(bot.id, CHAT_PAGE),
     notebook: yield* readNotebook(bot.id),
     questions: store.openQuestions(bot.id),

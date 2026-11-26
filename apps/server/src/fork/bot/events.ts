@@ -1,7 +1,7 @@
 /**
  * Turns domain events into bot events: the end of a run in a work thread ends that bot's turn,
- * and what happens in a thread a bot started is queued for it. Every other event costs one
- * map lookup.
+ * its items give the chat a live status line, and what happens in a thread a bot started is
+ * queued for it. Every other event costs one map lookup.
  */
 import { ThreadId, type OrchestrationV2DomainEvent } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -9,7 +9,14 @@ import * as Stream from "effect/Stream";
 
 import * as ThreadManagement from "../../orchestration-v2/ThreadManagementService.ts";
 import { BotRuntime } from "./BotRuntime.ts";
-import { finishRun, isTerminalRunStatus, notify, nowIso, postError } from "./operations.ts";
+import {
+  activityLine,
+  finishRun,
+  isTerminalRunStatus,
+  notify,
+  nowIso,
+  postError,
+} from "./operations.ts";
 import type { OwnedThread } from "./store.ts";
 import { takenOverByUser } from "./tools.ts";
 
@@ -105,6 +112,17 @@ export const followThreads = Effect.fn("ForkBot.followThreads")(function* <E, R>
   const handle = Effect.fnUntraced(function* (event: OrchestrationV2DomainEvent) {
     const workBot = runtime.workThreads.get(event.threadId);
     if (workBot !== undefined) {
+      if (event.type === "turn-item.updated" && event.payload.runId !== null) {
+        const line = activityLine(event.payload);
+        const runId = event.payload.runId;
+        if (
+          line !== null &&
+          runtime.activity.get(workBot)?.text !== line &&
+          runtime.store().getTurn(workBot)?.runId === runId
+        ) {
+          runtime.publishActivity(workBot, runId, line);
+        }
+      }
       if (event.type === "run.updated" && isTerminalRunStatus(event.payload.status)) {
         yield* finishRun(workBot, event.payload.id, event.payload.status);
       }

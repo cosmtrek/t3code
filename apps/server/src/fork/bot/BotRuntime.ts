@@ -16,10 +16,10 @@ import * as ServerConfig from "../../config.ts";
 import { writeCli } from "./cli.ts";
 import { BotStore } from "./store.ts";
 
-export interface BotEvent {
-  readonly type: "bots";
-  readonly botId: string;
-}
+/** `bots` says a bot changed, so views refetch; `bot-activity` carries its turn's latest line. */
+export type BotEvent =
+  | { readonly type: "bots"; readonly botId: string }
+  | { readonly type: "bot-activity"; readonly botId: string; readonly text: string };
 
 export interface BotRuntimeShape {
   readonly botsDir: string;
@@ -41,7 +41,10 @@ export interface BotRuntimeShape {
   readonly workThreads: Map<string, string>;
   /** Threads bots started, by id, to the bot that owns each. */
   readonly ownedThreads: Map<string, string>;
+  /** By bot: the latest line its work thread showed in a run, kept in memory only. */
+  readonly activity: Map<string, { readonly runId: string; readonly text: string }>;
   readonly publish: (botId: string) => void;
+  readonly publishActivity: (botId: string, runId: string, text: string) => void;
   readonly subscribe: (listener: (event: BotEvent) => void) => () => void;
 }
 
@@ -65,6 +68,7 @@ const make = Effect.gen(function* () {
   const turnLock = yield* Semaphore.make(1);
   const threadStartLock = yield* Semaphore.make(1);
   const listeners = new Set<(event: BotEvent) => void>();
+  const activity = new Map<string, { readonly runId: string; readonly text: string }>();
   let cliWritten = false;
 
   yield* Effect.addFinalizer(() => Effect.sync(() => store?.close()));
@@ -90,8 +94,13 @@ const make = Effect.gen(function* () {
     threadStartLock,
     workThreads,
     ownedThreads,
+    activity,
     publish: (botId) => {
       for (const listener of listeners) listener({ type: "bots", botId });
+    },
+    publishActivity: (botId, runId, text) => {
+      activity.set(botId, { runId, text });
+      for (const listener of listeners) listener({ type: "bot-activity", botId, text });
     },
     subscribe: (listener) => {
       listeners.add(listener);

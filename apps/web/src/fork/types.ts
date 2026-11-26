@@ -378,6 +378,8 @@ export interface BotDetail {
   readonly role: string;
   /** When its current turn started; null while idle. */
   readonly workingSince: string | null;
+  /** Its work thread's latest message in this turn; null while idle. */
+  readonly activity: string | null;
   /** Oldest first. */
   readonly chat: ReadonlyArray<BotChatMessage>;
   readonly notebook: BotNotebook;

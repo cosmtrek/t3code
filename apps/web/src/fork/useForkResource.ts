@@ -7,6 +7,8 @@ export interface ForkEvent {
   readonly type: string;
   readonly channelId?: string;
   readonly botId?: string;
+  /** A `bot-activity` event's line. */
+  readonly text?: string;
 }
 
 type Listener = (event: ForkEvent) => void;

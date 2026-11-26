@@ -100,7 +100,9 @@ async function harness(store = new BotStore(":memory:")): Promise<Harness> {
         .listBots()
         .flatMap((bot) => (bot.workThreadId === null ? [] : [[bot.workThreadId, bot.id] as const])),
     ),
+    activity: new Map(),
     publish: () => undefined,
+    publishActivity: (botId, runId, text) => runtime.activity.set(botId, { runId, text }),
     subscribe: () => () => undefined,
   };
   const packets: string[] = [];
@@ -622,6 +624,39 @@ describe("bot turns", () => {
         // A count left from an earlier day reads as none used today.
         h.runtime.store().countTurn(botId, "2000-01-01");
         expect((yield* read()).bot.turnsToday).toBe(0);
+      }),
+    ),
+  );
+
+  it.effect("shows its work thread's latest message while a turn runs", () =>
+    withHarness((h) =>
+      Effect.gen(function* () {
+        const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+        yield* Bots.sendMessage({ botId, text: "Clean up" });
+        const threadId = h.runtime.store().getBot(botId)!.workThreadId!;
+        const runId = h.runs[0]!.runId;
+        const item = (fields: Record<string, unknown>, run = runId) =>
+          ({ type: "turn-item.updated", threadId, payload: { runId: run, ...fields } }) as never;
+        const read = () => Bots.readBot(new URLSearchParams({ botId }));
+
+        // Streamed text, commands and other runs' messages leave the line alone.
+        yield* followThreads(
+          Stream.make(
+            item({ type: "assistant_message", streaming: true, text: "Half a thou" }),
+            item({
+              type: "assistant_message",
+              streaming: false,
+              text: "\n## Checking   the branch\nthen more",
+            }),
+            item({ type: "command_execution", status: "running", input: "git status" }),
+            item({ type: "assistant_message", streaming: false, text: "Elsewhere" }, "other-run"),
+          ),
+        );
+        expect((yield* read()).activity).toBe("Checking the branch");
+
+        // The line belongs to the turn: once it ends there is none.
+        yield* endRun(h, botId, 0, "Done.");
+        expect((yield* read()).activity).toBeNull();
       }),
     ),
   );

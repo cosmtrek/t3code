@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 import {
   useEffect,
+  useEffectEvent,
   useRef,
   useState,
   type CSSProperties,
@@ -108,7 +109,7 @@ import type {
   BotSettings,
   BotSummary,
 } from "../types";
-import { useForkResource, type ForkEvent } from "../useForkResource";
+import { subscribeToForkEvents, useForkResource, type ForkEvent } from "../useForkResource";
 import { BotComposer, type BotComposerHandle } from "./BotComposer";
 import { revealCitedText } from "./revealCitedText";
 
@@ -504,6 +505,23 @@ function BotChat({
     return () => document.removeEventListener("visibilitychange", markSeen);
   }, [environmentId, botId, lastPostId]);
   const workThreadId = data?.bot.workThreadId ?? null;
+  // Pushed between reads; a newer read carries the line too, so it wins.
+  const [pushed, setPushed] = useState<{
+    readonly read: BotDetail | null;
+    readonly text: string;
+  } | null>(null);
+  const onActivity = useEffectEvent((text: string) => setPushed({ read: data, text }));
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- follows the server's live status line for this bot's turn
+  useEffect(
+    () =>
+      subscribeToForkEvents(environmentId, (event) => {
+        if (event.type === "bot-activity" && event.botId === botId && event.text !== undefined) {
+          onActivity(event.text);
+        }
+      }),
+    [environmentId, botId],
+  );
+  const activity = pushed !== null && pushed.read === data ? pushed.text : (data?.activity ?? null);
 
   const send = async (message: string) => {
     setSending(true);
@@ -624,12 +642,17 @@ function BotChat({
                 question={question}
               />
             ))}
-            {data?.workingSince ? (
-              <WorkingRow environmentId={environmentId} since={data.workingSince} />
-            ) : null}
           </div>
         </div>
         <div className="mx-auto w-full max-w-3xl px-4 pb-4" onClickCapture={revealOnCitationClick}>
+          {data?.workingSince ? (
+            <WorkingRow
+              environmentId={environmentId}
+              since={data.workingSince}
+              activity={activity}
+              onOpen={workThreadId === null ? null : openWorkThread}
+            />
+          ) : null}
           {data?.bot.paused ? (
             <Alert variant="warning" className="mb-2">
               <PauseIcon />
@@ -687,21 +710,52 @@ function BotChat({
   );
 }
 
-/** The bot's turn in progress, where a thread shows its own. */
+/** The bot's turn in progress, held above the composer with its work thread's latest line. */
 function WorkingRow({
   environmentId,
   since,
+  activity,
+  onOpen,
 }: {
   readonly environmentId: EnvironmentId;
   readonly since: string;
+  readonly activity: string | null;
+  /** Opens the work thread the line comes from. */
+  readonly onOpen: (() => void) | null;
 }) {
   return (
-    <div className="border-b border-border/60 px-1 pb-2 text-sm text-muted-foreground">
-      Working for{" "}
-      <span
-        ref={tickTextContent(() => formatWorkingTimerNow(since, environmentId), true)}
-        className="tabular-nums"
-      />
+    <div className="flex min-w-0 items-baseline gap-1.5 px-1 pb-2 text-sm text-muted-foreground">
+      <span className="shrink-0">
+        Working for{" "}
+        <span
+          ref={tickTextContent(() => formatWorkingTimerNow(since, environmentId), true)}
+          className="tabular-nums"
+        />
+      </span>
+      {activity ? (
+        <>
+          <span aria-hidden className="shrink-0">
+            ·
+          </span>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <button
+                  type="button"
+                  disabled={onOpen === null}
+                  onClick={onOpen ?? undefined}
+                  className="min-w-0 truncate text-left text-foreground/80 enabled:hover:text-foreground"
+                />
+              }
+            >
+              {activity}
+            </TooltipTrigger>
+            <TooltipPopup side="top" className="max-w-md">
+              {activity}
+            </TooltipPopup>
+          </Tooltip>
+        </>
+      ) : null}
     </div>
   );
 }

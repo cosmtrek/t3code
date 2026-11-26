@@ -156,6 +156,7 @@ export function subscribeForkEvents(
     readonly type: string;
     readonly channelId?: string;
     readonly botId?: string;
+    readonly text?: string;
   }) => void,
 ): () => void {
   let closed = false;
