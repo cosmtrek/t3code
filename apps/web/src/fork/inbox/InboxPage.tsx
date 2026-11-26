@@ -3,7 +3,6 @@ import { Link, useNavigate } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
   BotIcon,
-  CheckCheckIcon,
   CircleCheckIcon,
   CopyIcon,
   EllipsisIcon,
@@ -82,7 +81,6 @@ import {
   delegationPath,
   discardDraft,
   discardDrafts,
-  markAllRead,
   markDelegationSeen,
   setConversationRead,
   settleDelegation,
@@ -355,14 +353,6 @@ function EnvironmentInboxView({
     );
     if (await discardDrafts(environmentId, drafted)) await listing.refresh();
   };
-  const onMarkAllRead = async () => {
-    if (await markAllRead(environmentId, channel.id, conversations, delegations)) {
-      await listing.refresh();
-    }
-  };
-  const anyUnread =
-    conversations.some((candidate) => candidate.unread || candidate.mentioned) ||
-    delegations.some((candidate) => candidate.agentUnseen);
 
   let list: ReactNode;
   if (!channel.access.read) {
@@ -438,16 +428,17 @@ function EnvironmentInboxView({
             ) : (
               <span className="min-w-0 truncate text-xs text-muted-foreground">{channel.name}</span>
             )}
-            <IconAction
-              label="Mark all as read"
-              className="ms-auto"
-              disabled={!anyUnread}
-              onClick={() => void onMarkAllRead()}
-            >
-              <CheckCheckIcon />
-            </IconAction>
             <Menu>
-              <MenuTrigger render={<Button size="xs" variant="ghost-muted" aria-label="Filters" />}>
+              <MenuTrigger
+                render={
+                  <Button
+                    size="xs"
+                    variant="ghost-muted"
+                    aria-label="Filters"
+                    className="ms-auto"
+                  />
+                }
+              >
                 <ListFilterIcon />
                 {filter === "all" ? null : (
                   <span>{INBOX_FILTERS.find((option) => option.id === filter)?.label}</span>

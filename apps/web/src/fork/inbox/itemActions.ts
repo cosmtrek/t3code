@@ -77,31 +77,6 @@ export async function settleDelegation(
   }
 }
 
-/** Reads everything up to the newest message or run end the user saw in the lists. */
-export async function markAllRead(
-  environmentId: EnvironmentId,
-  channelId: string,
-  conversations: ReadonlyArray<InboxConversation>,
-  delegations: ReadonlyArray<InboxDelegation>,
-): Promise<boolean> {
-  const times = [
-    ...conversations.map((conversation) => Date.parse(conversation.lastMessage?.createdAt ?? "")),
-    ...delegations.map((delegation) => Date.parse(delegation.thread?.runCompletedAt ?? "")),
-  ];
-  const newest = Math.max(...times.filter(Number.isFinite));
-  if (!Number.isFinite(newest)) return true;
-  try {
-    await forkRequest(environmentId, "/inbox/read-all", {
-      method: "POST",
-      body: { channelId, before: new Date(newest).toISOString() },
-    });
-    return true;
-  } catch (error) {
-    fail("Could not mark everything read", error);
-    return false;
-  }
-}
-
 export async function copyDelegationContext(detail: DelegationDetail) {
   try {
     await navigator.clipboard.writeText(messagesAsText(detail.conversation.name, detail.messages));

@@ -156,7 +156,8 @@ last looked. Each mark moves forward only and compares with one kind of time:
   delegation mid-run leaves the run's result unseen once it finishes. Stopped, cancelled, and
   rolled-back runs and background-work wakes have nothing new and do not count.
 - `read_all_before` starts a week before the channel is first read, so connecting a channel does
-  not flood the list, and "Mark all as read" moves it. It also covers run ends.
+  not flood the list. The server's read-all endpoint moves it, though no client calls it now. It
+  also covers run ends.
 
 The client reports reads; fetching never does, since polls and background tabs fetch too. A
 message that arrives while a conversation is open stays unread until the user acts on it again.

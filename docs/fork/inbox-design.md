@@ -93,8 +93,8 @@ for, from one definition that also decides Needs you:
 - The marker on the message and the header's menu show every state.
 - T3 Code's own thread status (sidebar, the thread's header and chat) is left as it is.
 
-Opening a conversation reads it; there is no per-row mark read or unread, and "Mark all as read"
-in the header is the only bulk triage.
+Opening a conversation reads it. There is no mark read or unread, per row or for the whole list:
+the user never used them, and the Needs you group already says what is left.
 
 ### Where things open
 
