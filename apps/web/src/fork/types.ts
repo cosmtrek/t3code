@@ -1,4 +1,5 @@
 import type { ModelSelection, RuntimeMode } from "@t3tools/contracts";
+import type { HtmlRenderReference } from "@t3tools/shared/htmlRender";
 
 /**
  * Responses of `/api/fork/*`, mirrored from apps/server/src/fork (channels/hub.ts,
@@ -359,6 +360,8 @@ export interface BotChatMessage {
   readonly createdAt: string;
   /** For a user message: the turn that took it; null while it waits for one. */
   readonly turnRunId: string | null;
+  /** Pages its work thread showed with `html_render`, drawn above the text. */
+  readonly renders?: ReadonlyArray<HtmlRenderReference>;
 }
 
 export interface BotDetail {
@@ -373,7 +376,8 @@ export interface BotDetail {
     readonly turnsToday: number;
   };
   readonly role: string;
-  readonly working: boolean;
+  /** When its current turn started; null while idle. */
+  readonly workingSince: string | null;
   /** Oldest first. */
   readonly chat: ReadonlyArray<BotChatMessage>;
   readonly notebook: BotNotebook;

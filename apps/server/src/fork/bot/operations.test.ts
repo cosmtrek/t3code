@@ -41,6 +41,8 @@ interface Harness {
   /** Runs and their assistant replies, as T3 would answer for them. */
   readonly runStatus: Map<string, OrchestrationV2RunStatus>;
   readonly replies: Map<string, string>;
+  /** Pages each run showed with `html_render`, as its completed tool items. */
+  readonly pages: Map<string, Array<{ attachmentId: string; title: string; height: number }>>;
   /** Thread shells, as reconcile reads them after a restart. */
   readonly shells: Map<string, { latestRunId: string; status: string }>;
   /** Messages typed with the user role in a thread, for the takeover check. */
@@ -100,6 +102,7 @@ async function harness(store = new BotStore(":memory:")): Promise<Harness> {
   const runs: Array<{ threadId: string; runId: string }> = [];
   const runStatus = new Map<string, OrchestrationV2RunStatus>();
   const replies = new Map<string, string>();
+  const pages: Harness["pages"] = new Map();
   const shells = new Map<string, { latestRunId: string; status: string }>();
   const userMessages = new Map<string, Array<UserMessage>>();
   const projects: Harness["projects"] = [];
@@ -147,6 +150,12 @@ async function harness(store = new BotStore(":memory:")): Promise<Harness> {
                     ? [{ text: replies.get(id), createdAt: DateTime.makeUnsafe(0) }]
                     : [],
                 ),
+          turnItems: (pages.get(filter?.turnItemRunId ?? "") ?? []).map((htmlRender) => ({
+            type: "dynamic_tool",
+            status: "completed",
+            toolName: "mcp__t3-code__html_render",
+            output: { structuredContent: { htmlRender }, content: [] },
+          })),
         } as never),
     }),
     Layer.mock(ThreadLaunch.ThreadLaunchService)({
@@ -189,6 +198,7 @@ async function harness(store = new BotStore(":memory:")): Promise<Harness> {
     runs,
     runStatus,
     replies,
+    pages,
     shells,
     userMessages,
     steerDelivery: "queued",
@@ -436,6 +446,39 @@ describe("bot turns", () => {
             .listMemory(botId)
             .map((note) => note.text),
         ).toEqual(["The user is in UTC+8."]);
+      }),
+    ),
+  );
+
+  it.effect("posts the pages its work thread showed with its reply, each once", () =>
+    withHarness((h) =>
+      Effect.gen(function* () {
+        const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+        const page = (id: string) => ({ attachmentId: id, title: `Map ${id}`, height: 400 });
+        const rendersOf = () =>
+          h.runtime
+            .store()
+            .recentChat(botId, 100)
+            .map((message) => message.renders?.map((render) => render.attachmentId) ?? []);
+
+        yield* Bots.sendMessage({ botId, text: "Draw the map." });
+        h.pages.set(h.runs[0]!.runId, [page("a")]);
+        yield* runTool({ bot: botId, argv: ["say", "Here it is."], stdin: "" });
+        h.pages.set(h.runs[0]!.runId, [page("a"), page("b")]);
+        yield* endRun(h, botId, 0, null);
+
+        yield* Bots.sendMessage({ botId, text: "Again, plainly." });
+        h.pages.set(h.runs[1]!.runId, [page("c")]);
+        yield* endRun(h, botId, 1, "Redrawn.");
+
+        expect(chatOf(h, botId)).toEqual([
+          ["user", "Draw the map."],
+          ["bot", "Here it is."],
+          ["bot", ""],
+          ["user", "Again, plainly."],
+          ["bot", "Redrawn."],
+        ]);
+        expect(rendersOf()).toEqual([[], ["a"], ["b"], [], ["c"]]);
       }),
     ),
   );

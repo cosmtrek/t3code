@@ -8,6 +8,7 @@ import * as NodePath from "node:path";
 import * as NodeSqlite from "node:sqlite";
 
 import type { ModelSelection, RuntimeMode } from "@t3tools/contracts";
+import type { HtmlRenderReference } from "@t3tools/shared/htmlRender";
 
 import type { PacketSections } from "./packet.ts";
 
@@ -128,6 +129,8 @@ export interface ChatMessage {
   readonly createdAt: string;
   /** For a user message: the run of the turn that took it; null while it waits. */
   readonly turnRunId: string | null;
+  /** Pages its work thread showed with `html_render`, shown above the text. */
+  readonly renders?: ReadonlyArray<HtmlRenderReference>;
 }
 
 export interface Turn {
@@ -327,6 +330,7 @@ const MIGRATIONS: ReadonlyArray<string> = [
      sent_at TEXT NOT NULL,
      PRIMARY KEY (channel_id, message_id)
    );`,
+  `ALTER TABLE chat ADD COLUMN renders TEXT;`,
 ];
 
 type Row = Record<string, NodeSqlite.SQLOutputValue>;
@@ -357,6 +361,9 @@ function toChat(row: Row): ChatMessage {
     text: text(row, "text"),
     createdAt: text(row, "created_at"),
     turnRunId: nullableText(row, "turn_run_id"),
+    ...(row.renders === null || row.renders === undefined
+      ? {}
+      : { renders: JSON.parse(text(row, "renders")) as ReadonlyArray<HtmlRenderReference> }),
   };
 }
 
@@ -579,10 +586,36 @@ export class BotStore {
   addChat(message: Omit<ChatMessage, "turnRunId">) {
     this.db
       .prepare(
-        `INSERT INTO chat (id, bot_id, seq, role, text, created_at)
-         VALUES (?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM chat WHERE bot_id = ?), ?, ?, ?)`,
+        `INSERT INTO chat (id, bot_id, seq, role, text, created_at, renders)
+         VALUES (?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM chat WHERE bot_id = ?), ?, ?, ?, ?)`,
       )
-      .run(message.id, message.botId, message.botId, message.role, message.text, message.createdAt);
+      .run(
+        message.id,
+        message.botId,
+        message.botId,
+        message.role,
+        message.text,
+        message.createdAt,
+        message.renders === undefined || message.renders.length === 0
+          ? null
+          : JSON.stringify(message.renders),
+      );
+  }
+
+  /** The pages already posted since `since`, by attachment id. */
+  postedRenderIds(botId: string, since: string): ReadonlySet<string> {
+    const rows = this.db
+      .prepare(
+        "SELECT renders FROM chat WHERE bot_id = ? AND created_at >= ? AND renders IS NOT NULL",
+      )
+      .all(botId, since) as Row[];
+    return new Set(
+      rows.flatMap((row) =>
+        (JSON.parse(text(row, "renders")) as ReadonlyArray<HtmlRenderReference>).map(
+          (render) => render.attachmentId,
+        ),
+      ),
+    );
   }
 
   /** The latest `limit` messages, oldest first. */
@@ -679,12 +712,12 @@ export class BotStore {
   }
 
   /** Ends the turn and posts what it said, together, so a restart never posts it twice. */
-  endTurn(botId: string, runId: string, reply: Omit<ChatMessage, "turnRunId"> | null) {
+  endTurn(botId: string, runId: string, replies: ReadonlyArray<Omit<ChatMessage, "turnRunId">>) {
     this.transaction(() => {
       const ended = this.db
         .prepare("DELETE FROM turns WHERE bot_id = ? AND run_id = ?")
         .run(botId, runId);
-      if (Number(ended.changes) > 0 && reply !== null) this.addChat(reply);
+      if (Number(ended.changes) > 0) for (const reply of replies) this.addChat(reply);
     });
   }
 

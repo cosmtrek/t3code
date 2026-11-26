@@ -69,7 +69,8 @@ const line = (message: ChatMessage) => {
   const data = expanded.indexOf("\n\n<assistant_citations>");
   const words = data === -1 ? expanded : expanded.slice(0, data);
   const citations = data === -1 ? "" : expanded.slice(data);
-  return `- ${speaker(message)} (${message.createdAt}): ${clip(words)}${citations}`;
+  const pages = (message.renders ?? []).map((render) => ` [page shown: ${render.title}]`).join("");
+  return `- ${speaker(message)} (${message.createdAt}):${pages} ${clip(words)}${citations}`;
 };
 
 /** A message as one line of plain text, its citations as their quoted words and comments. */

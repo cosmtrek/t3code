@@ -38,7 +38,9 @@ import {
 } from "../../components/chat/runtimeModeConfig";
 import { AssistantSelectionToolbar } from "../../components/chat/AssistantSelectionToolbar";
 import ChatMarkdown from "../../components/ChatMarkdown";
+import { HtmlRenderFrame } from "../../components/chat/HtmlRenderFrame";
 import { RightPanelResizeHandle } from "../../components/preview/RightPanelResizeHandle";
+import { Alert, AlertAction, AlertDescription } from "../../components/ui/alert";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import {
@@ -77,6 +79,8 @@ import {
   NumberFieldInput,
 } from "../../components/ui/number-field";
 import { Spinner } from "../../components/ui/spinner";
+import { formatWorkingTimerNow } from "../../components/chat/TimelineWorkGroupRows.logic";
+import { tickTextContent } from "../../lib/tickTextContent";
 import { Switch } from "../../components/ui/switch";
 import { Textarea } from "../../components/ui/textarea";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../../components/ui/tooltip";
@@ -280,15 +284,16 @@ function EnvironmentBots({
               <span className="min-w-0 flex-1">
                 <span className="block truncate text-sm">{candidate.name}</span>
                 <span className="block truncate text-xs text-muted-foreground">
-                  {candidate.paused
-                    ? "Paused"
-                    : candidate.working
-                      ? "Working…"
-                      : candidate.lastMessage
-                        ? candidate.lastMessage.text.replace(/[`*_#>]/g, "")
-                        : "New"}
+                  {candidate.lastMessage
+                    ? candidate.lastMessage.text.replace(/[`*_#>]/g, "")
+                    : "New"}
                 </span>
               </span>
+              {candidate.working ? (
+                <Spinner size="sm" aria-label="Working" />
+              ) : candidate.paused ? (
+                <PauseIcon aria-label="Paused" className="size-3 shrink-0 text-muted-foreground" />
+              ) : null}
               {candidate.unread > 0 ? <UnreadCount count={candidate.unread} /> : null}
             </button>
           ))}
@@ -550,14 +555,6 @@ function BotChat({
           <h2 className="min-w-0 flex-1 truncate px-1 text-sm font-medium">
             {data?.bot.name ?? ""}
           </h2>
-          {data?.bot.paused ? (
-            <Badge variant="warning">Paused</Badge>
-          ) : data?.working ? (
-            <span className="flex items-center gap-1.5 px-1 text-xs text-muted-foreground">
-              <Spinner size="sm" />
-              Working
-            </span>
-          ) : null}
           <Menu>
             <MenuTrigger
               render={<Button size="icon-xs" variant="ghost" aria-label="Bot actions" />}
@@ -627,9 +624,25 @@ function BotChat({
                 question={question}
               />
             ))}
+            {data?.workingSince ? (
+              <WorkingRow environmentId={environmentId} since={data.workingSince} />
+            ) : null}
           </div>
         </div>
         <div className="mx-auto w-full max-w-3xl px-4 pb-4" onClickCapture={revealOnCitationClick}>
+          {data?.bot.paused ? (
+            <Alert variant="warning" className="mb-2">
+              <PauseIcon />
+              <AlertDescription>
+                Paused. New messages and routines wait until you resume.
+              </AlertDescription>
+              <AlertAction>
+                <Button size="xs" variant="outline" onClick={() => void setPaused(false)}>
+                  Resume
+                </Button>
+              </AlertAction>
+            </Alert>
+          ) : null}
           <BotComposer
             ref={composerRef}
             draftKey={`${environmentId}:${botId}`}
@@ -674,6 +687,25 @@ function BotChat({
   );
 }
 
+/** The bot's turn in progress, where a thread shows its own. */
+function WorkingRow({
+  environmentId,
+  since,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly since: string;
+}) {
+  return (
+    <div className="border-b border-border/60 px-1 pb-2 text-sm text-muted-foreground">
+      Working for{" "}
+      <span
+        ref={tickTextContent(() => formatWorkingTimerNow(since, environmentId), true)}
+        className="tabular-nums"
+      />
+    </div>
+  );
+}
+
 function ChatLine({
   message,
   environmentId,
@@ -707,12 +739,25 @@ function ChatLine({
     return <p className="text-sm text-destructive-foreground">{message.text}</p>;
   }
   return (
-    <div
-      data-assistant-citation-source={message.id}
-      data-assistant-citation-environment={environmentId}
-      data-assistant-citation-thread={botId}
-    >
-      <ChatMarkdown text={message.text} cwd={undefined} className="text-sm" />
+    <div className="flex flex-col gap-3">
+      {message.renders?.map((render) => (
+        <div key={render.attachmentId} className="html-preview-lane min-w-0">
+          <HtmlRenderFrame
+            environmentId={environmentId}
+            htmlRender={render}
+            threadRef={undefined}
+          />
+        </div>
+      ))}
+      {message.text === "" ? null : (
+        <div
+          data-assistant-citation-source={message.id}
+          data-assistant-citation-environment={environmentId}
+          data-assistant-citation-thread={botId}
+        >
+          <ChatMarkdown text={message.text} cwd={undefined} className="text-sm" />
+        </div>
+      )}
     </div>
   );
 }

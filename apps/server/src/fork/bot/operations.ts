@@ -9,6 +9,7 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 
 import { expandAssistantCitationsForProvider } from "@t3tools/shared/assistantCitations";
+import { htmlRenderFromToolItem } from "@t3tools/shared/toolOutput";
 
 import {
   CommandId,
@@ -42,6 +43,7 @@ import {
   type BotSettings,
   type ChatMessage,
   type ConnectorSettings,
+  type Turn,
 } from "./store.ts";
 
 /** Chat shown on the Bots page; older messages stay in the store. */
@@ -192,7 +194,7 @@ export const listBots = Effect.fn("ForkBot.listBots")(function* () {
       lastMessage: last
         ? {
             role: last.role,
-            text: chatPreview(last.text),
+            text: chatPreview(last.text) || (last.renders?.[0]?.title ?? ""),
             createdAt: last.createdAt,
           }
         : null,
@@ -210,7 +212,7 @@ export const readBot = Effect.fn("ForkBot.readBot")(function* (params: URLSearch
     // A count from an earlier day is spent: today starts at zero.
     bot: { ...bot, turnsToday: bot.lastTurnDay === localDay(new Date()) ? bot.turnsToday : 0 },
     role: yield* readRole(runtime.botsDir, bot.id),
-    working: store.getTurn(bot.id) !== null,
+    workingSince: store.getTurn(bot.id)?.startedAt ?? null,
     chat: store.recentChat(bot.id, CHAT_PAGE),
     notebook: yield* readNotebook(bot.id),
     questions: store.openQuestions(bot.id),
@@ -591,6 +593,34 @@ const replyOf = Effect.fn("ForkBot.replyOf")(function* (
   return last?.text.trim() ?? null;
 });
 
+/**
+ * The pages the turn's run showed with `html_render` that its chat does not have yet. The work
+ * thread shows them above the reply; the chat is where the user reads that reply.
+ */
+export const unpostedRenders = Effect.fn("ForkBot.unpostedRenders")(function* (
+  bot: Bot,
+  turn: Turn,
+) {
+  if (bot.workProjectId === null) return [];
+  const threads = yield* ThreadManagement.ThreadManagementService;
+  const records = yield* threads
+    .getProjectThreadRecords(
+      { projectId: ProjectId.make(bot.workProjectId), threadId: ThreadId.make(turn.threadId) },
+      ["turnItems"],
+      {
+        turnItemRunId: RunId.make(turn.runId),
+        turnItemTypes: ["dynamic_tool"],
+        turnItemStatuses: ["completed"],
+      },
+    )
+    .pipe(Effect.orElseSucceed(() => ({ turnItems: [] })));
+  const posted = (yield* BotRuntime).store().postedRenderIds(bot.id, turn.startedAt);
+  return records.turnItems.flatMap((item) => {
+    const render = item.type === "dynamic_tool" ? htmlRenderFromToolItem(item) : undefined;
+    return render === undefined || posted.has(render.attachmentId) ? [] : [render];
+  });
+});
+
 /** What a turn ends with when it has nothing worth telling the user. */
 export const NO_REPLY = "NO_REPLY";
 
@@ -640,11 +670,26 @@ export const finishRun = Effect.fn("ForkBot.finishRun")(function* (
               : null;
       // A turn that did not complete may have lost what it was sent; the next one resends it all.
       if (status !== "completed") store.setSeenPacket(botId, null);
-      store.endTurn(
+      const renders = yield* unpostedRenders(bot, turn);
+      const message = (fields: { readonly role: "bot" | "error"; readonly text: string }) => ({
+        id: newId("msg"),
         botId,
-        runId,
-        post === null ? null : { id: newId("msg"), botId, createdAt: nowIso(), ...post },
-      );
+        createdAt: nowIso(),
+        ...fields,
+      });
+      store.endTurn(botId, runId, [
+        ...(renders.length > 0 && post?.role !== "bot"
+          ? [{ ...message({ role: "bot", text: "" }), renders }]
+          : []),
+        ...(post === null
+          ? []
+          : [
+              {
+                ...message(post),
+                ...(post.role === "bot" && renders.length > 0 ? { renders } : {}),
+              },
+            ]),
+      ]);
       return true;
     }),
   );
