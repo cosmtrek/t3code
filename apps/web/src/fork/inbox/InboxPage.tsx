@@ -574,27 +574,17 @@ function EnvironmentInboxView({
                   <LocateFixedIcon />
                 </IconAction>
               ) : null}
-              {delegation.thread && delegation.thread.status !== "deleted" ? (
-                <IconAction
-                  label="Open thread"
-                  onClick={() =>
-                    void navigate({
-                      to: "/$environmentId/$threadId",
-                      params: {
-                        environmentId,
-                        threadId: ThreadId.make(delegation.thread!.threadId),
-                      },
-                    })
-                  }
-                >
-                  <ExternalLinkIcon />
-                </IconAction>
-              ) : null}
               {detail.data && detail.data.delegation.id === delegation.id ? (
                 <DelegationActions
                   detail={detail.data}
                   settled={delegation.settledAt !== null}
                   readOnly={readOnly}
+                  onOpenThread={(threadId) =>
+                    void navigate({
+                      to: "/$environmentId/$threadId",
+                      params: { environmentId, threadId: ThreadId.make(threadId) },
+                    })
+                  }
                   onDelegateAgain={(target) => setDelegating(target)}
                   onSettle={(settled) => void onSettle(delegation, settled)}
                 />
@@ -755,18 +745,21 @@ function DelegationActions({
   detail,
   settled,
   readOnly,
+  onOpenThread,
   onDelegateAgain,
   onSettle,
 }: {
   readonly detail: DelegationDetail;
   readonly settled: boolean;
   readonly readOnly: boolean;
+  readonly onOpenThread: (threadId: string) => void;
   readonly onDelegateAgain: (target: DelegateTarget) => void;
   readonly onSettle: (settled: boolean) => void;
 }) {
   const anchor = detail.messages.find(
     (message) => message.id === detail.delegation.anchorMessageId,
   );
+  const thread = detail.delegation.thread;
   return (
     <>
       {settled ? (
@@ -785,6 +778,12 @@ function DelegationActions({
           <EllipsisIcon />
         </MenuTrigger>
         <MenuPopup align="end">
+          {thread && thread.status !== "deleted" ? (
+            <MenuItem onClick={() => onOpenThread(thread.threadId)}>
+              <ExternalLinkIcon />
+              Open thread
+            </MenuItem>
+          ) : null}
           <MenuItem onClick={() => void copyDelegationContext(detail)}>
             <CopyIcon />
             Copy the messages
