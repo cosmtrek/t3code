@@ -30,12 +30,11 @@ import type {
   Upload,
 } from "../types";
 import { useForkResource, type ForkRefreshFilter } from "../useForkResource";
-import { ThreadStatus } from "./DelegationPane";
 import { IconAction } from "./IconAction";
 import { useFormatTimestamp } from "../presentation";
-import { AgentBadge, ConversationMenu, DelegationOutcome } from "./InboxList";
+import { ConversationMenu, FollowUpStatus } from "./InboxList";
 import {
-  agentSignalsFor,
+  topFollowUp,
   conversationRows,
   delegationPreview,
   mentionsIn,
@@ -65,10 +64,15 @@ export interface ConversationPaneHandlers {
   readonly onSetRead: (conversation: InboxConversation, read: boolean) => void;
   readonly onDiscardDrafts: (conversation: InboxConversation) => void;
   readonly onSelectDelegation: (delegation: InboxDelegation) => void;
-  /** Delegate starting at `message`; `later` is what the chat shows after it. */
+  /** Follow up starting at `message`; `later` is what the chat shows after it. */
   readonly onDelegate: (message: InboxMessage, later: ReadonlyArray<InboxMessage>) => void;
   /** The user acts in the conversation, such as starting a reply: what arrived since is read. */
   readonly onEngage: () => void;
+}
+
+/** Scroll the chat to a message; each request is its own object, so asking again scrolls again. */
+export interface FocusRequest {
+  readonly messageId: string;
 }
 
 /** What the reply box should hold; a new `nonce` replaces what it holds. */
@@ -181,7 +185,7 @@ export function ConversationPane({
   delegations,
   selectedDelegationId,
   onCloseDelegation,
-  focusMessageId,
+  focus,
   newSince,
   readOnly,
   capabilities,
@@ -194,8 +198,8 @@ export function ConversationPane({
   readonly delegations: ReadonlyArray<InboxDelegation>;
   readonly selectedDelegationId: string | null;
   readonly onCloseDelegation: () => void;
-  /** The selected delegation's first message, scrolled to and marked. */
-  readonly focusMessageId: string | null;
+  /** A message the user asked to see, scrolled to and marked; null opens at the reading place. */
+  readonly focus: FocusRequest | null;
   /** The read mark when the reader opened the conversation; what came after it is new. */
   readonly newSince: string | null;
   readonly readOnly: boolean;
@@ -241,7 +245,7 @@ export function ConversationPane({
             />
           ) : null}
         </div>
-        <ConversationDelegationsControl
+        <FollowUpsControl
           environmentId={environmentId}
           conversation={conversation}
           delegations={delegations}
@@ -262,7 +266,7 @@ export function ConversationPane({
           environmentId={environmentId}
           conversation={conversation}
           delegations={delegations}
-          focusMessageId={focusMessageId}
+          focus={focus}
           newSince={newSince}
           readOnly={readOnly}
           handlers={handlers}
@@ -286,7 +290,8 @@ export function ConversationPane({
   );
 }
 
-function ConversationDelegationsControl({
+/** The conversation's follow-ups: the one that matters most, and the way to open them. */
+function FollowUpsControl({
   environmentId,
   conversation,
   delegations,
@@ -302,59 +307,62 @@ function ConversationDelegationsControl({
   readonly onClose: () => void;
 }) {
   if (delegations.length === 0) return null;
-  const raw = agentSignalsFor(delegations);
-  const signals = raw.live > 0 ? raw : { ...raw, live: delegations.length };
+  const top = topFollowUp(delegations) ?? delegations[0]!;
   const active = delegations.some((delegation) => delegation.id === selectedDelegationId);
+  const label = (
+    <>
+      <FollowUpStatus environmentId={environmentId} delegation={top} idle="Following" />
+      {delegations.length > 1 ? (
+        <span className="text-muted-foreground tabular-nums">
+          {delegations.filter((delegation) => delegation.settledAt === null).length}/
+          {delegations.length}
+        </span>
+      ) : null}
+    </>
+  );
   if (delegations.length === 1) {
-    const only = delegations[0]!;
     return (
       <Button
         size="xs"
         variant="ghost"
+        aria-label="Follow-up"
         aria-pressed={active}
         data-pressed={active ? "" : undefined}
-        onClick={() => (active ? onClose() : onSelect(only))}
+        onClick={() => (active ? onClose() : onSelect(top))}
       >
-        <AgentBadge signals={signals} />
+        {label}
       </Button>
     );
   }
   return (
     <Menu>
       <MenuTrigger
-        render={<Button size="xs" variant="ghost" data-pressed={active ? "" : undefined} />}
+        render={
+          <Button
+            size="xs"
+            variant="ghost"
+            aria-label="Follow-ups"
+            data-pressed={active ? "" : undefined}
+          />
+        }
       >
-        <AgentBadge signals={signals} />
+        {label}
       </MenuTrigger>
       <MenuPopup align="end">
-        {delegations.map((delegation) => {
-          const live =
-            delegation.thread !== null && delegation.thread.detachedAt === null
-              ? delegation.thread
-              : null;
-          return (
-            <MenuItem key={delegation.id} onClick={() => onSelect(delegation)}>
-              <span className="flex w-full max-w-72 min-w-0 items-center gap-2">
-                <span className="min-w-0 flex-1 truncate">
-                  {delegationPreview(
-                    conversation.name,
-                    delegation.preview,
-                    delegation.thread?.title ?? null,
-                  )}
-                </span>
-                {live ? (
-                  <ThreadStatus
-                    environmentId={environmentId}
-                    thread={live}
-                    fallback={<DelegationOutcome delegation={delegation} />}
-                  />
-                ) : (
-                  <DelegationOutcome delegation={delegation} />
+        {delegations.map((delegation) => (
+          <MenuItem key={delegation.id} onClick={() => onSelect(delegation)}>
+            <span className="flex w-full max-w-72 min-w-0 items-center gap-2">
+              <span className="min-w-0 flex-1 truncate">
+                {delegationPreview(
+                  conversation.name,
+                  delegation.preview,
+                  delegation.thread?.title ?? null,
                 )}
               </span>
-            </MenuItem>
-          );
-        })}
+              <FollowUpStatus environmentId={environmentId} delegation={delegation} />
+            </span>
+          </MenuItem>
+        ))}
       </MenuPopup>
     </Menu>
   );
@@ -375,7 +383,7 @@ function ConversationMessages({
   environmentId,
   conversation,
   delegations,
-  focusMessageId,
+  focus,
   newSince,
   readOnly,
   handlers,
@@ -386,7 +394,7 @@ function ConversationMessages({
   readonly environmentId: EnvironmentId;
   readonly conversation: InboxConversation;
   readonly delegations: ReadonlyArray<InboxDelegation>;
-  readonly focusMessageId: string | null;
+  readonly focus: FocusRequest | null;
   readonly newSince: string | null;
   readonly readOnly: boolean;
   readonly handlers: ConversationPaneHandlers;
@@ -408,10 +416,14 @@ function ConversationMessages({
   const loadingOlder = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const key = placeKey(environmentId, conversation.channelId, conversation.id);
+  const focusMessageId = focus?.messageId ?? null;
   // Coming back to a conversation keeps the reader's place over the focus it was opened with.
-  const restore = useRef<{ readonly place: Place | undefined; focus: string | null | undefined }>({
+  const restore = useRef<{
+    readonly place: Place | undefined;
+    focus: FocusRequest | null | undefined;
+  }>({
     place: places.get(key),
-    focus: places.has(key) ? focusMessageId : undefined,
+    focus: places.has(key) ? focus : undefined,
   });
   // Distance from the bottom to keep while older messages are added above.
   const restoreFromBottom = useRef<number | null>(null);
@@ -528,7 +540,7 @@ function ConversationMessages({
       // The message was on a page not read again; open as if new.
       restore.current.focus = undefined;
     }
-    if (focusMessageId === restore.current.focus) return;
+    if (focus === restore.current.focus) return;
     restore.current.focus = undefined;
     const target =
       focusShown && focusMessageId !== null
@@ -539,7 +551,7 @@ function ConversationMessages({
     else if (focusMessageId === null && newLine.current) newLine.current.scrollIntoView();
     else container.scrollTop = container.scrollHeight;
     atBottom.current = isAtBottom(container);
-  }, [focusMessageId, loaded, focusShown]);
+  }, [focus, focusMessageId, loaded, focusShown]);
 
   const toolbarFor = (row: ConversationRow, later: ReadonlyArray<ConversationRow>) => (
     <MessageToolbar
@@ -587,6 +599,8 @@ function ConversationMessages({
     previous: ConversationRow | undefined,
     later: ReadonlyArray<ConversationRow>,
     rootId: string | null = null,
+    // A message with replies shows its follow-ups beside the reply count instead.
+    withChips = true,
   ) => {
     const sameAuthor = previous?.message.author.id === row.message.author.id;
     const continued =
@@ -616,7 +630,7 @@ function ConversationMessages({
           quote={rootId !== null && row.message.replyTo?.id === rootId ? null : row.quote}
           toolbar={toolbarFor(row, later)}
         >
-          {chipsFor(row)}
+          {withChips ? chipsFor(row) : null}
         </MessageView>
       </li>
     );
@@ -805,22 +819,33 @@ function ConversationMessages({
                     row,
                     timeBreak || index === firstNew ? undefined : previous,
                     rows.slice(index + 1),
+                    null,
+                    row.thread.length === 0,
                   )}
                   {row.thread.length > 0 ? (
                     <li className="-ms-[3px] mt-1 flex min-w-0 flex-col gap-3">
-                      <Button
-                        size="xs"
-                        variant="ghost-muted"
-                        className="self-start"
-                        aria-expanded={open}
-                        onClick={() => toggle(row.message.id)}
-                      >
-                        {replies} {replies === 1 ? "reply" : "replies"}
-                        {!open && row.thread.some((reply) => reply.message.mentionsSelf) ? (
-                          <Badge size="sm">@you</Badge>
-                        ) : null}
-                        <ChevronDownIcon className={cn(open && "rotate-180")} />
-                      </Button>
+                      <span className="flex min-w-0 flex-wrap items-center gap-1">
+                        <Button
+                          size="xs"
+                          variant="ghost-muted"
+                          aria-expanded={open}
+                          onClick={() => toggle(row.message.id)}
+                        >
+                          {replies} {replies === 1 ? "reply" : "replies"}
+                          {!open && row.thread.some((reply) => reply.message.mentionsSelf) ? (
+                            <Badge size="sm">@you</Badge>
+                          ) : null}
+                          <ChevronDownIcon className={cn(open && "rotate-180")} />
+                        </Button>
+                        {row.delegations.map((delegation) => (
+                          <DelegationChip
+                            key={delegation.id}
+                            environmentId={environmentId}
+                            delegation={delegation}
+                            onSelect={handlers.onSelectDelegation}
+                          />
+                        ))}
+                      </span>
                       {open ? (
                         <ol className="ms-2 flex flex-col border-s border-border/70 ps-2">
                           {row.thread.map((reply, at) =>
@@ -872,19 +897,9 @@ function DelegationChip({
   readonly delegation: InboxDelegation;
   readonly onSelect: (delegation: InboxDelegation) => void;
 }) {
-  const live =
-    delegation.thread !== null && delegation.thread.detachedAt === null ? delegation.thread : null;
   return (
     <Button size="xs" variant="ghost-muted" onClick={() => onSelect(delegation)}>
-      {live ? (
-        <ThreadStatus
-          environmentId={environmentId}
-          thread={live}
-          fallback={<DelegationOutcome delegation={delegation} idle="Delegated" />}
-        />
-      ) : (
-        <DelegationOutcome delegation={delegation} idle="Delegated" />
-      )}
+      <FollowUpStatus environmentId={environmentId} delegation={delegation} idle="Following" />
     </Button>
   );
 }
@@ -918,7 +933,7 @@ function MessageToolbar({
           <MessageSquareReplyIcon />
         </IconAction>
       ) : null}
-      <IconAction label="Delegate" disabled={readOnly} onClick={onDelegate}>
+      <IconAction label="Follow up" disabled={readOnly} onClick={onDelegate}>
         <BotIcon />
       </IconAction>
       {message.openUrl ? (

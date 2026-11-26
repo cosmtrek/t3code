@@ -113,8 +113,8 @@ Two bridges connect bots and the inbox, so each signal still has one place:
   in the follow-up's panel, and count on the inbox, not on the Bots entry. The bot's chat keeps a
   one-line reference to each (asked, answered, sent) that opens the conversation, so the chat still
   reads as a full log, and the answer reaches the bot's next wake as it would from its chat.
-- **Done is the user's.** The bot may propose that a follow-up is done; the user confirms it. A
-  per-bot permission to close follow-ups without asking can come later.
+- **Settling is the user's.** The bot may propose settling a follow-up; the user confirms it. A
+  per-bot permission to settle follow-ups without asking can come later.
 - **Bot to inbox.** When a bot cites or answers a chat message outside a follow-up, its chat shows
   a quote that opens that conversation in the inbox. What it sends to the chat app shows up in the
   inbox as the user's own message with its signature, if it has one.

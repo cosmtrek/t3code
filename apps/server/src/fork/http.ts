@@ -302,6 +302,12 @@ const routes = (runtime: InboxRuntimeShape, bots: BotRuntimeShape) => {
     ),
     route(
       "POST",
+      `${INBOX}/settle`,
+      AuthOrchestrationOperateScope,
+      body.pipe(Effect.flatMap(Inbox.settle)),
+    ),
+    route(
+      "POST",
       `${INBOX}/read-all`,
       AuthOrchestrationOperateScope,
       body.pipe(Effect.flatMap(Inbox.markAllRead)),

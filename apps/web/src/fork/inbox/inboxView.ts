@@ -8,12 +8,12 @@ import type {
 } from "../types";
 import { formatSince, formatSpan } from "../presentation";
 
-export type InboxView = "unread" | "all" | "agent";
+export type InboxView = "unread" | "all" | "following";
 export type InboxFilter = "all" | "dm" | "groups" | "topics";
 
 export const INBOX_VIEWS: ReadonlyArray<{ readonly id: InboxView; readonly label: string }> = [
-  { id: "agent", label: "Agent" },
   { id: "unread", label: "Unread" },
+  { id: "following", label: "Following" },
   { id: "all", label: "All" },
 ];
 
@@ -27,7 +27,7 @@ export const INBOX_FILTERS: ReadonlyArray<{ readonly id: InboxFilter; readonly l
 const EMPTY_VIEW_TITLES: Readonly<Record<InboxView, string>> = {
   unread: "Nothing unread",
   all: "No conversations",
-  agent: "No delegations",
+  following: "Nothing to follow up",
 };
 
 const FILTER_NOUNS: Readonly<Record<Exclude<InboxFilter, "all">, string>> = {
@@ -45,8 +45,8 @@ export function emptyViewTitle(view: InboxView, filter: InboxFilter): string {
       return `No unread ${noun}`;
     case "all":
       return `No ${noun}`;
-    case "agent":
-      return `No delegations from ${noun}`;
+    case "following":
+      return `No follow-ups in ${noun}`;
   }
 }
 
@@ -65,45 +65,56 @@ const FILTER_KINDS: Readonly<Record<Exclude<InboxFilter, "all">, ConversationKin
 export const matchesFilter = (filter: InboxFilter, kind: ConversationKind | undefined) =>
   filter === "all" || kind === FILTER_KINDS[filter];
 
-/** What a conversation's delegations show on its row. */
-export interface AgentSignals {
-  /** Delegations whose thread finished a run the user has not looked at. */
-  readonly unseen: number;
-  readonly drafts: number;
-  /** Delegations with a thread still linked. */
-  readonly live: number;
+/** A follow-up that left something for the user: a result they have not seen, or a draft. */
+export const followUpNeedsYou = (delegation: Pick<InboxDelegation, "agentUnseen" | "hasDraft">) =>
+  delegation.agentUnseen || delegation.hasDraft;
+
+/** The follow-up a conversation shows: one that needs you, else the newest open one. */
+export function topFollowUp(
+  delegations: ReadonlyArray<InboxDelegation>,
+): InboxDelegation | undefined {
+  const open = delegations.filter((delegation) => delegation.settledAt === null);
+  return open.find(followUpNeedsYou) ?? open[0];
 }
 
-export function agentSignalsFor(delegations: ReadonlyArray<InboxDelegation>): AgentSignals {
-  let unseen = 0;
-  let drafts = 0;
-  let live = 0;
-  for (const delegation of delegations) {
-    if (delegation.agentUnseen) unseen += 1;
-    if (delegation.hasDraft) drafts += 1;
-    if (delegation.thread !== null && delegation.thread.detachedAt === null) live += 1;
+/** Lists order by this: what waits on you, then what an agent is following up, then the rest. */
+export type Attention = 0 | 1 | 2;
+export const ATTENTION_LABELS = ["Needs you", "Following", "Other"] as const;
+
+export function attentionOf(
+  conversation: Pick<InboxConversation, "kind" | "unread" | "mentioned">,
+  openFollowUps: ReadonlyArray<Pick<InboxDelegation, "agentUnseen" | "hasDraft">>,
+): Attention {
+  if (
+    (conversation.kind === "dm" && conversation.unread) ||
+    conversation.mentioned ||
+    openFollowUps.some(followUpNeedsYou)
+  ) {
+    return 0;
   }
-  return { unseen, drafts, live };
+  return openFollowUps.length > 0 ? 1 : 2;
 }
 
 /**
- * Whether the conversation belongs in Unread or All. Unread is people's messages; agent results
- * live in the Agent view. A muted conversation shows there only when it mentions you, as in the
- * chat app. The held one, opened from Unread, stays there once read, so reading it does not pull
- * it out from under the pointer.
+ * Whether the conversation belongs in a view. Unread is people's messages and follow-ups that
+ * left you something; a muted conversation shows only when it mentions you, as in the chat app.
+ * Following is every conversation with an open follow-up. The held one, opened from the view,
+ * stays there once read, so reading it does not pull it out from under the pointer.
  */
 export function inView(
-  view: Exclude<InboxView, "agent">,
+  view: InboxView,
   filter: InboxFilter,
   conversation: Pick<InboxConversation, "id" | "kind" | "unread" | "mentioned" | "muted">,
   heldId: string | null = null,
+  openFollowUps: ReadonlyArray<Pick<InboxDelegation, "agentUnseen" | "hasDraft">> = [],
 ): boolean {
   if (!matchesFilter(filter, conversation.kind)) return false;
-  if (view === "all") return true;
+  if (view === "all" || conversation.id === heldId) return true;
+  if (view === "following") return openFollowUps.length > 0;
   return (
     (conversation.unread && !conversation.muted) ||
     conversation.mentioned ||
-    conversation.id === heldId
+    openFollowUps.some(followUpNeedsYou)
   );
 }
 

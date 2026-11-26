@@ -42,16 +42,19 @@ notebook: items, memory, earlier threads). The handler can change: an agent's fo
 handed to a bot, with its thread.
 
 ```text
-following up ──► needs you (result, draft, question) ──► done
-      ▲                                                    │
-      └──────────────────── reopen ◄───────────────────────┘
+following up ──► needs you (result, draft, question) ──► settled
+      ▲                                                     │
+      └──────────────────── un-settle ◄─────────────────────┘
 ```
 
-- Only the user marks a follow-up done. Sending a reply does not: "looking into it" ends nothing.
-  The reply box offers **Send and done** beside Send. A bot may propose done; the panel shows the
-  proposal and the user confirms it.
-- A done follow-up leaves every signal and every derivation, and stays as history in its
-  conversation. Reopening brings it back.
+- Done is T3 Code's **Settle**, the same word and icons as a thread's. Only the user settles a
+  follow-up; sending a reply does not, since "looking into it" ends nothing. The draft offers
+  **Send and settle** beside Send. A bot may propose settling; the panel shows the proposal and
+  the user confirms it.
+- Settling also settles the follow-up's thread. Un-settling, or following up the same message
+  again, reopens the follow-up and leaves the thread alone.
+- A settled follow-up leaves every signal and the listing's thread reads, and stays as history in
+  its conversation.
 - A bot that takes an @-mention on its own opens a follow-up on that message, so its work is
   visible and closable like any other.
 
@@ -59,29 +62,29 @@ following up ──► needs you (result, draft, question) ──► done
 
 Each conversation row has one state, and the list sorts by state, then by time:
 
-| State           | When                                                                              | Row shows                                                    |
-| --------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| Needs you       | unread DM, a mention of you, or a follow-up with a draft, a result, or a question | `[Draft]`, `[Question]` or `[Done]` before the preview; mark |
-| Following up    | a follow-up is running and nothing waits on you                                   | a muted "following up"; not counted, not raised              |
-| Everything else | group messages                                                                    | as the chat app                                              |
+| State     | When                                                                       | Counted |
+| --------- | -------------------------------------------------------------------------- | ------- |
+| Needs you | unread DM, a mention of you, or an open follow-up with a result or a draft | yes     |
+| Following | an open follow-up, nothing waiting on you                                  | no      |
+| Other     | group messages                                                             | no      |
 
-`[Draft]` before the preview is Feishu's own convention for an unsent draft. A "Following up"
-filter beside Unread and All lists conversations with an open follow-up: it filters
-conversations, it is not another list of objects.
+Unread and Following sort by state and head each group once there is more than one; All keeps the
+chat app's order. A row shows its top follow-up's status beside the unread mark, in the words and
+colors the sidebar uses for a thread (Draft, Input, Working). Following filters conversations with
+an open follow-up; it is not another list of objects.
 
 ### Where things open
 
 - Opening a conversation from anywhere lands at the reading position: the first unread message,
   else the bottom. It never jumps to an old follow-up's first message.
 - A follow-up shows twice in the chat, each with its own job: a marker in its first message's
-  footer, beside the reply count and built the same way (muted, `warning` only when it needs
-  you), and a side panel that holds its result, draft,
-  questions, and agent chat. The panel is not permanent: it opens with the conversation when a
-  follow-up needs you, from the marker, or from the header, and the user can close it. On narrow
-  screens it is a drawer over the chat.
+  footer, beside the reply count and built the same way (a `ghost-muted` button carrying the
+  status), and a side panel that holds its draft, questions, and agent chat. The panel is not
+  permanent: it opens with the conversation when a follow-up needs you and there is room for
+  both, from the marker, or from the header, and the user can close it. Without room for both,
+  the chat opens first and the panel takes its place when asked for.
 - Only an explicit "Show the message" in the panel scrolls the chat back to the follow-up's
-  messages.
-- One route: `/inbox/<conversation>?followup=<id>`. Each conversation keeps one reading position.
+  messages. Each conversation keeps one reading position.
 
 Replies to the chat app leave from one place: the reply box. A draft from an agent or a bot lands
 in its follow-up's reply box, and the user sends it there.

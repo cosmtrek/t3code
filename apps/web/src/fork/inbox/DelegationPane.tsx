@@ -3,6 +3,7 @@ import { ThreadId, type EnvironmentId, type ScopedThreadRef } from "@t3tools/con
 import { useNavigate } from "@tanstack/react-router";
 import {
   ArchiveIcon,
+  CheckIcon,
   CircleAlertIcon,
   CircleDashedIcon,
   CircleDotDashedIcon,
@@ -78,8 +79,8 @@ export function DelegationPane({
   /** The draft as it would go out, and where; null without one. */
   readonly draftReply: { readonly text: string; readonly target: string | null } | null;
   readonly sendingOff: boolean;
-  /** Sends the reply; resolves with the error to show. */
-  readonly onSendDraft: (text: string) => Promise<string | null>;
+  /** Sends the reply, then settles the follow-up when asked; resolves with the error to show. */
+  readonly onSendDraft: (text: string, settle: boolean) => Promise<string | null>;
   readonly onDiscardDraft: () => void;
 }) {
   const thread = detail.delegation.thread;
@@ -140,17 +141,17 @@ function DraftReply({
   readonly draft: string;
   readonly target: string | null;
   readonly canSend: boolean;
-  readonly onSend: (text: string) => Promise<string | null>;
+  readonly onSend: (text: string, settle: boolean) => Promise<string | null>;
   readonly onDiscard: () => void;
 }) {
   const [text, setText] = useState(draft);
   const sendKey = useSendKey();
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const send = async () => {
+  const send = async (settle = false) => {
     setSending(true);
     setError(null);
-    const failure = await onSend(text);
+    const failure = await onSend(text, settle);
     setSending(false);
     setError(failure);
   };
@@ -184,15 +185,28 @@ function DraftReply({
           error !== null ? <span className="text-destructive-foreground">{error}</span> : null
         }
         actions={
-          <Button
-            type="button"
-            size="xs"
-            variant="ghost-muted"
-            disabled={sending}
-            onClick={onDiscard}
-          >
-            Discard
-          </Button>
+          <>
+            <Button
+              type="button"
+              size="xs"
+              variant="ghost-muted"
+              disabled={sending}
+              onClick={onDiscard}
+            >
+              Discard
+            </Button>
+            {/* Sending alone keeps the follow-up open: "looking into it" ends nothing. */}
+            <Button
+              type="button"
+              size="xs"
+              variant="outline"
+              disabled={!ready}
+              onClick={() => void send(true)}
+            >
+              <CheckIcon />
+              Send and settle
+            </Button>
+          </>
         }
         sending={sending}
         canSend={ready}

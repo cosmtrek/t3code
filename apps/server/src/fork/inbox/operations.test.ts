@@ -178,6 +178,8 @@ interface Harness {
   holdListings: Promise<void> | null;
   readonly runtime: InboxRuntime["Service"];
   readonly shells: Map<string, OrchestrationV2ThreadShell | null>;
+  /** Every thread the inbox asked to settle. */
+  readonly settledThreads: string[];
   readonly layer: Layer.Layer<
     InboxRuntime | ThreadManagement.ThreadManagementService | Project.ProjectService
   >;
@@ -241,15 +243,22 @@ async function harness(
     subscribe: (listener: Parameters<ChannelHub["subscribe"]>[0]) => hub.subscribe(listener),
   };
   const shells = new Map<string, OrchestrationV2ThreadShell | null>();
+  const settledThreads: string[] = [];
   const layer = Layer.mergeAll(
     Layer.succeed(InboxRuntime, runtime),
     Layer.mock(ThreadManagement.ThreadManagementService)({
       getThreadShell: (threadId) => Effect.succeed(shells.get(threadId) ?? null),
       getThreadRecords: () => Effect.succeed({ messages: [] } as never),
+      settleThread: ({ threadId }) =>
+        Effect.sync(() => {
+          settledThreads.push(threadId);
+          return { sequence: settledThreads.length };
+        }),
     }),
     Layer.mock(Project.ProjectService)({ listShells: () => Effect.succeed([]) }),
   );
   return {
+    settledThreads,
     channelId,
     requests,
     posted,
@@ -498,6 +507,57 @@ describe("inbox listing", () => {
       );
       expect(yield* item()).toMatchObject({ agentUnseen: false });
     }),
+  );
+
+  it.effect(
+    "settling drops a delegation's signals and settles its thread; delegating reopens it",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* Effect.promise(() =>
+          harness(() => [{ id: "c", messages: [{ id: "m1", minute: 1, author: THEM }] }]),
+        );
+        const { dir, delegationId } = yield* linkThread(h, "c", "m1", "thread-1", 1);
+        yield* Effect.promise(() => NodeFSP.writeFile(NodePath.join(dir, "draft.md"), "Fixed.\n"));
+        h.shells.set("thread-1", {
+          ...idleShell("thread-1"),
+          status: "completed",
+          latestRunId: "run-1",
+          latestRunCompletedAt: DateTime.makeUnsafe(at(5)),
+        } as never);
+        const item = () => listOf(h).pipe(Effect.map((result) => result.delegations[0]));
+        expect(yield* item()).toMatchObject({ agentUnseen: true, hasDraft: true, settledAt: null });
+
+        yield* Inbox.settle({ channelId: h.channelId, delegationId, settled: true }).pipe(
+          Effect.provide(h.layer),
+        );
+        expect(yield* item()).toMatchObject({ agentUnseen: false, hasDraft: false, thread: null });
+        expect((yield* item())?.settledAt).not.toBeNull();
+        expect(h.settledThreads).toEqual(["thread-1"]);
+        // Opening it still shows its thread.
+        const opened = yield* Inbox.readDelegation(delegationQuery(h, delegationId)).pipe(
+          Effect.provide(h.layer),
+        );
+        expect(opened.delegation.thread?.threadId).toBe("thread-1");
+
+        yield* Inbox.settle({ channelId: h.channelId, delegationId, settled: false }).pipe(
+          Effect.provide(h.layer),
+        );
+        expect(yield* item()).toMatchObject({ settledAt: null, hasDraft: true });
+
+        yield* Inbox.settle({ channelId: h.channelId, delegationId, settled: true }).pipe(
+          Effect.provide(h.layer),
+        );
+        const key = { ...h.keyOf("c"), anchorMessageId: "m1" };
+        h.runtime.store.saveDelegation({
+          ...key,
+          id: delegationId,
+          scope: "chain",
+          untilAt: null,
+          preview: null,
+          createdAt: at(9),
+        });
+        expect(h.runtime.store.getDelegation(delegationId)?.settledAt).toBeNull();
+      }),
   );
 
   it.effect("shares one read of the channel until something in it changes", () =>

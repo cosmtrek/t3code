@@ -59,6 +59,24 @@ export async function markDelegationSeen(
   }
 }
 
+/** Marks the follow-up done, which settles its thread too, or open again; false when refused. */
+export async function settleDelegation(
+  environmentId: EnvironmentId,
+  delegation: Pick<InboxDelegation, "id" | "channelId">,
+  settled: boolean,
+): Promise<boolean> {
+  try {
+    await forkRequest(environmentId, "/inbox/settle", {
+      method: "POST",
+      body: { channelId: delegation.channelId, delegationId: delegation.id, settled },
+    });
+    return true;
+  } catch (error) {
+    fail(settled ? "Could not settle the follow-up" : "Could not reopen the follow-up", error);
+    return false;
+  }
+}
+
 /** Reads everything up to the newest message or run end the user saw in the lists. */
 export async function markAllRead(
   environmentId: EnvironmentId,

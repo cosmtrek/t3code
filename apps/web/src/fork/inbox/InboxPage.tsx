@@ -4,13 +4,16 @@ import {
   ArrowLeftIcon,
   BotIcon,
   CheckCheckIcon,
+  CheckIcon,
   CopyIcon,
   EllipsisIcon,
   ExternalLinkIcon,
   InboxIcon,
   ListFilterIcon,
+  LocateFixedIcon,
   MessageSquareIcon,
   MessagesSquareIcon,
+  Undo2Icon,
   XIcon,
 } from "lucide-react";
 import { useRef, useState, type CSSProperties, type ReactNode } from "react";
@@ -51,6 +54,7 @@ import { useForkResource } from "../useForkResource";
 import {
   ConversationPane,
   forgetPlace,
+  type FocusRequest,
   namedInReply,
   replyTargetOf,
   type ReplyTarget,
@@ -59,14 +63,16 @@ import { DelegateDialog, type DelegateTarget } from "./DelegateDialog";
 import { DelegationPane, ThreadStatus } from "./DelegationPane";
 import { IconAction } from "./IconAction";
 import { PaneHeader } from "./PaneHeader";
-import { ConversationList, DelegationList } from "./InboxList";
+import { ConversationList, type ConversationListItem } from "./InboxList";
 import { readMentionable, sendReply } from "./sendReply";
 import {
   INBOX_FILTERS,
   INBOX_VIEWS,
+  attentionOf,
   channelBanner,
   draftReplyMode,
   emptyViewTitle,
+  followUpNeedsYou,
   inView,
   unreadMessageCount,
   matchesFilter,
@@ -83,6 +89,7 @@ import {
   markAllRead,
   markDelegationSeen,
   setConversationRead,
+  settleDelegation,
 } from "./itemActions";
 import { useInboxOverviews, type EnvironmentInbox } from "./useInboxOverviews";
 
@@ -248,7 +255,7 @@ function EnvironmentInboxView({
     inbox.channels.find((candidate) => candidate.id === channelId) ??
     inbox.channels.find((candidate) => candidate.access.read) ??
     inbox.channels[0]!;
-  const [view, setView] = remember("view", "agent");
+  const [view, setView] = remember("view", "unread");
   const [filter, setFilter] = remember("filter", "all");
   const [conversationId, setConversationId] = remember("conversationId", null);
   // Opening reads the conversation, so where its new messages start is taken before that.
@@ -257,6 +264,7 @@ function EnvironmentInboxView({
   const [heldId, setHeldId] = remember("heldId", null);
   const [delegationId, setDelegationId] = remember("delegationId", null);
   const [delegating, setDelegating] = useState<DelegateTarget | null>(null);
+  const [focus, setFocus] = useState<FocusRequest | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   // Reads sent but not yet read back, shown at once so the list answers the click.
   const [pendingReads, setPendingReads] = useState<
@@ -278,7 +286,14 @@ function EnvironmentInboxView({
       : { ...conversation, unread: true };
   });
   const delegations = listing.data?.delegations ?? [];
-  const kindOf = new Map(conversations.map((conversation) => [conversation.id, conversation.kind]));
+  const openFollowUps = new Map<string, InboxDelegation[]>();
+  for (const candidate of delegations) {
+    if (candidate.settledAt !== null) continue;
+    const list = openFollowUps.get(candidate.conversationId) ?? [];
+    list.push(candidate);
+    openFollowUps.set(candidate.conversationId, list);
+  }
+  const followUpsOf = (id: string) => openFollowUps.get(id) ?? [];
   const delegation = delegations.find((candidate) => candidate.id === delegationId) ?? null;
   const conversation = conversations.find((candidate) => candidate.id === conversationId) ?? null;
   const detail = useForkResource<DelegationDetail>(
@@ -286,12 +301,10 @@ function EnvironmentInboxView({
     delegation ? delegationPath(channel.id, delegation.id) : null,
     refreshChannel,
   );
-  const visibleConversations = conversations.filter(
-    (candidate) => view !== "agent" && inView(view, filter, candidate, heldId),
+  const visibleConversations = conversations.filter((candidate) =>
+    inView(view, filter, candidate, heldId, followUpsOf(candidate.id)),
   );
-  const visibleDelegations = delegations.filter((candidate) =>
-    matchesFilter(filter, kindOf.get(candidate.conversationId)),
-  );
+  const listItems = listItemsFor(view, visibleConversations, followUpsOf);
   const readOnly = listing.data?.access.stale ?? !channel.access.send;
   const draftReply = draftReplyOf(detail.data, delegation, channel.capabilities);
   const banner = channelBanner(channel);
@@ -326,18 +339,31 @@ function EnvironmentInboxView({
       await listing.refresh();
     }
   };
+  // Opening lands at the reading place, and opens the follow-up waiting on you beside it.
   const selectConversation = (target: InboxConversation) => {
     setConversationId(target.id);
     setOpened({ id: target.id, newSince: target.unread ? target.readThroughAt : null });
     forgetPlace(environmentId, target);
-    setDelegationId(null);
-    setHeldId(view === "unread" ? target.id : null);
+    setFocus(null);
+    // Without room for both, the chat comes first; the follow-up opens from its header.
+    const wide = (containerRef.current?.clientWidth ?? 0) >= WIDE_INBOX_PX;
+    const waiting = wide ? (followUpsOf(target.id).find(followUpNeedsYou) ?? null) : null;
+    setDelegationId(waiting?.id ?? null);
+    if (waiting) void seeDelegation(waiting);
+    setHeldId(view === "all" ? null : target.id);
     readConversation(target);
   };
   const selectDelegation = (target: InboxDelegation) => {
-    setConversationId(target.conversationId);
     setDelegationId(target.id);
     void seeDelegation(target);
+  };
+  const showMessage = (target: InboxDelegation) => {
+    setFocus({ messageId: target.anchorMessageId });
+    // Without room for both, the chat takes the follow-up's place.
+    if ((containerRef.current?.clientWidth ?? Infinity) < WIDE_INBOX_PX) setDelegationId(null);
+  };
+  const onSettle = async (target: InboxDelegation, settled: boolean) => {
+    if (await settleDelegation(environmentId, target, settled)) await listing.refresh();
   };
   const onDiscardDrafts = async (target: InboxConversation) => {
     const drafted = delegations.filter(
@@ -361,12 +387,10 @@ function EnvironmentInboxView({
     list = <ReadError message={listing.error.message} onRetry={() => void listing.refresh()} />;
   } else if (listing.data === null) {
     list = <p className="px-4 py-6 text-sm text-muted-foreground">Loading…</p>;
-  } else if (
-    view === "agent" ? visibleDelegations.length === 0 : visibleConversations.length === 0
-  ) {
+  } else if (visibleConversations.length === 0) {
     list = (
       <InboxEmpty
-        icon={view === "agent" ? <BotIcon /> : <InboxIcon />}
+        icon={view === "following" ? <BotIcon /> : <InboxIcon />}
         title={emptyViewTitle(view, filter)}
       >
         {filter === "all" ? null : (
@@ -376,20 +400,11 @@ function EnvironmentInboxView({
         )}
       </InboxEmpty>
     );
-  } else if (view === "agent") {
-    list = (
-      <DelegationList
-        environmentId={environmentId}
-        delegations={visibleDelegations}
-        kindOf={kindOf}
-        selectedId={delegationId}
-        onSelect={selectDelegation}
-      />
-    );
   } else {
     list = (
       <ConversationList
-        conversations={visibleConversations}
+        environmentId={environmentId}
+        items={listItems}
         selectedId={conversationId}
         handlers={{
           onSelect: selectConversation,
@@ -399,13 +414,17 @@ function EnvironmentInboxView({
     );
   }
 
-  // Unread counts people waiting on you, Agent counts delegations waiting on you: a result or a draft.
+  // Unread counts what waits on you: people's messages and follow-ups that left a result or a
+  // draft. Following is status, not a to-do, so it has no count.
   const viewCount = (option: InboxView) =>
-    option === "agent"
-      ? visibleDelegations.filter((candidate) => candidate.agentUnseen || candidate.hasDraft).length
-      : option === "unread"
-        ? unreadMessageCount(filter, conversations)
-        : 0;
+    option === "unread"
+      ? unreadMessageCount(filter, conversations) +
+        conversations.filter(
+          (candidate) =>
+            matchesFilter(filter, candidate.kind) &&
+            followUpsOf(candidate.id).some(followUpNeedsYou),
+        ).length
+      : 0;
   const delegationOpen = delegation !== null;
   const conversationShown = conversation !== null;
 
@@ -413,7 +432,7 @@ function EnvironmentInboxView({
     <div className="flex min-h-0 flex-1 flex-col">
       <div ref={containerRef} className="@container/inbox flex min-h-0 flex-1">
         <section
-          aria-label={view === "agent" ? "Delegations" : "Conversations"}
+          aria-label="Conversations"
           className={cn(
             "relative flex min-h-0 w-full flex-col @2xl/inbox:w-(--resizable-width) @2xl/inbox:shrink-0 @2xl/inbox:border-r",
             (conversationShown || delegationOpen) && "@max-2xl/inbox:hidden",
@@ -541,7 +560,7 @@ function EnvironmentInboxView({
             )}
             selectedDelegationId={delegationId}
             onCloseDelegation={() => setDelegationId(null)}
-            focusMessageId={delegation?.anchorMessageId ?? null}
+            focus={focus}
             newSince={opened.id === conversation.id ? opened.newSince : null}
             readOnly={readOnly}
             capabilities={channel.capabilities}
@@ -615,6 +634,11 @@ function EnvironmentInboxView({
               {delegation.thread && delegation.thread.status !== "deleted" ? (
                 <ThreadStatus environmentId={environmentId} thread={delegation.thread} />
               ) : null}
+              {conversation ? (
+                <IconAction label="Show the message" onClick={() => showMessage(delegation)}>
+                  <LocateFixedIcon />
+                </IconAction>
+              ) : null}
               {delegation.thread && delegation.thread.status !== "deleted" ? (
                 <IconAction
                   label="Open thread"
@@ -634,8 +658,10 @@ function EnvironmentInboxView({
               {detail.data && detail.data.delegation.id === delegation.id ? (
                 <DelegationActions
                   detail={detail.data}
+                  settled={delegation.settledAt !== null}
                   readOnly={readOnly}
                   onDelegateAgain={(target) => setDelegating(target)}
+                  onSettle={(settled) => void onSettle(delegation, settled)}
                 />
               ) : null}
               <span className="hidden @5xl/inbox:inline-flex">
@@ -666,7 +692,7 @@ function EnvironmentInboxView({
                     },
                   )
                 }
-                onSendDraft={async (text) => {
+                onSendDraft={async (text, settle) => {
                   const replyTo = draftReply?.replyTo ?? null;
                   const conversation = {
                     channelId: delegation.channelId,
@@ -689,7 +715,10 @@ function EnvironmentInboxView({
                     people,
                     attachments: [],
                   });
-                  if (failure === null) await Promise.all([detail.refresh(), listing.refresh()]);
+                  if (failure === null) {
+                    if (settle) await settleDelegation(environmentId, delegation, true);
+                    await Promise.all([detail.refresh(), listing.refresh()]);
+                  }
                   return failure;
                 }}
               />
@@ -716,6 +745,46 @@ function EnvironmentInboxView({
       ) : null}
     </div>
   );
+}
+
+/** Where the conversation and an open follow-up both fit side by side (the `@5xl` breakpoint). */
+const WIDE_INBOX_PX = 1024;
+
+/**
+ * Unread and Following put what waits on you first, then what is being followed up; a heading
+ * names each group once there is more than one. All keeps the chat app's order.
+ */
+function listItemsFor(
+  view: InboxView,
+  conversations: ReadonlyArray<InboxConversation>,
+  followUpsOf: (conversationId: string) => ReadonlyArray<InboxDelegation>,
+): ReadonlyArray<ConversationListItem> {
+  const ranked = conversations.map((conversation) => ({
+    conversation,
+    followUps: followUpsOf(conversation.id),
+    attention: attentionOf(conversation, followUpsOf(conversation.id)),
+  }));
+  if (view === "all") {
+    return ranked.map(({ conversation, followUps }) => ({
+      type: "conversation",
+      conversation,
+      followUps,
+    }));
+  }
+  const sorted = ranked.toSorted((left, right) => left.attention - right.attention);
+  const grouped = new Set(sorted.map((entry) => entry.attention)).size > 1;
+  const items: ConversationListItem[] = [];
+  for (const [index, entry] of sorted.entries()) {
+    if (grouped && sorted[index - 1]?.attention !== entry.attention) {
+      items.push({ type: "section", attention: entry.attention });
+    }
+    items.push({
+      type: "conversation",
+      conversation: entry.conversation,
+      followUps: entry.followUps,
+    });
+  }
+  return items;
 }
 
 /** The delegation's draft as it would go out, and the message it answers. */
@@ -754,12 +823,16 @@ function draftReplyTarget(
 
 function DelegationActions({
   detail,
+  settled,
   readOnly,
   onDelegateAgain,
+  onSettle,
 }: {
   readonly detail: DelegationDetail;
+  readonly settled: boolean;
   readonly readOnly: boolean;
   readonly onDelegateAgain: (target: DelegateTarget) => void;
+  readonly onSettle: (settled: boolean) => void;
 }) {
   const anchor = detail.messages.find(
     (message) => message.id === detail.delegation.anchorMessageId,
@@ -772,6 +845,17 @@ function DelegationActions({
         <EllipsisIcon />
       </MenuTrigger>
       <MenuPopup align="end">
+        {settled ? (
+          <MenuItem onClick={() => onSettle(false)}>
+            <Undo2Icon />
+            Un-settle
+          </MenuItem>
+        ) : (
+          <MenuItem onClick={() => onSettle(true)}>
+            <CheckIcon />
+            Settle
+          </MenuItem>
+        )}
         <MenuItem onClick={() => void copyDelegationContext(detail)}>
           <CopyIcon />
           Copy the messages
@@ -790,7 +874,7 @@ function DelegationActions({
           }
         >
           <BotIcon />
-          Delegate again
+          Follow up again
         </MenuItem>
       </MenuPopup>
     </Menu>

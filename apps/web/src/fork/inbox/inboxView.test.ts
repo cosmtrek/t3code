@@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 import type { InboxConversation, InboxDelegation, InboxMessage } from "../types";
 import {
   anchorOf,
+  attentionOf,
   conversationRows,
   delegationPreview,
   draftReplyMode,
@@ -21,6 +22,7 @@ import {
   replyLine,
   replyModes,
   shortLink,
+  topFollowUp,
   topicsOf,
   unreadMessageCount,
   withoutMention,
@@ -30,7 +32,7 @@ describe("emptyViewTitle", () => {
   it.each([
     ["unread", "all", "Nothing unread"],
     ["unread", "dm", "No unread DMs"],
-    ["agent", "groups", "No delegations from groups"],
+    ["following", "groups", "No follow-ups in groups"],
     ["unread", "topics", "No unread topic groups"],
     ["all", "dm", "No DMs"],
   ] as const)("names an empty %s list filtered to %s", (view, filter, title) => {
@@ -59,6 +61,45 @@ describe("inView", () => {
     expect(inView("unread", "all", conversation(false), "c")).toBe(true);
     expect(inView("unread", "all", conversation(false), "other")).toBe(false);
     expect(inView("unread", "dm", conversation(false), "c")).toBe(false);
+  });
+
+  it("lists in Unread a follow-up that left you something, and in Following any open one", () => {
+    const waiting = [{ agentUnseen: false, hasDraft: true }];
+    const working = [{ agentUnseen: false, hasDraft: false }];
+    expect(inView("unread", "all", conversation(false), null, waiting)).toBe(true);
+    expect(inView("unread", "all", conversation(false), null, working)).toBe(false);
+    expect(inView("following", "all", conversation(false), null, working)).toBe(true);
+    expect(inView("following", "all", conversation(true), null, [])).toBe(false);
+  });
+});
+
+describe("attentionOf", () => {
+  const conversation = (extra: Partial<InboxConversation>) =>
+    ({ kind: "group", unread: false, mentioned: false, ...extra }) as InboxConversation;
+  const followUp = (agentUnseen: boolean, hasDraft: boolean) => ({ agentUnseen, hasDraft });
+
+  it("puts what waits on you first, then what is followed up, then the rest", () => {
+    expect(attentionOf(conversation({ kind: "dm", unread: true }), [])).toBe(0);
+    expect(attentionOf(conversation({ mentioned: true }), [])).toBe(0);
+    expect(attentionOf(conversation({}), [followUp(true, false)])).toBe(0);
+    expect(attentionOf(conversation({}), [followUp(false, true)])).toBe(0);
+    expect(attentionOf(conversation({ unread: true }), [followUp(false, false)])).toBe(1);
+    expect(attentionOf(conversation({ unread: true }), [])).toBe(2);
+  });
+});
+
+describe("topFollowUp", () => {
+  const delegation = (id: string, extra: Partial<InboxDelegation> = {}) =>
+    ({ id, agentUnseen: false, hasDraft: false, settledAt: null, ...extra }) as InboxDelegation;
+
+  it("shows the open follow-up that needs you, else the newest open one, never a settled one", () => {
+    expect(topFollowUp([delegation("new"), delegation("draft", { hasDraft: true })])?.id).toBe(
+      "draft",
+    );
+    expect(topFollowUp([delegation("new"), delegation("old")])?.id).toBe("new");
+    expect(topFollowUp([delegation("done", { settledAt: "2026-11-26T00:00:00Z" })])).toBe(
+      undefined,
+    );
   });
 });
 

@@ -458,6 +458,8 @@ export interface InboxDelegation {
   readonly hasDraft: boolean;
   /** When the user last replied from this delegation; null before the first reply. */
   readonly lastSentAt: string | null;
+  /** When the user marked it done; null while it is open. */
+  readonly settledAt: string | null;
 }
 
 /** The count only: the records themselves may hold message text. */
@@ -585,6 +587,24 @@ const computeChannel = Effect.fn("ForkInbox.computeChannel")(function* (channelI
     store.listDelegations(channelId),
     (delegation) =>
       Effect.gen(function* () {
+        // A settled delegation is history: it raises no signal, so its thread is not read here.
+        if (delegation.settledAt !== null) {
+          return {
+            id: delegation.id,
+            channelId,
+            conversationId: delegation.conversationId,
+            conversationName: names.get(delegation.conversationId) ?? "",
+            anchorMessageId: delegation.anchorMessageId,
+            scope: delegation.scope,
+            preview: delegation.preview,
+            createdAt: delegation.createdAt,
+            thread: null,
+            agentUnseen: false,
+            hasDraft: false,
+            lastSentAt: null,
+            settledAt: delegation.settledAt,
+          } satisfies InboxDelegation;
+        }
         const { thread, artifacts, lastSentAt } = yield* inspectDelegation(
           delegation,
           linksByDelegation.get(delegation.id) ?? [],
@@ -608,6 +628,7 @@ const computeChannel = Effect.fn("ForkInbox.computeChannel")(function* (channelI
           }),
           hasDraft: current !== null && artifacts.draft !== null,
           lastSentAt,
+          settledAt: null,
         } satisfies InboxDelegation;
       }),
     { concurrency: 4 },
@@ -844,8 +865,15 @@ const findDelegation = Effect.fn("ForkInbox.findDelegation")(function* (
   const delegation = runtime.store.getDelegation(delegationId);
   if (delegation === null || delegation.channelId !== channelId) return yield* missingDelegation();
   const listing = yield* readChannel(channelId);
-  const item = listing.delegations.find((candidate) => candidate.id === delegationId);
-  if (item === undefined) return yield* missingDelegation();
+  const listed = listing.delegations.find((candidate) => candidate.id === delegationId);
+  if (listed === undefined) return yield* missingDelegation();
+  // The listing skips a settled delegation's thread; opening it shows its history.
+  const item =
+    listed.settledAt === null
+      ? listed
+      : yield* inspectDelegation(delegation, runtime.store.linksForDelegation(delegation.id)).pipe(
+          Effect.map(({ thread, lastSentAt }) => ({ ...listed, thread, lastSentAt })),
+        );
   const conversation = listing.raw.find((candidate) => candidate.id === delegation.conversationId);
   return {
     delegation,
@@ -977,6 +1005,42 @@ export const markSeen = Effect.fn("ForkInbox.markSeen")(function* (body: unknown
   );
   const runtime = yield* InboxRuntime;
   runtime.store.markAgentSeen(input.delegationId, input.runCompletedAt);
+  runtime.hub.publish({ type: "inbox", channelId: input.channelId });
+  return { ok: true };
+});
+
+const SettleInput = Schema.Struct({
+  channelId: Schema.String,
+  delegationId: Schema.String,
+  settled: Schema.Boolean,
+});
+const decodeSettleInput = Schema.decodeUnknownEffect(SettleInput);
+
+/**
+ * Marks a delegation done, or open again. Settling also settles its thread, as finished work does
+ * in the sidebar; reopening leaves the thread alone, since writing to it wakes it anyway.
+ */
+export const settle = Effect.fn("ForkInbox.settle")(function* (body: unknown) {
+  const input = yield* decodeSettleInput(body).pipe(
+    Effect.mapError(() => badRequest("Name the delegation and whether it is settled.")),
+  );
+  const runtime = yield* InboxRuntime;
+  const delegation = runtime.store.getDelegation(input.delegationId);
+  if (delegation === null || delegation.channelId !== input.channelId) {
+    return yield* badRequest("There is no such delegation.");
+  }
+  runtime.store.setSettled(delegation.id, input.settled ? new Date().toISOString() : null);
+  const active = activeLinkOf(runtime.store.linksForDelegation(delegation.id));
+  if (input.settled && active !== undefined) {
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    yield* threads
+      .settleThread({
+        threadId: ThreadId.make(active.threadId),
+        commandId: CommandId.make(`fork-inbox:settle:${NodeCrypto.randomUUID()}`),
+        byOwnAgent: false,
+      })
+      .pipe(Effect.ignore);
+  }
   runtime.hub.publish({ type: "inbox", channelId: input.channelId });
   return { ok: true };
 });

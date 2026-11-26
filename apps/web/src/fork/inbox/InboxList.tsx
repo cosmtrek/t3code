@@ -4,6 +4,7 @@ import {
   BellOffIcon,
   BotIcon,
   CheckIcon,
+  CircleCheckIcon,
   CopyIcon,
   EllipsisIcon,
   MailIcon,
@@ -24,12 +25,13 @@ import { cn } from "../../lib/utils";
 import { UnreadCount } from "../presentation";
 import type { ConversationKind, InboxConversation, InboxDelegation } from "../types";
 import {
+  ATTENTION_LABELS,
   agoLabel,
-  delegationPreview,
   lastMessageLine,
   minuteToMs,
   nameOrUnknown,
-  type AgentSignals,
+  topFollowUp,
+  type Attention,
 } from "./inboxView";
 import { StatusLabel, ThreadStatus } from "./DelegationPane";
 import { copyConversationId } from "./itemActions";
@@ -116,43 +118,42 @@ export function ConversationMenu({
   );
 }
 
-/** The agent's state on a conversation: unseen results first, then drafts, then threads. */
-export function AgentBadge({ signals }: { readonly signals: AgentSignals | undefined }) {
-  if (signals === undefined || signals.live === 0) return null;
-  const label =
-    signals.unseen > 0
-      ? `${signals.unseen} new ${signals.unseen === 1 ? "result" : "results"}`
-      : signals.drafts > 0
-        ? `${signals.drafts} ${signals.drafts === 1 ? "draft" : "drafts"}`
-        : `${signals.live} ${signals.live === 1 ? "delegation" : "delegations"}`;
-  return (
-    <span
-      className={cn(
-        "inline-flex shrink-0 items-center gap-1",
-        signals.unseen > 0
-          ? "text-primary"
-          : signals.drafts > 0
-            ? "text-success"
-            : "text-muted-foreground",
-      )}
-    >
-      <BotIcon className="size-3.5" />
-      {label}
-    </span>
+/** A follow-up's state as the sidebar words a thread: its live status, else what it left. */
+export function FollowUpStatus({
+  environmentId,
+  delegation,
+  idle = null,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly delegation: InboxDelegation;
+  readonly idle?: string | null;
+}) {
+  const live =
+    delegation.thread !== null && delegation.thread.detachedAt === null ? delegation.thread : null;
+  const outcome = <DelegationOutcome delegation={delegation} idle={idle} />;
+  return live && delegation.settledAt === null ? (
+    <ThreadStatus environmentId={environmentId} thread={live} fallback={outcome} />
+  ) : (
+    outcome
   );
 }
 
 function ConversationRow({
+  environmentId,
   conversation,
+  followUps,
   now,
   selected,
   handlers,
 }: {
+  readonly environmentId: EnvironmentId;
   readonly conversation: InboxConversation;
+  readonly followUps: ReadonlyArray<InboxDelegation>;
   readonly now: number;
   readonly selected: boolean;
   readonly handlers: ConversationHandlers;
 }) {
+  const followUp = topFollowUp(followUps);
   const [offset, setOffset] = useState(0);
   const [dragging, setDragging] = useState(false);
   const drag = useRef<{ x: number; y: number; base: number; horizontal: boolean | null } | null>(
@@ -242,6 +243,9 @@ function ConversationRow({
               ) : null}
               {lastMessageLine(conversation)}
             </span>
+            {followUp ? (
+              <FollowUpStatus environmentId={environmentId} delegation={followUp} />
+            ) : null}
             {badge > 0 ? <UnreadCount count={badge} muted={conversation.muted} /> : null}
             {conversation.muted ? (
               <BellOffIcon
@@ -264,12 +268,22 @@ function ConversationRow({
   );
 }
 
+export type ConversationListItem =
+  | { readonly type: "section"; readonly attention: Attention }
+  | {
+      readonly type: "conversation";
+      readonly conversation: InboxConversation;
+      readonly followUps: ReadonlyArray<InboxDelegation>;
+    };
+
 export function ConversationList({
-  conversations,
+  environmentId,
+  items,
   selectedId,
   handlers,
 }: {
-  readonly conversations: ReadonlyArray<InboxConversation>;
+  readonly environmentId: EnvironmentId;
+  readonly items: ReadonlyArray<ConversationListItem>;
   readonly selectedId: string | null;
   readonly handlers: ConversationHandlers;
 }) {
@@ -277,18 +291,29 @@ export function ConversationList({
   // New activity lands on top: a reader at the top sees it, one further down keeps their place.
   const [scrolledDown, setScrolledDown] = useState(false);
   return (
-    <LegendList<InboxConversation>
-      data={conversations}
-      keyExtractor={(conversation) => conversation.id}
+    <LegendList<ConversationListItem>
+      data={items}
+      keyExtractor={(item) =>
+        item.type === "section" ? `section:${item.attention}` : item.conversation.id
+      }
+      getItemType={(item) => item.type}
       extraData={{ selectedId, now, handlers }}
-      renderItem={({ item }) => (
-        <ConversationRow
-          conversation={item}
-          now={now}
-          selected={item.id === selectedId}
-          handlers={handlers}
-        />
-      )}
+      renderItem={({ item }) =>
+        item.type === "section" ? (
+          <p className="px-4.5 pt-3 pb-1 text-xs text-muted-foreground">
+            {ATTENTION_LABELS[item.attention]}
+          </p>
+        ) : (
+          <ConversationRow
+            environmentId={environmentId}
+            conversation={item.conversation}
+            followUps={item.followUps}
+            now={now}
+            selected={item.conversation.id === selectedId}
+            handlers={handlers}
+          />
+        )
+      }
       maintainVisibleContentPosition={{ data: scrolledDown }}
       onScroll={(event) => setScrolledDown(event.nativeEvent.contentOffset.y > 0)}
       estimatedItemSize={56}
@@ -298,90 +323,18 @@ export function ConversationList({
   );
 }
 
-/** Where a delegation is: what it was about, where, and its thread. */
-export function DelegationList({
-  environmentId,
-  delegations,
-  kindOf,
-  selectedId,
-  onSelect,
-}: {
-  readonly environmentId: EnvironmentId;
-  readonly delegations: ReadonlyArray<InboxDelegation>;
-  /** The kind of each listed conversation; one the channel no longer lists has none. */
-  readonly kindOf: ReadonlyMap<string, ConversationKind>;
-  readonly selectedId: string | null;
-  readonly onSelect: (delegation: InboxDelegation) => void;
-}) {
-  const now = minuteToMs(useNowMinute());
-  return (
-    <LegendList<InboxDelegation>
-      data={delegations}
-      keyExtractor={(delegation) => delegation.id}
-      extraData={{ selectedId, now, kindOf }}
-      renderItem={({ item }) => {
-        const live = item.thread !== null && item.thread.detachedAt === null ? item.thread : null;
-        return (
-          <button
-            type="button"
-            className={cn(
-              "ms-2 me-0.5 flex w-[calc(100%-0.625rem)] min-w-0 flex-col gap-0.5 rounded-md px-2.5 py-2 text-left",
-              item.id === selectedId ? "bg-accent" : "pointer-fine:hover:bg-accent/50",
-            )}
-            aria-current={item.id === selectedId ? "true" : undefined}
-            onClick={() => onSelect(item)}
-          >
-            <span className="flex min-w-0 items-center gap-2">
-              <span className="flex min-w-0 items-center gap-1.5 text-sm font-medium text-foreground">
-                {kindOf.has(item.conversationId) ? (
-                  <ConversationKindIcon kind={kindOf.get(item.conversationId)!} />
-                ) : null}
-                <span className="truncate">{nameOrUnknown(item.conversationName)}</span>
-              </span>
-              <span className="ms-auto shrink-0 text-xs text-muted-foreground tabular-nums">
-                {agoLabel(item.thread?.runCompletedAt ?? item.createdAt, now)}
-              </span>
-            </span>
-            <span className="flex min-w-0 items-center gap-2 text-xs">
-              <span className="min-w-0 flex-1 truncate text-muted-foreground">
-                {delegationPreview(item.conversationName, item.preview, item.thread?.title ?? null)}
-              </span>
-              {live ? (
-                <ThreadStatus
-                  environmentId={environmentId}
-                  thread={live}
-                  fallback={<DelegationOutcome delegation={item} />}
-                />
-              ) : (
-                <DelegationOutcome delegation={item} />
-              )}
-              {item.agentUnseen ? (
-                <span
-                  className="size-2 shrink-0 rounded-full bg-primary"
-                  role="img"
-                  aria-label="New result"
-                />
-              ) : null}
-            </span>
-          </button>
-        );
-      }}
-      estimatedItemSize={56}
-      drawDistance={600}
-      className={LIST_CLASS}
-    />
-  );
-}
-
 /** What a finished delegation left for the user: a draft to send, or the reply already sent. */
-export function DelegationOutcome({
+function DelegationOutcome({
   delegation,
   idle = null,
 }: {
-  readonly delegation: Pick<InboxDelegation, "hasDraft" | "lastSentAt">;
+  readonly delegation: Pick<InboxDelegation, "hasDraft" | "lastSentAt" | "settledAt">;
   /** Shown when it left neither. */
   readonly idle?: string | null;
 }) {
+  if (delegation.settledAt !== null) {
+    return <StatusLabel icon={CircleCheckIcon} label="Settled" className="text-muted-foreground" />;
+  }
   if (delegation.hasDraft) {
     return <StatusLabel icon={PencilLineIcon} label="Draft" className="text-success" />;
   }

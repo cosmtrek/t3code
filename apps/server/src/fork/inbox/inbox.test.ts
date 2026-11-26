@@ -366,7 +366,7 @@ describe("InboxStore", () => {
       createdAt: hoursAgo(0),
     });
     expect(store.listDelegations("a")).toEqual([
-      { ...delegation, scope: "chain", untilAt: null, agentSeenAt: hoursAgo(1) },
+      { ...delegation, scope: "chain", untilAt: null, agentSeenAt: hoursAgo(1), settledAt: null },
     ]);
 
     store.addLink({
@@ -437,6 +437,7 @@ describe("InboxStore", () => {
         preview: null,
         createdAt: hoursAgo(6),
         agentSeenAt: hoursAgo(4),
+        settledAt: null,
       },
     ]);
     expect(store.linksForDelegation("item-t").map((link) => link.threadId)).toEqual([

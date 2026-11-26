@@ -156,6 +156,8 @@ export interface InboxDelegation {
   readonly hasDraft: boolean;
   /** When the user last replied from this delegation; null before the first reply. */
   readonly lastSentAt: string | null;
+  /** When the user marked it done; null while it is open. */
+  readonly settledAt: string | null;
 }
 
 export interface InboxMessage {

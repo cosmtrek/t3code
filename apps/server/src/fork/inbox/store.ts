@@ -35,6 +35,8 @@ export interface Delegation extends ConversationKey {
   readonly createdAt: string;
   /** When the thread's last run the user saw had finished. */
   readonly agentSeenAt: string | null;
+  /** When the user marked it done; null while it is open. */
+  readonly settledAt: string | null;
 }
 
 export interface Link extends ConversationKey {
@@ -120,6 +122,7 @@ const MIGRATIONS: ReadonlyArray<string> = [
    ALTER TABLE links DROP COLUMN topic_id;
    ALTER TABLE links RENAME COLUMN item_id TO delegation_id;
    DROP TABLE reads;`,
+  `ALTER TABLE delegations ADD COLUMN settled_at TEXT;`,
 ];
 
 type Row = Record<string, NodeSqlite.SQLOutputValue>;
@@ -148,6 +151,7 @@ function toDelegation(row: Row): Delegation {
     preview: nullableText(row, "preview"),
     createdAt: text(row, "created_at"),
     agentSeenAt: nullableText(row, "agent_seen_at"),
+    settledAt: nullableText(row, "settled_at"),
   };
 }
 
@@ -293,9 +297,11 @@ export class InboxStore {
     return row ? toDelegation(row) : null;
   }
 
-  /** A new delegation, or the same anchor delegated again with the range it has now. */
+  /** A new delegation, or the same anchor delegated again (which reopens it) with its range now. */
   saveDelegation(
-    delegation: Omit<Delegation, "agentSeenAt" | "createdAt"> & { readonly createdAt: string },
+    delegation: Omit<Delegation, "agentSeenAt" | "createdAt" | "settledAt"> & {
+      readonly createdAt: string;
+    },
   ) {
     this.db
       .prepare(
@@ -305,7 +311,8 @@ export class InboxStore {
          ON CONFLICT (id) DO UPDATE SET
            scope = excluded.scope,
            until_at = excluded.until_at,
-           preview = COALESCE(excluded.preview, delegations.preview)`,
+           preview = COALESCE(excluded.preview, delegations.preview),
+           settled_at = NULL`,
       )
       .run(
         delegation.id,
@@ -326,6 +333,10 @@ export class InboxStore {
     this.db
       .prepare("UPDATE delegations SET agent_seen_at = ? WHERE id = ?")
       .run(later(current.agentSeenAt, at), id);
+  }
+
+  setSettled(id: string, at: string | null) {
+    this.db.prepare("UPDATE delegations SET settled_at = ? WHERE id = ?").run(at, id);
   }
 
   /** Every link of the channel, detached ones included, newest first. */
