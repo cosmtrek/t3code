@@ -126,7 +126,7 @@ bot's `queue`. Nothing here starts a turn; `wake.ts` decides.
 
 | Source                                                                             | Becomes                                                  |
 | ---------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| `run.updated` to a terminal status on a bot's worker thread                        | `thread.stopped` (completed, failed, interrupted)        |
+| `run.updated` to a terminal status on a bot's worker thread                        | `thread.stopped`, carrying the thread's last message     |
 | a pending approval or user-input request on a bot's thread                         | `thread.needs` (always wakes)                            |
 | `thread.pull-request-synced`, `thread.pull-request-link-updated` on a bot's thread | `thread.pr` (by follow-up mode)                          |
 | a message from the user on a bot's thread (see Ownership)                          | ownership moves to the user; no wake                     |
@@ -275,11 +275,17 @@ t3bot memory add <text> | edit <id> <text> | remove <id>
 t3bot role edit -                       whole role via stdin; gated, see below
 t3bot thread start --item N --project P --follow now|attention|routine
                    [--worktree] [--provider I] [--model M] -
-t3bot thread send|interrupt|settle <thread>
+t3bot thread send [--fresh] <thread> <text>
+t3bot thread interrupt|settle <thread>
 t3bot thread read <thread> [--page]     any thread in scope, paged
 t3bot <instance> <operation> …         a connector, such as a chat channel by its id:
                                         lark unread | list | read | send; see bot-connectors.md
 ```
+
+`thread send --fresh` starts the worker on a clean provider session in the same thread
+(`freshContext`), so a long-running worker never compacts: its folder, branch, PR links, and
+transcript stay, and the bot writes a brief that stands on its own. `thread read` and `thread send`
+show how full the worker's context is, from its provider's reported usage, and say when to go fresh.
 
 Each call is one HTTP request and one service operation, and the CLI never waits on a turn.
 `--provider` and `--model` default to the bot's own; any provider instance the environment has
@@ -364,10 +370,13 @@ nothing is tracked.
   unaware of bots, as it stays unaware of the inbox.
 - **Inbox bridge** (planned, not built): a bot as a follow-up's handler; see
   [Planned: bots](./inbox-design.md#planned-bots).
-- **Settings**: permission mode; start and run threads (allow or ask); turns a day and threads
-  at once on one row; and one group per connector instance, such as each chat channel (use it,
-  off for a new bot; send messages ask or allow; signature; wake on my @-mentions). Role edits
-  always ask and have no row.
+- **Settings**: the bot (name, its model and effort, and the model its threads start on, its own
+  until set); permissions (permission mode; start and run threads, allow or ask; turns a day;
+  threads at once); one group per connector instance, such as each chat channel (use it, off for
+  a new bot; send messages ask or allow; signature; wake on my @-mentions); and Delete. Role edits
+  always ask and have no row. Ids, not names, key its folder, token, and rows, so a rename moves
+  nothing; its work thread is retitled and the bot is told. A move of its own model to another
+  provider starts a fresh session, since every packet carries what a turn needs.
 - **Live updates**: the fork's one SSE stream (`/api/fork/inbox/events`) also carries
   `{ type: "bots", botId }`, which only says a bot changed; the client refetches, as the inbox does.
 

@@ -12,6 +12,7 @@ import {
   ProjectId,
   ThreadId,
   type ModelSelection,
+  type OrchestrationV2ThreadProjection,
   type RuntimeMode,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -36,6 +37,8 @@ import {
   readRole,
   rolePath,
   runtimeModeFor,
+  modelFlags,
+  threadModelFor,
   tokenPath,
   withShown,
   ROLE_CHARS,
@@ -65,6 +68,7 @@ const FLAGS: Readonly<Record<string, FlagSpec>> = {
     values: ["project", "item", "follow", "provider", "model", "title"],
     booleans: ["worktree"],
   },
+  "thread send": { booleans: ["fresh"] },
   "thread read": { values: ["limit"] },
 };
 
@@ -89,11 +93,18 @@ const HELP = `t3bot <command> - everything you do goes through these.
 
   thread start --project <path|name|id> [--item <id>] [--follow now|attention|routine]
                [--worktree] [--provider <instance>] [--model <model>] [--title t] <prompt>
+               runs on {threadModel} unless you pass --provider and --model
                starts a thread that works for you; it wakes you as --follow says:
                now = when it stops, attention (default) = when it fails or needs someone,
                routine = never, read it on your next routine
-  thread send <thread> <text>    message a thread you own, unless the user took it over
+  thread send [--fresh] <thread> <text>
+                                 message a thread you own, unless the user took it over;
+               --fresh starts it on a clean context, keeping its folder, branch and history
+               in T3, so the text must stand on its own: the goal, what is done, the branch
+               and files that matter, and the next step. It can read its earlier work with
+               t3_thread_read on its own thread when its tools have it.
   thread read <thread> [--limit n]
+                                 its messages, and how full its context is
   thread list
 {connectors}
 Flags take --name value or --name=value. Text that itself starts with -- goes after a bare --.
@@ -238,7 +249,11 @@ export const runTool = Effect.fn("ForkBot.runTool")(function* (input: ToolCall) 
   switch (command) {
     case undefined:
     case "help": {
-      return HELP.replace("{connectors}", yield* helpFor(store.getBot(botId)!));
+      const bot = store.getBot(botId)!;
+      return HELP.replace("{connectors}", yield* helpFor(bot)).replace(
+        "{threadModel}",
+        modelFlags(yield* threadModelFor(bot)),
+      );
     }
     case "say": {
       const text = textOf([sub ?? "", ...rest].filter(Boolean), input.stdin);
@@ -445,6 +460,50 @@ export const takenOverByUser = Effect.fn("ForkBot.takenOverByUser")(function* (
   );
 });
 
+/** Share of a thread's context past which the bot is told to send with `--fresh`. */
+const FRESH_AT = 0.7;
+
+/**
+ * How full a thread's current provider session is, from its latest reported usage; null when
+ * its provider reports none. A fresh send starts a new session, which starts from empty.
+ */
+function contextFill(
+  records: Pick<OrchestrationV2ThreadProjection, "thread" | "providerTurns">,
+): { readonly used: number; readonly max: number } | null {
+  const usage = records.providerTurns
+    .filter(
+      (turn) =>
+        turn.providerThreadId === records.thread.activeProviderThreadId &&
+        turn.tokenUsage !== undefined,
+    )
+    .map((turn) => turn.tokenUsage!)
+    .toSorted((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))[0];
+  const max = usage?.autoCompactThreshold ?? usage?.maxTokens;
+  return usage === undefined || !max ? null : { used: usage.usedTokens, max };
+}
+
+const contextLine = (fill: ReturnType<typeof contextFill>) => {
+  if (fill === null) return "Its provider does not report context size.";
+  const share = fill.used / fill.max;
+  const line = `Context ${Math.round(fill.used / 1000)}k of ${Math.round(fill.max / 1000)}k tokens (${Math.round(share * 100)}%).`;
+  return share < FRESH_AT
+    ? line
+    : `${line} Give it more work with \`thread send --fresh\`, so it does not compact.`;
+};
+
+const threadContext = Effect.fn("ForkBot.threadContext")(function* (
+  projectId: string,
+  threadId: string,
+) {
+  const records = yield* (yield* ThreadManagement.ThreadManagementService)
+    .getProjectThreadRecords(
+      { projectId: ProjectId.make(projectId), threadId: ThreadId.make(threadId) },
+      ["providerTurns"],
+    )
+    .pipe(Effect.orElseSucceed(() => null));
+  return records === null ? null : contextFill(records);
+});
+
 /** Launches a thread the bot starts, under the id it already owns. */
 const launchOwned = Effect.fn("ForkBot.launchOwned")(function* (
   commandId: CommandId,
@@ -529,17 +588,15 @@ const threadCommand = Effect.fn("ForkBot.threadCommand")(function* (
         `No project "${wanted}". Projects: ${projects.map((shell) => `${shell.title} (${shell.workspaceRoot})`).join(", ")}`,
       );
     }
+    const preset = yield* threadModelFor(bot);
     const picked = {
-      instanceId: flags.get("provider") ?? bot.modelSelection.instanceId,
-      model: flags.get("model") ?? (flags.has("provider") ? "" : bot.modelSelection.model),
+      instanceId: flags.get("provider") ?? preset.instanceId,
+      model: flags.get("model") ?? (flags.has("provider") ? "" : preset.model),
     } as ModelSelection;
     if (picked.model === "") return yield* fail("With --provider, give --model too.");
-    // Its own model keeps its options, effort among them; another starts at that model's defaults.
+    // The preset keeps its options, effort among them; another starts at that model's defaults.
     const modelSelection =
-      picked.instanceId === bot.modelSelection.instanceId &&
-      picked.model === bot.modelSelection.model
-        ? bot.modelSelection
-        : picked;
+      picked.instanceId === preset.instanceId && picked.model === preset.model ? preset : picked;
     // One start at a time, so two starts in one turn cannot both fit under the limit.
     return yield* runtime.threadStartLock.withPermit(
       Effect.gen(function* () {
@@ -612,6 +669,7 @@ const threadCommand = Effect.fn("ForkBot.threadCommand")(function* (
     }
     const text = textOf(rest.slice(1), stdin);
     if (text === "") return yield* fail("Write the message.");
+    const fresh = flags.has("fresh");
     const title = (yield* readNotebook(botId)).threads.find(
       (thread) => thread.threadId === threadId,
     )?.title;
@@ -631,12 +689,17 @@ const threadCommand = Effect.fn("ForkBot.threadCommand")(function* (
         messageId: MessageId.make(NodeCrypto.randomUUID()),
         text,
         attachments: [],
-        mode: "auto",
+        // A fresh start cannot join a running turn, so it waits for that turn to end.
+        ...(fresh ? { mode: "queue", freshContext: true } : { mode: "auto" }),
         createdBy: "system",
         creationSource: "server",
       })
       .pipe(Effect.mapError((cause) => fail(`Not sent: ${cause.message}`)));
-    return `Sent (${sent.delivery}).`;
+    if (fresh) return `Sent (${sent.delivery}), on a clean context.`;
+    const fill = yield* threadContext(owned.projectId, threadId);
+    return fill === null || fill.used / fill.max < FRESH_AT
+      ? `Sent (${sent.delivery}).`
+      : `Sent (${sent.delivery}). ${contextLine(fill)}`;
   }
 
   if (sub === "read") {
@@ -651,7 +714,7 @@ const threadCommand = Effect.fn("ForkBot.threadCommand")(function* (
     const records = yield* threads
       .getProjectThreadRecords(
         { projectId: shell.projectId, threadId: ThreadId.make(threadId) },
-        ["messages", "runs"],
+        ["messages", "runs", "providerTurns"],
         { messageRoles: ["user", "assistant"] },
       )
       .pipe(Effect.mapError((cause) => fail(`Cannot read it: ${cause.message}`)));
@@ -664,7 +727,7 @@ const threadCommand = Effect.fn("ForkBot.threadCommand")(function* (
       )
       .slice(-limit);
     return [
-      `"${shell.title}" - latest run ${latestRun?.status ?? "none"}`,
+      `"${shell.title}" - latest run ${latestRun?.status ?? "none"}. ${contextLine(contextFill(records))}`,
       ...messages.map(
         (message) =>
           `[${message.role}${message.role === "user" && message.createdBy !== "user" ? ` (${message.createdBy})` : ""}] ${

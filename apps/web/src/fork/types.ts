@@ -326,6 +326,8 @@ export interface BotSettings {
   readonly turnsPerDay: number;
   readonly maxThreads: number;
   readonly runtimeMode: RuntimeMode;
+  /** What threads it starts run on unless it names another; null is its own model. */
+  readonly threadModel: ModelSelection | null;
   /** By instance id; one missing here is off. */
   readonly connectors: Readonly<Record<string, BotConnectorSettings>>;
 }

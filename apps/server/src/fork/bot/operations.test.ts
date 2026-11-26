@@ -56,6 +56,12 @@ interface Harness {
   readonly threadModes: Map<string, string>;
   /** The model selection of each launch, in order. */
   readonly models: unknown[];
+  /** Each non-steer send's mode and whether it asked for a fresh context, in order. */
+  readonly sends: Array<{ readonly mode: string; readonly freshContext: boolean }>;
+  /** Titles set on threads with a metadata update, in order. */
+  readonly titles: Array<{ readonly threadId: string; readonly title: string | undefined }>;
+  /** A thread's latest context usage, as its provider reported it. */
+  readonly usage: Map<string, { usedTokens: number; maxTokens: number }>;
   /** What T3 answers a steer with: a provider turn to join, or only the queue. */
   steerDelivery: "steered" | "queued";
   /** Projects `thread start` may name, and whether each worker launch saw its thread owned. */
@@ -117,6 +123,9 @@ async function harness(store = new BotStore(":memory:")): Promise<Harness> {
   const modes: string[] = [];
   const threadModes = new Map<string, string>();
   const models: unknown[] = [];
+  const sends: Harness["sends"] = [];
+  const titles: Harness["titles"] = [];
+  const usage: Harness["usage"] = new Map();
   const nextRun = (threadId: string) => {
     const runId = `run-${runs.length + 1}`;
     runs.push({ threadId, runId });
@@ -128,6 +137,9 @@ async function harness(store = new BotStore(":memory:")): Promise<Harness> {
     Layer.mock(ThreadManagement.ThreadManagementService)({
       getThreadTitles: () => Effect.succeed({}),
       dispatch: (command) => {
+        if (command.type === "thread.metadata.update") {
+          titles.push({ threadId: command.threadId, title: command.title });
+        }
         if (command.type === "thread.runtime-mode.set") {
           modes.push(command.runtimeMode);
           threadModes.set(command.threadId, command.runtimeMode);
@@ -140,7 +152,11 @@ async function harness(store = new BotStore(":memory:")): Promise<Harness> {
           return Effect.succeed({ delivery: h.steerDelivery, run: { id: "steer" } } as never);
         }
         packets.push(input.text);
-        return Effect.succeed({ run: { id: nextRun(input.threadId) } } as never);
+        sends.push({ mode: input.mode, freshContext: input.freshContext === true });
+        return Effect.succeed({
+          delivery: "queued",
+          run: { id: nextRun(input.threadId) },
+        } as never);
       },
       getThreadShell: (threadId) => {
         const shell = shells.get(threadId);
@@ -151,6 +167,15 @@ async function harness(store = new BotStore(":memory:")): Promise<Harness> {
       },
       getProjectThreadRecords: (input, _fields, filter) =>
         Effect.succeed({
+          thread: { activeProviderThreadId: "pt" },
+          providerTurns: usage.has(input.threadId)
+            ? [
+                {
+                  providerThreadId: "pt",
+                  tokenUsage: { ...usage.get(input.threadId), updatedAt: "2026-01-01T00:00:00Z" },
+                },
+              ]
+            : [],
           runs: (filter?.runIds ?? []).flatMap((id) =>
             runStatus.has(id) ? [{ id, status: runStatus.get(id) }] : [],
           ),
@@ -213,6 +238,7 @@ async function harness(store = new BotStore(":memory:")): Promise<Harness> {
           instanceId: MODEL.instanceId,
           supportedRuntimeModes: ["approval-required", "auto-accept-edits", "full-access"],
         },
+        { instanceId: "codex", supportedRuntimeModes: ["auto", "full-access"] },
       ] as never),
     }),
     Layer.succeed(ServerConfig.ServerConfig, {} as never),
@@ -228,6 +254,9 @@ async function harness(store = new BotStore(":memory:")): Promise<Harness> {
     shells,
     userMessages,
     steerDelivery: "queued",
+    sends,
+    titles,
+    usage,
     projects,
     ownedAtLaunch,
     modes,
@@ -442,10 +471,14 @@ describe("bot turns", () => {
         expect(h.runs).toHaveLength(0);
         expect(store.queued(botId).map((event) => event.wakes)).toEqual([false]);
         // A finished now thread wakes the bot, and that turn takes both events.
+        h.replies.set("t-now-run", "Found it:\nthe cache was stale.");
         yield* followThreads(Stream.make(ended("t-now", "completed")));
         expect(h.runs).toHaveLength(1);
-        expect(h.packets[0]).toContain("Thread t-attention completed");
-        expect(h.packets[0]).toContain("Thread t-now completed");
+        expect(h.packets[0]).toContain("Thread t-attention completed. It left no message");
+        // Its last message comes along, so the bot need not read the thread to pass it on.
+        expect(h.packets[0]).toContain(
+          "Thread t-now completed. Its last message:\n  > Found it:\n  > the cache was stale.",
+        );
         expect(store.queued(botId)).toEqual([]);
       }),
     ),
@@ -888,6 +921,96 @@ describe("bot turns", () => {
         expect(failed.detail).toContain("did not start");
         expect(h.runtime.store().listThreads(botId)).toHaveLength(1);
         expect(h.runtime.ownedThreads.size).toBe(1);
+      }),
+    ),
+  );
+
+  it.effect("tells the bot when a thread's context fills, and sends fresh on --fresh", () =>
+    withHarness((h) =>
+      Effect.gen(function* () {
+        const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+        h.runtime.store().addThread({
+          threadId: "t1",
+          botId,
+          projectId: "p",
+          itemId: null,
+          follow: "now",
+          createdAt: "t0",
+        });
+        h.shells.set("t1", { latestRunId: "r", status: "idle" });
+        const tool = (...argv: string[]) => runTool({ bot: botId, argv, stdin: "" });
+
+        expect(yield* tool("thread", "read", "t1")).toContain("does not report context size");
+        h.usage.set("t1", { usedTokens: 50_000, maxTokens: 200_000 });
+        expect(yield* tool("thread", "send", "t1", "Next")).toBe("Sent (queued).");
+        h.usage.set("t1", { usedTokens: 150_000, maxTokens: 200_000 });
+        expect(yield* tool("thread", "read", "t1")).toContain("(75%). Give it more work with");
+        expect(yield* tool("thread", "send", "t1", "Next")).toContain("--fresh");
+
+        expect(yield* tool("thread", "send", "--fresh", "t1", "Goal: ship it")).toContain(
+          "on a clean context",
+        );
+        expect(h.packets.at(-1)).toBe("Goal: ship it");
+        // A fresh start never joins a running turn.
+        expect(h.sends.map((send) => [send.mode, send.freshContext])).toEqual([
+          ["auto", false],
+          ["auto", false],
+          ["queue", true],
+        ]);
+      }),
+    ),
+  );
+
+  it.effect("renames the bot and moves it and its threads to the models the user picks", () =>
+    withHarness((h) =>
+      Effect.gen(function* () {
+        const { botId } = yield* Bots.createBot({ name: "Ops", modelSelection: MODEL });
+        const store = h.runtime.store();
+        h.projects.push({ id: "p1", title: "Repo", workspaceRoot: "/repo" });
+        yield* Bots.sendMessage({ botId, text: "Hi" });
+        yield* endRun(h, botId, 0, "Hello.");
+        const workThreadId = store.getBot(botId)!.workThreadId!;
+        const limits = { turnsPerDay: 100, maxThreads: 3 };
+        const codex = {
+          instanceId: "codex",
+          model: "gpt-5.5",
+          options: [{ id: "effort", value: "high" }],
+        };
+
+        yield* Bots.saveSettings({ botId, name: " DevOps ", settings: limits });
+        expect(store.getBot(botId)?.name).toBe("DevOps");
+        expect(h.titles).toEqual([{ threadId: workThreadId, title: "DevOps (bot)" }]);
+        expect(store.queued(botId).map((event) => event.text)).toEqual([
+          "The user renamed you from Ops to DevOps.",
+        ]);
+        expect(
+          (yield* Effect.flip(Bots.saveSettings({ botId, name: " ", settings: limits }))).detail,
+        ).toContain("Name the bot");
+
+        // Its threads run on the model set for them, effort included, unless it names another.
+        yield* Bots.saveSettings({ botId, settings: { ...limits, threadModel: codex } });
+        const start = (...flags: string[]) =>
+          runTool({
+            bot: botId,
+            argv: ["thread", "start", "--project=Repo", ...flags, "Go"],
+            stdin: "",
+          });
+        yield* start();
+        expect(h.models.at(-1)).toEqual(codex);
+        yield* start("--provider", MODEL.instanceId, "--model", MODEL.model);
+        expect(h.models.at(-1)).toEqual({ instanceId: MODEL.instanceId, model: MODEL.model });
+        expect(yield* runTool({ bot: botId, argv: ["help"], stdin: "" })).toContain(
+          "runs on --provider codex --model gpt-5.5",
+        );
+        yield* Bots.saveSettings({ botId, settings: { ...limits, threadModel: null } });
+        yield* start();
+        expect(h.models.at(-1)).toEqual(MODEL);
+
+        // Its own turns move to another provider on a fresh session, not a handed-over one.
+        yield* Bots.saveSettings({ botId, modelSelection: codex, settings: limits });
+        expect(store.getBot(botId)?.modelSelection).toEqual(codex);
+        yield* Bots.sendMessage({ botId, text: "Still there?" });
+        expect(h.sends.at(-1)).toEqual({ mode: "queue", freshContext: true });
       }),
     ),
   );

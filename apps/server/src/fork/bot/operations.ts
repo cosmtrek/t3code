@@ -456,6 +456,20 @@ export const runtimeModeFor = Effect.fn("ForkBot.runtimeModeFor")(function* (
   }).pipe(Effect.orElseSucceed(() => wanted));
 });
 
+/** A model as the `thread start` flags that pick it. */
+export const modelFlags = (selection: ModelSelection) =>
+  `--provider ${selection.instanceId} --model ${selection.model}`;
+
+/** What its threads run on unless it names another: its own model when the set one is gone. */
+export const threadModelFor = Effect.fn("ForkBot.threadModelFor")(function* (bot: Bot) {
+  const wanted = bot.settings.threadModel;
+  if (wanted === null) return bot.modelSelection;
+  const providers = yield* (yield* ProviderRegistry.ProviderRegistry).getProviders;
+  return providers.some((provider) => provider.instanceId === wanted.instanceId)
+    ? wanted
+    : bot.modelSelection;
+});
+
 /**
  * Puts the work thread in the bot's mode. The thread can drift from it: sending from its composer
  * sets the composer's mode, so each turn re-applies the bot's.
@@ -512,7 +526,7 @@ const dispatch = Effect.fn("ForkBot.dispatch")(function* (
     commandId,
     threadId: ThreadId.make(commandId),
     projectId,
-    title: `${bot.name} (bot)`,
+    title: workThreadTitle(bot.name),
     modelSelection,
     runtimeMode: yield* runtimeModeFor(modelSelection, bot.settings.runtimeMode),
     interactionMode: "default",
@@ -530,6 +544,11 @@ const dispatch = Effect.fn("ForkBot.dispatch")(function* (
   runtime.workThreads.set(launched.threadId, bot.id);
   return { threadId: launched.threadId, runId: run.id };
 });
+
+const workThreadTitle = (name: string) => `${name} (bot)`;
+
+const sameModel = (left: ModelSelection, right: ModelSelection) =>
+  JSON.stringify(left) === JSON.stringify(right);
 
 /** Quotes a word for a POSIX shell; the state folder may hold spaces (`Application Support`). */
 export const shellQuote = (word: string) =>
@@ -566,8 +585,14 @@ const wake = Effect.fn("ForkBot.wake")(function* (botId: string) {
       const answered = store
         .recentChat(botId, RECENT_CHAT_LIMIT + waiting.length)
         .filter((message) => !waiting.some((candidate) => candidate.id === message.id));
-      // A new day starts a fresh provider session; the full packet carries all a turn needs.
-      const freshContext = firstTurnToday && bot.lastTurnDay !== null;
+      // A new day starts a fresh provider session; the full packet carries all a turn needs. So
+      // does a move to another provider, rather than handing it this session's transcript.
+      const seenModel = store.seenModel(botId);
+      const freshContext =
+        (firstTurnToday && bot.lastTurnDay !== null) ||
+        (bot.workThreadId !== null &&
+          seenModel !== null &&
+          seenModel.instanceId !== bot.modelSelection.instanceId);
       const seen =
         freshContext || bot.workThreadId === null
           ? null
@@ -590,6 +615,7 @@ const wake = Effect.fn("ForkBot.wake")(function* (botId: string) {
           now,
           firstTurnToday,
           connectors: yield* briefFor(bot),
+          threadModel: modelFlags(yield* threadModelFor(bot)),
         },
         seen,
       );
@@ -621,7 +647,7 @@ const wake = Effect.fn("ForkBot.wake")(function* (botId: string) {
 });
 
 /** The text a run ended with: its last assistant message that has any. */
-const replyOf = Effect.fn("ForkBot.replyOf")(function* (
+export const replyOf = Effect.fn("ForkBot.replyOf")(function* (
   projectId: string,
   threadId: string,
   runId: string,
@@ -921,11 +947,15 @@ export const setPaused = Effect.fn("ForkBot.setPaused")(function* (input: unknow
 const Permission = Schema.Literals(["allow", "ask"]);
 const SettingsInput = Schema.Struct({
   botId: Schema.String,
+  name: Schema.optional(Schema.String),
+  modelSelection: Schema.optional(Schema.Unknown),
   settings: Schema.Struct({
     threads: Schema.optional(Permission),
     turnsPerDay: Schema.Number,
     maxThreads: Schema.Number,
     runtimeMode: Schema.optional(RuntimeMode),
+    /** Left out keeps it; null runs its threads on its own model. */
+    threadModel: Schema.optional(Schema.NullOr(Schema.Unknown)),
     /** By instance id; instances left out keep what they had. */
     connectors: Schema.optional(
       Schema.Record(
@@ -954,6 +984,23 @@ export const saveSettings = Effect.fn("ForkBot.saveSettings")(function* (input: 
   if (!Number.isInteger(maxThreads) || maxThreads < 1 || maxThreads > 50) {
     return yield* badRequest("Give 1 to 50 threads at once.", "maxThreads");
   }
+  const name = decoded.name?.trim() ?? bot.name;
+  if (name === "" || name.length > NAME_CHARS) {
+    return yield* badRequest(`Name the bot in 1 to ${NAME_CHARS} characters.`, "name");
+  }
+  const pickModel = (value: unknown, field: string) =>
+    decode(ModelSelection, value).pipe(Effect.mapError(() => badRequest("Choose a model.", field)));
+  const modelSelection =
+    decoded.modelSelection === undefined
+      ? bot.modelSelection
+      : yield* pickModel(decoded.modelSelection, "modelSelection");
+  const wantedThreadModel = decoded.settings.threadModel;
+  const threadModel =
+    wantedThreadModel === undefined
+      ? bot.settings.threadModel
+      : wantedThreadModel === null
+        ? null
+        : yield* pickModel(wantedThreadModel, "threadModel");
   const instances = yield* listInstances();
   const now = nowIso();
   const connectors: Record<string, ConnectorSettings> = Object.fromEntries(
@@ -988,12 +1035,17 @@ export const saveSettings = Effect.fn("ForkBot.saveSettings")(function* (input: 
     turnsPerDay,
     maxThreads,
     runtimeMode,
+    threadModel,
     connectors,
   };
-  yield* alignWorkThreadMode({ ...bot, settings }).pipe(
+  yield* alignWorkThreadMode({ ...bot, modelSelection, settings }).pipe(
     Effect.mapError((cause) => badRequest(cause.message, "runtimeMode")),
   );
   store.setSettings(bot.id, settings);
+  if (name !== bot.name || !sameModel(modelSelection, bot.modelSelection)) {
+    store.setProfile(bot.id, name, modelSelection);
+  }
+  if (name !== bot.name) yield* renamed(bot, name);
   for (const { connector, instance } of saved) {
     if (connector.afterSave !== undefined) yield* connector.afterSave(bot.id, instance.id);
   }
@@ -1001,6 +1053,28 @@ export const saveSettings = Effect.fn("ForkBot.saveSettings")(function* (input: 
   // A raised budget may let a held wake run now.
   yield* wake(bot.id);
   return {};
+});
+
+/**
+ * Its work thread's title follows the name. A running session met the bot under its old name,
+ * which only a fresh packet repeats, so it hears of the new one.
+ */
+const renamed = Effect.fn("ForkBot.renamed")(function* (bot: Bot, name: string) {
+  if (bot.workThreadId !== null) {
+    yield* (yield* ThreadManagement.ThreadManagementService)
+      .dispatch({
+        type: "thread.metadata.update",
+        commandId: CommandId.make(newId("fork-bot")),
+        threadId: ThreadId.make(bot.workThreadId),
+        title: workThreadTitle(name),
+      })
+      .pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("A bot could not retitle its work thread.", { cause }),
+        ),
+      );
+  }
+  yield* notify(bot.id, `The user renamed you from ${bot.name} to ${name}.`, false);
 });
 
 const HandBackInput = Schema.Struct({ botId: Schema.String, threadId: Schema.String });

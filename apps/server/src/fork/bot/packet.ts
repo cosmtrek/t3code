@@ -55,6 +55,8 @@ export interface PacketInput {
   readonly firstTurnToday: boolean;
   /** Brief lines for the connectors it has on, such as chat channels. */
   readonly connectors: ReadonlyArray<string>;
+  /** The flags of the model its threads run on unless it names another. */
+  readonly threadModel: string;
 }
 
 const clip = (value: string, chars = MESSAGE_CHARS) =>
@@ -176,7 +178,12 @@ export function buildPacket(input: PacketInput, seen: PacketSections | null = nu
       "  Every turn lists your skills, so they need no memory line. Read a skill's SKILL.md",
       "  before a task it applies to.",
       "- Do real work in threads you start with `thread start`, not here. They wake you when they",
-      "  stop, so start one and end your turn; never wait on it.",
+      "  stop, so start one and end your turn; never wait on it. They run on",
+      `  \`${input.threadModel}\` unless you pass others.`,
+      "- A thread that stopped reports its last message to you. Trust what it found and pass it",
+      "  on; check again only what looks wrong or is missing.",
+      "- Before giving a thread more work, see how full its context is with `thread read`; when",
+      "  `thread send` or `thread read` says so, send with `--fresh` so it does not compact.",
       ...input.connectors,
     ].join("\n"),
     notebook: renderNotebook(input.notebook),

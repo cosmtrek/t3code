@@ -46,6 +46,7 @@ const input = (patch: Partial<PacketInput>): PacketInput => ({
   now: NOW,
   firstTurnToday: false,
   connectors: [],
+  threadModel: "--provider claudeAgent --model claude-haiku-5-5",
   ...patch,
 });
 

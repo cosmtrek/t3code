@@ -16,6 +16,7 @@ import {
   notify,
   nowIso,
   postError,
+  replyOf,
 } from "./operations.ts";
 import type { OwnedThread } from "./store.ts";
 import { takenOverByUser } from "./tools.ts";
@@ -24,6 +25,17 @@ import { takenOverByUser } from "./tools.ts";
 export type ThreadChange =
   | { readonly type: "run"; readonly runId: string; readonly status: string }
   | { readonly type: "request"; readonly requestId: string; readonly kind: string };
+
+/** A stopped thread's last message, in the event; `thread read` has the rest. */
+const REPLY_CHARS = 3_000;
+
+const stoppedEvent = (thread: string, status: string, reply: string | null) => {
+  const head = `${thread} ${status.replace("_", " ")}.`;
+  if (reply === null) return `${head} It left no message; read it with \`thread read\`.`;
+  const cut = reply.length > REPLY_CHARS;
+  const body = (cut ? `${reply.slice(0, REPLY_CHARS)}… (cut)` : reply).replace(/^/gm, "  > ");
+  return `${head} Its last message:\n${body}${cut ? "\n  `thread read` has the rest." : ""}`;
+};
 
 const describe = (thread: OwnedThread) =>
   `Thread ${thread.threadId}${thread.itemId === null ? "" : ` (item #${thread.itemId})`}`;
@@ -95,11 +107,11 @@ const observeThread = Effect.fn("ForkBot.observeThread")(function* (
   touch();
   const failed = change.status !== "completed";
   const wakes = owned.follow === "now" || (owned.follow === "attention" && failed);
-  yield* notify(
-    botId,
-    `${describe(owned)} ${change.status.replace("_", " ")}. Read it with \`thread read\`.`,
-    wakes,
+  // Its last word saves the bot a `thread read` and a model step on most wakes.
+  const reply = yield* replyOf(owned.projectId, owned.threadId, change.runId).pipe(
+    Effect.orElseSucceed(() => null),
   );
+  yield* notify(botId, stoppedEvent(describe(owned), change.status, reply), wakes);
 });
 
 export const followThreads = Effect.fn("ForkBot.followThreads")(function* <E, R>(

@@ -50,6 +50,8 @@ export interface BotSettings {
   readonly maxThreads: number;
   /** Its work thread and the threads it starts; a provider without it gets the next narrower. */
   readonly runtimeMode: RuntimeMode;
+  /** What threads it starts run on unless it names another; null is its own model. */
+  readonly threadModel: ModelSelection | null;
   /** By connector instance id; one missing here is off. */
   readonly connectors: Readonly<Record<string, ConnectorSettings>>;
 }
@@ -59,6 +61,7 @@ const DEFAULT_SETTINGS: BotSettings = {
   turnsPerDay: 100,
   maxThreads: 3,
   runtimeMode: "auto",
+  threadModel: null,
   connectors: {},
 };
 
@@ -112,6 +115,7 @@ const toSettings = (value: string): BotSettings => {
     turnsPerDay: parsed.turnsPerDay ?? DEFAULT_SETTINGS.turnsPerDay,
     maxThreads: parsed.maxThreads ?? DEFAULT_SETTINGS.maxThreads,
     runtimeMode: parsed.runtimeMode ?? DEFAULT_SETTINGS.runtimeMode,
+    threadModel: parsed.threadModel ?? null,
     connectors,
   };
 };
@@ -540,6 +544,20 @@ export class BotStore {
           .run(day, id, day).changes,
       ) > 0
     );
+  }
+
+  setProfile(id: string, name: string, modelSelection: ModelSelection) {
+    this.db
+      .prepare("UPDATE bots SET name = ?, model_selection = ? WHERE id = ?")
+      .run(name, JSON.stringify(modelSelection), id);
+  }
+
+  /** The model the work thread's provider session last ran on; null before its first turn. */
+  seenModel(id: string): ModelSelection | null {
+    const row = this.db.prepare("SELECT seen_packet FROM bots WHERE id = ?").get(id);
+    const stored = row === undefined ? null : nullableText(row, "seen_packet");
+    if (stored === null) return null;
+    return JSON.parse((JSON.parse(stored) as { model: string }).model) as ModelSelection;
   }
 
   setPaused(id: string, paused: boolean) {

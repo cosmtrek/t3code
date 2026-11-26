@@ -61,7 +61,11 @@ import {
   EmptyTitle,
 } from "../../components/ui/empty";
 import { SettingsGroup } from "../../components/settings/SettingsGroup";
-import { SettingsRow } from "../../components/settings/settingsLayout";
+import {
+  SETTINGS_PICKER_TRIGGER_CLASSNAME,
+  SettingResetButton,
+  SettingsRow,
+} from "../../components/settings/settingsLayout";
 import { Input } from "../../components/ui/input";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../../components/ui/menu";
 import {
@@ -597,11 +601,6 @@ function BotChat({
                 {data?.bot.paused ? <PlayIcon /> : <PauseIcon />}
                 {data?.bot.paused ? "Resume" : "Pause"}
               </MenuItem>
-              <MenuSeparator />
-              <MenuItem variant="destructive" onClick={() => setDeleting(true)}>
-                <Trash2Icon />
-                Delete bot
-              </MenuItem>
             </MenuPopup>
           </Menu>
         </PaneHeader>
@@ -689,12 +688,12 @@ function BotChat({
         <SettingsDialog
           key={data.bot.id}
           environmentId={environmentId}
-          botId={data.bot.id}
-          name={data.bot.name}
-          instanceId={data.bot.modelSelection.instanceId}
-          settings={data.bot.settings}
+          bot={data.bot}
           connectors={data.connectors}
-          turnsToday={data.bot.turnsToday}
+          onDelete={() => {
+            setEditingSettings(false);
+            setDeleting(true);
+          }}
           onClose={() => setEditingSettings(false)}
         />
       ) : null}
@@ -1452,46 +1451,58 @@ const CONNECTOR_OFF: BotConnectorSettings = { enabled: false, permissions: {}, c
 /** Each change saves at once, like T3's own settings dialogs. */
 function SettingsDialog({
   environmentId,
-  botId,
-  name,
-  instanceId,
-  settings,
+  bot,
   connectors,
-  turnsToday,
+  onDelete,
   onClose,
 }: {
   readonly environmentId: EnvironmentId;
-  readonly botId: string;
-  readonly name: string;
-  readonly instanceId: string;
-  readonly settings: BotSettings;
+  readonly bot: BotDetail["bot"];
   readonly connectors: ReadonlyArray<BotConnectorInstance>;
-  readonly turnsToday: number;
+  readonly onDelete: () => void;
   readonly onClose: () => void;
 }) {
-  const modes = useRuntimeModes(environmentId, instanceId);
-  const [current, setCurrent] = useState(settings);
+  const [current, setCurrent] = useState({
+    name: bot.name,
+    modelSelection: bot.modelSelection,
+    settings: bot.settings,
+  });
+  const modes = useRuntimeModes(environmentId, current.modelSelection.instanceId);
   const [error, setError] = useState<string | null>(null);
-  const connectorOf = (id: string) => current.connectors[id] ?? CONNECTOR_OFF;
+  const settings = current.settings;
+  const connectorOf = (id: string) => settings.connectors[id] ?? CONNECTOR_OFF;
   /** `connector` names the one instance this change touches; the server keeps the others. */
-  const save = async (patch: Partial<BotSettings>, connector?: string) => {
+  const save = async (
+    patch: Partial<BotSettings> & { name?: string; modelSelection?: ModelSelection },
+    connector?: string,
+  ) => {
+    const { name, modelSelection, ...settingsPatch } = patch;
     const before = current;
-    const next = { ...current, ...patch };
+    const next = {
+      name: name ?? current.name,
+      modelSelection: modelSelection ?? current.modelSelection,
+      settings: { ...current.settings, ...settingsPatch },
+    };
     setCurrent(next);
     setError(null);
     try {
       await forkRequest(environmentId, "/bots/settings", {
         method: "POST",
         body: {
-          botId,
+          botId: bot.id,
+          ...(name === undefined ? {} : { name }),
+          ...(modelSelection === undefined ? {} : { modelSelection }),
           settings: {
-            threads: next.threads,
-            turnsPerDay: next.turnsPerDay,
-            maxThreads: next.maxThreads,
-            runtimeMode: next.runtimeMode,
+            threads: next.settings.threads,
+            turnsPerDay: next.settings.turnsPerDay,
+            maxThreads: next.settings.maxThreads,
+            runtimeMode: next.settings.runtimeMode,
+            threadModel: next.settings.threadModel,
             ...(connector === undefined
               ? {}
-              : { connectors: { [connector]: next.connectors[connector] ?? CONNECTOR_OFF } }),
+              : {
+                  connectors: { [connector]: next.settings.connectors[connector] ?? CONNECTOR_OFF },
+                }),
           },
         },
       });
@@ -1501,7 +1512,16 @@ function SettingsDialog({
     }
   };
   const saveConnector = (id: string, patch: Partial<BotConnectorSettings>) =>
-    save({ connectors: { ...current.connectors, [id]: { ...connectorOf(id), ...patch } } }, id);
+    save({ connectors: { ...settings.connectors, [id]: { ...connectorOf(id), ...patch } } }, id);
+  const rename = (input: HTMLInputElement) => {
+    const name = input.value.trim();
+    if (name === current.name) return;
+    if (name === "") {
+      input.value = current.name;
+      return;
+    }
+    void save({ name });
+  };
   return (
     <Dialog
       open
@@ -1511,21 +1531,78 @@ function SettingsDialog({
     >
       <DialogPopup className="max-w-2xl">
         <DialogHeader>
-          <DialogTitle>{name} settings</DialogTitle>
-          <DialogDescription>
-            What this bot may do on its own. Changes apply right away.
-          </DialogDescription>
+          <DialogTitle>{current.name} settings</DialogTitle>
+          <DialogDescription>Changes apply right away.</DialogDescription>
         </DialogHeader>
         <DialogPanel>
           <div className="flex flex-col gap-4">
+            <SettingsHeading title="Bot" />
+            <SettingsGroup>
+              <SettingsRow
+                title="Name"
+                control={
+                  <Input
+                    size="sm"
+                    className="w-full sm:w-56"
+                    aria-label="Bot name"
+                    maxLength={60}
+                    defaultValue={current.name}
+                    onBlur={(event) => rename(event.currentTarget)}
+                    onKeyDown={(event) => {
+                      if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+                      if (event.key === "Enter") event.currentTarget.blur();
+                    }}
+                  />
+                }
+              />
+              <SettingsRow
+                title="Model"
+                description="Its own turns: reading, planning, and replying to you."
+                control={
+                  <DelegateModelPicker
+                    environmentId={environmentId}
+                    projectId={null}
+                    selection={current.modelSelection}
+                    triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
+                    onChange={(modelSelection) => void save({ modelSelection })}
+                  />
+                }
+              />
+              <SettingsRow
+                title="Threads it starts"
+                description={
+                  settings.threadModel === null
+                    ? "Same as its own model. It can still pick another for a thread."
+                    : "It can still pick another for a thread."
+                }
+                resetAction={
+                  settings.threadModel !== null ? (
+                    <SettingResetButton
+                      ariaLabel="Use its own model for threads it starts"
+                      onClick={() => void save({ threadModel: null })}
+                    />
+                  ) : null
+                }
+                control={
+                  <DelegateModelPicker
+                    environmentId={environmentId}
+                    projectId={null}
+                    selection={settings.threadModel ?? current.modelSelection}
+                    triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
+                    onChange={(threadModel) => void save({ threadModel })}
+                  />
+                }
+              />
+            </SettingsGroup>
+            <SettingsHeading title="Permissions" />
             <SettingsGroup>
               <SettingsRow
                 title="Permission mode"
-                description={resolveRuntimeModeOption(current.runtimeMode).description}
+                description={resolveRuntimeModeOption(settings.runtimeMode).description}
                 control={
                   <RuntimeModeSelect
                     modes={modes}
-                    value={runtimeModeWithin(current.runtimeMode, modes)}
+                    value={runtimeModeWithin(settings.runtimeMode, modes)}
                     onChange={(runtimeMode) => void save({ runtimeMode })}
                   />
                 }
@@ -1536,18 +1613,18 @@ function SettingsDialog({
                 control={
                   <PermissionSelect
                     label="Start and run threads"
-                    value={current.threads}
+                    value={settings.threads}
                     onChange={(threads) => void save({ threads })}
                   />
                 }
               />
               <SettingsRow
                 title="Turns a day"
-                description={`${turnsToday} used today.`}
+                description={`${bot.turnsToday} used today.`}
                 control={
                   <CountField
                     label="turns a day"
-                    value={current.turnsPerDay}
+                    value={settings.turnsPerDay}
                     min={1}
                     max={10_000}
                     onCommit={(turnsPerDay) => void save({ turnsPerDay })}
@@ -1560,7 +1637,7 @@ function SettingsDialog({
                 control={
                   <CountField
                     label="threads at once"
-                    value={current.maxThreads}
+                    value={settings.maxThreads}
                     min={1}
                     max={50}
                     onCommit={(maxThreads) => void save({ maxThreads })}
@@ -1568,23 +1645,36 @@ function SettingsDialog({
                 }
               />
             </SettingsGroup>
-            <div className="flex flex-col gap-0.5 px-1 pt-2">
-              <h3 className="text-sm font-medium">Connectors</h3>
-              <p className="text-xs text-muted-foreground">
-                {connectors.length > 0
+            <SettingsHeading
+              title="Connectors"
+              description={
+                connectors.length > 0
                   ? "Outside systems this bot can use, each through t3bot and its name."
-                  : "Outside systems this bot can use. None here yet: chat channels you add in Settings appear here."}
-              </p>
-            </div>
+                  : "Outside systems this bot can use. None here yet: chat channels you add in Settings appear here."
+              }
+            />
             {connectors.map((instance) => (
               <ConnectorSection
                 key={instance.id}
-                botId={botId}
+                botId={bot.id}
                 instance={instance}
                 value={connectorOf(instance.id)}
                 onChange={(patch) => void saveConnector(instance.id, patch)}
               />
             ))}
+            <SettingsHeading title="Danger" />
+            <SettingsGroup>
+              <SettingsRow
+                title="Delete bot"
+                description="Threads it started stay."
+                control={
+                  <Button size="sm" variant="destructive-outline" onClick={onDelete}>
+                    <Trash2Icon />
+                    Delete
+                  </Button>
+                }
+              />
+            </SettingsGroup>
             {error ? <p className="text-xs text-destructive-foreground">{error}</p> : null}
           </div>
         </DialogPanel>
@@ -1593,6 +1683,21 @@ function SettingsDialog({
         </DialogFooter>
       </DialogPopup>
     </Dialog>
+  );
+}
+
+function SettingsHeading({
+  title,
+  description,
+}: {
+  readonly title: string;
+  readonly description?: string;
+}) {
+  return (
+    <div className="flex flex-col gap-0.5 px-1 pt-2 first:pt-0">
+      <h3 className="text-sm font-medium">{title}</h3>
+      {description ? <p className="text-xs text-muted-foreground">{description}</p> : null}
+    </div>
   );
 }
 
@@ -1876,7 +1981,7 @@ function DeleteBotDialog({
         </DialogHeader>
         <DialogPanel>
           <p className="text-sm text-muted-foreground">
-            Its chat and role are deleted. Its threads stay as ordinary threads.
+            Its chat, notebook, and role are deleted. Threads it started stay as ordinary threads.
           </p>
           {error ? <p className="mt-2 text-xs text-destructive-foreground">{error}</p> : null}
         </DialogPanel>
