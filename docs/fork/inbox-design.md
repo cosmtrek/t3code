@@ -73,8 +73,9 @@ conversations, it is not another list of objects.
 
 - Opening a conversation from anywhere lands at the reading position: the first unread message,
   else the bottom. It never jumps to an old follow-up's first message.
-- A follow-up shows twice in the chat, each with its own job: a small marker under its first
-  message (shaped like the reply count), and a side panel that holds its result, draft,
+- A follow-up shows twice in the chat, each with its own job: a marker in its first message's
+  footer, beside the reply count and built the same way (muted, `warning` only when it needs
+  you), and a side panel that holds its result, draft,
   questions, and agent chat. The panel is not permanent: it opens with the conversation when a
   follow-up needs you, from the marker, or from the header, and the user can close it. On narrow
   screens it is a drawer over the chat.
