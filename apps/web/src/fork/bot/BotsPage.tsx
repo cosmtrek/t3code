@@ -729,6 +729,10 @@ function scheduleLabel(schedule: BotNotebook["routines"][number]["schedule"]) {
     : `${days.map((day) => DAY_NAMES[day]).join(", ")} ${schedule.time}`;
 }
 
+/** A clickable profile row; the negative margin keeps its text aligned with plain rows. */
+const PROFILE_ROW =
+  "-mx-1.5 min-w-0 cursor-pointer rounded-md px-1.5 py-1 text-left outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset";
+
 function NotebookSection({
   title,
   count,
@@ -963,14 +967,13 @@ function NotebookPanel({
                       : ""}
                   </div>
                 </div>
-                <Button
-                  size="xs"
-                  variant="outline"
+                <IconAction
+                  label="Run now"
                   disabled={pending !== null}
                   onClick={() => runNow(routine.id)}
                 >
-                  Run now
-                </Button>
+                  <PlayIcon />
+                </IconAction>
               </div>
             ))}
           </NotebookSection>
@@ -997,7 +1000,7 @@ function NotebookPanel({
                 key={note.name}
                 type="button"
                 onClick={() => setOpenFile({ kind: "note", name: note.name, title: note.name })}
-                className="flex min-w-0 items-center gap-1.5 text-left text-sm hover:text-foreground"
+                className={cn(PROFILE_ROW, "flex items-center gap-1.5 text-sm")}
               >
                 <FileTextIcon className="size-3.5 shrink-0 text-muted-foreground" />
                 <span className="min-w-0 flex-1 truncate">{note.name}</span>
@@ -1021,7 +1024,7 @@ function NotebookPanel({
                     title: skill.name,
                   })
                 }
-                className="flex min-w-0 flex-col text-left hover:text-foreground"
+                className={cn(PROFILE_ROW, "flex flex-col")}
               >
                 <span className="flex min-w-0 items-center gap-1.5 text-sm">
                   <span className="min-w-0 flex-1 truncate">{skill.name}</span>
@@ -1092,11 +1095,7 @@ function ConnectorSummary({
     ...(instance.kind === "chat" && value.config.mentions === true ? ["Wakes on @-mentions"] : []),
   ];
   return (
-    <button
-      type="button"
-      onClick={onOpen}
-      className="flex min-w-0 flex-col text-left hover:text-foreground"
-    >
+    <button type="button" onClick={onOpen} className={cn(PROFILE_ROW, "flex flex-col")}>
       <span className="flex min-w-0 items-center gap-1.5 text-sm">
         <span className="min-w-0 flex-1 truncate">{instance.name}</span>
         <span className="shrink-0 font-mono text-xs text-muted-foreground">
