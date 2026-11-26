@@ -126,7 +126,7 @@ jobs:
     needs: cli
     if: inputs.desktop
     # A Namespace profile, which must be a macOS arm64 one: GitHub's own macOS runners queue long.
-    runs-on: namespace-profile-t3code
+    runs-on: namespace-profile-macos
     timeout-minutes: 60
     env:
       VERSION: ${{ inputs.version }}

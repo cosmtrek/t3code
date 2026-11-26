@@ -222,7 +222,7 @@ gh workflow disable CI -R cosmtrek/t3code
 
 The desktop release workflow (`release.yml`) depends on Blacksmith runners, Apple signing, npm,
 Vercel, and more, so it **does not run as-is** in the fork. The fork release workflow builds the Mac
-app instead, on the Namespace runner profile `namespace-profile-t3code`, and publishes `-r.N` versions as full releases: upstream
+app instead, on the Namespace runner profile `namespace-profile-macos`, and publishes `-r.N` versions as full releases: upstream
 publishes suffixed versions as prereleases, which the desktop stable channel ignores.
 
 ## Patches on `r/main`
