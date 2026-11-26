@@ -362,8 +362,8 @@ nothing is tracked.
   Each bot's permissions, budget, and pause switch are a panel of the same page.
 - **Hand back**: shown on the item whose thread the user has taken over. The thread view stays
   unaware of bots, as it stays unaware of the inbox.
-- **Inbox bridge**: a bot target in the delegate dialog (creates an item with the messages'
-  link).
+- **Inbox bridge** (planned, not built): a bot as a follow-up's handler; see
+  [Planned: bots](./inbox-design.md#planned-bots).
 - **Settings**: permission mode; start and run threads (allow or ask); turns a day and threads
   at once on one row; and one group per connector instance, such as each chat channel (use it,
   off for a new bot; send messages ask or allow; signature; wake on my @-mentions). Role edits

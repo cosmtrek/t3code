@@ -36,10 +36,9 @@ follow-ups beside the conversation list.
 
 ### Follow-ups
 
-A follow-up (code: delegation) is a set of messages someone handles for the user. The handler is
-an agent (a new thread, which sees the messages and the project) or a bot (which also has its
-notebook: items, memory, earlier threads). The handler can change: an agent's follow-up can be
-handed to a bot, with its thread.
+A follow-up (code: delegation) is a set of messages someone handles for the user. Today the
+handler is an agent: a new thread, which sees the messages and the project. Bots as handlers are
+planned (see [Planned: bots](#planned-bots)).
 
 ```text
 following up ──► needs you (result, draft, question) ──► settled
@@ -49,12 +48,21 @@ following up ──► needs you (result, draft, question) ──► settled
 
 - Done is T3 Code's **Settle**, the same word and icons as a thread's. Only the user settles a
   follow-up; sending a reply does not, since "looking into it" ends nothing. The draft offers
-  **Send and settle** beside Send. A bot may propose settling; the panel shows the proposal and
-  the user confirms it.
+  **Send and settle** beside Send.
 - Settling also settles the follow-up's thread. Un-settling, or following up the same message
   again, reopens the follow-up and leaves the thread alone.
 - A settled follow-up leaves every signal and the listing's thread reads, and stays as history in
   its conversation.
+
+### Planned: bots
+
+Not built yet; the integration is still being weighed. The intent:
+
+- A follow-up can be handled by a bot instead of a new thread, from the start or handed over later
+  with its thread. A bot has its notebook (items, memory, earlier threads) as context.
+- A bot's draft lands in the follow-up's reply box and its questions in the follow-up's panel, so
+  replies still leave from one place.
+- A bot may propose settling; the panel shows the proposal and the user confirms it.
 - A bot that takes an @-mention on its own opens a follow-up on that message, so its work is
   visible and closable like any other.
 
@@ -86,8 +94,8 @@ an open follow-up; it is not another list of objects.
 - Only an explicit "Show the message" in the panel scrolls the chat back to the follow-up's
   messages. Each conversation keeps one reading position.
 
-Replies to the chat app leave from one place: the reply box. A draft from an agent or a bot lands
-in its follow-up's reply box, and the user sends it there.
+Replies to the chat app leave from one place: the reply box. An agent's draft lands in its
+follow-up's reply box, and the user sends it there.
 
 The same goes for menus: each one offers what fits the moment, not the same set everywhere. A list
 row's menu triages (mark read or unread, copy the chat ID); the open conversation's header menu acts

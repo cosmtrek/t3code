@@ -102,7 +102,14 @@ read any conversation of the chat channel through the service, whatever page the
   end.
 - The chat is a log, not the bot's memory. A turn sees the recent messages plus the notebook.
 
-Two bridges connect bots and the inbox, so each signal still has one place:
+Bots and the inbox connect so each signal still has one place:
+
+- **Bot to inbox.** When a bot cites or answers a chat message, its chat shows a quote that opens
+  that conversation in the inbox. What it sends to the chat app shows up in the inbox as the
+  user's own message with its signature, if it has one.
+
+Planned, not built (see [Planned: bots](./inbox-design.md#planned-bots)); the integration is
+still being weighed:
 
 - **Inbox to bot.** A [follow-up](./inbox-design.md#follow-ups) can be handled by a bot instead
   of a new thread, from the start or handed over later with its thread. The bot gets it as an
@@ -115,9 +122,6 @@ Two bridges connect bots and the inbox, so each signal still has one place:
   reads as a full log, and the answer reaches the bot's next wake as it would from its chat.
 - **Settling is the user's.** The bot may propose settling a follow-up; the user confirms it. A
   per-bot permission to settle follow-ups without asking can come later.
-- **Bot to inbox.** When a bot cites or answers a chat message outside a follow-up, its chat shows
-  a quote that opens that conversation in the inbox. What it sends to the chat app shows up in the
-  inbox as the user's own message with its signature, if it has one.
 
 ## The loop
 
@@ -258,8 +262,7 @@ database changes, a few seams.
 - Server: `apps/server/src/fork/bot/`. It subscribes to `streamDomainEvents`, starts threads with
   `launchThread`, runs its own timer for routines, and reads and sends chat messages through the inbox's
   operations and `ChannelHub`.
-- Web: `apps/web/src/fork/bot/`: the Bots page (bot list, chat, notebook, owned threads) and a
-  bot target in the inbox's delegate dialog. The
+- Web: `apps/web/src/fork/bot/`: the Bots page (bot list, chat, notebook, owned threads). The
   chat view reuses the inbox's message list and `ReplyBox`. Permissions, budget, and pause live on
   the same page.
 - Tools: the `t3bot` CLI becomes the bot's tool surface, calling `/api/fork/bots/*` with a per-bot
