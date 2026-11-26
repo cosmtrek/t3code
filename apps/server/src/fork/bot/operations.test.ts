@@ -41,8 +41,11 @@ interface Harness {
   /** Runs and their assistant replies, as T3 would answer for them. */
   readonly runStatus: Map<string, OrchestrationV2RunStatus>;
   readonly replies: Map<string, string>;
-  /** Pages each run showed with `html_render`, as its completed tool items. */
-  readonly pages: Map<string, Array<{ attachmentId: string; title: string; height: number }>>;
+  /** What each run showed with `html_render` (a page) or `send_to_user` (text), in order. */
+  readonly pages: Map<
+    string,
+    Array<{ attachmentId: string; title: string; height: number } | string>
+  >;
   /** Thread shells, as reconcile reads them after a restart. */
   readonly shells: Map<string, { latestRunId: string; status: string }>;
   /** Messages typed with the user role in a thread, for the takeover check. */
@@ -157,12 +160,25 @@ async function harness(store = new BotStore(":memory:")): Promise<Harness> {
                     ? [{ text: replies.get(id), createdAt: DateTime.makeUnsafe(0) }]
                     : [],
                 ),
-          turnItems: (pages.get(filter?.turnItemRunId ?? "") ?? []).map((htmlRender) => ({
-            type: "dynamic_tool",
-            status: "completed",
-            toolName: "mcp__t3-code__html_render",
-            output: { structuredContent: { htmlRender }, content: [] },
-          })),
+          turnItems: (pages.get(filter?.turnItemRunId ?? "") ?? []).map((shown, ordinal) =>
+            typeof shown === "string"
+              ? {
+                  id: `sent-${ordinal}`,
+                  ordinal,
+                  type: "dynamic_tool",
+                  status: "completed",
+                  toolName: "mcp__t3-code__send_to_user",
+                  output: { sentMessage: shown },
+                }
+              : {
+                  id: `page-${ordinal}`,
+                  ordinal,
+                  type: "dynamic_tool",
+                  status: "completed",
+                  toolName: "mcp__t3-code__html_render",
+                  output: { structuredContent: { htmlRender: shown }, content: [] },
+                },
+          ),
         } as never),
     }),
     Layer.mock(ThreadLaunch.ThreadLaunchService)({
@@ -488,6 +504,43 @@ describe("bot turns", () => {
           ["bot", "Redrawn."],
         ]);
         expect(rendersOf()).toEqual([[], ["a"], ["b"], [], ["c"]]);
+      }),
+    ),
+  );
+
+  it.effect("posts what the work thread sent the user, a page with the text after it", () =>
+    withHarness((h) =>
+      Effect.gen(function* () {
+        const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+        const page = { attachmentId: "p", title: "Plan", height: 400 };
+        yield* Bots.sendMessage({ botId, text: "Show me, then wait." });
+        h.pages.set(h.runs[0]!.runId, [page, "Here is the plan.", "Reply when ready."]);
+        yield* runTool({ bot: botId, argv: ["say", "Waiting."], stdin: "" });
+        yield* endRun(h, botId, 0, null);
+
+        const chat = h.runtime.store().recentChat(botId, 100);
+        expect(chat.map((message) => [message.role, message.text])).toEqual([
+          ["user", "Show me, then wait."],
+          ["bot", "Here is the plan."],
+          ["bot", "Reply when ready."],
+          ["bot", "Waiting."],
+        ]);
+        expect(chat[1]!.renders?.map((render) => render.attachmentId)).toEqual(["p"]);
+      }),
+    ),
+  );
+
+  it.effect("counts a sent message as the reply a user message is owed", () =>
+    withHarness((h) =>
+      Effect.gen(function* () {
+        const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+        yield* Bots.sendMessage({ botId, text: "Ping." });
+        h.pages.set(h.runs[0]!.runId, ["Pong."]);
+        yield* endRun(h, botId, 0, null);
+        expect(chatOf(h, botId)).toEqual([
+          ["user", "Ping."],
+          ["bot", "Pong."],
+        ]);
       }),
     ),
   );

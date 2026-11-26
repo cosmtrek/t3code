@@ -9,7 +9,8 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 
 import { expandAssistantCitationsForProvider } from "@t3tools/shared/assistantCitations";
-import { htmlRenderFromToolItem } from "@t3tools/shared/toolOutput";
+import type { HtmlRenderReference } from "@t3tools/shared/htmlRender";
+import { htmlRenderFromToolItem, sentMessageFromToolItem } from "@t3tools/shared/toolOutput";
 
 import {
   CommandId,
@@ -617,32 +618,59 @@ const replyOf = Effect.fn("ForkBot.replyOf")(function* (
   return last?.text.trim() ?? null;
 });
 
+type ChatPost = Omit<ChatMessage, "turnRunId">;
+
 /**
- * The pages the turn's run showed with `html_render` that its chat does not have yet. The work
- * thread shows them above the reply; the chat is where the user reads that reply.
+ * What the agent showed the user in the work thread (`html_render` pages, `send_to_user` text)
+ * that the chat does not have yet, posted in order before `last`. The chat is where the user
+ * reads a bot, so what the thread shows must reach it too. A page goes with the next message.
  */
-export const unpostedRenders = Effect.fn("ForkBot.unpostedRenders")(function* (
+export const withShown = Effect.fn("ForkBot.withShown")(function* (
   bot: Bot,
   turn: Turn,
+  last: ChatPost | null,
 ) {
-  if (bot.workProjectId === null) return [];
-  const threads = yield* ThreadManagement.ThreadManagementService;
-  const records = yield* threads
-    .getProjectThreadRecords(
-      { projectId: ProjectId.make(bot.workProjectId), threadId: ThreadId.make(turn.threadId) },
-      ["turnItems"],
-      {
-        turnItemRunId: RunId.make(turn.runId),
-        turnItemTypes: ["dynamic_tool"],
-        turnItemStatuses: ["completed"],
-      },
-    )
-    .pipe(Effect.orElseSucceed(() => ({ turnItems: [] })));
-  const posted = (yield* BotRuntime).store().postedRenderIds(bot.id, turn.startedAt);
-  return records.turnItems.flatMap((item) => {
-    const render = item.type === "dynamic_tool" ? htmlRenderFromToolItem(item) : undefined;
-    return render === undefined || posted.has(render.attachmentId) ? [] : [render];
-  });
+  const store = (yield* BotRuntime).store();
+  const items =
+    bot.workProjectId === null
+      ? []
+      : (yield* (yield* ThreadManagement.ThreadManagementService)
+          .getProjectThreadRecords(
+            {
+              projectId: ProjectId.make(bot.workProjectId),
+              threadId: ThreadId.make(turn.threadId),
+            },
+            ["turnItems"],
+            {
+              turnItemRunId: RunId.make(turn.runId),
+              turnItemTypes: ["dynamic_tool"],
+              turnItemStatuses: ["completed"],
+            },
+          )
+          .pipe(Effect.orElseSucceed(() => ({ turnItems: [] })))).turnItems;
+  const postedPages = store.postedRenderIds(bot.id, turn.startedAt);
+  const posts: ChatPost[] = [];
+  let pages: Array<HtmlRenderReference> = [];
+  const post = (message: ChatPost) => {
+    posts.push(pages.length === 0 ? message : { ...message, renders: pages });
+    pages = [];
+  };
+  for (const item of items.toSorted((left, right) => left.ordinal - right.ordinal)) {
+    if (item.type !== "dynamic_tool") continue;
+    const page = htmlRenderFromToolItem(item);
+    if (page !== undefined && !postedPages.has(page.attachmentId)) pages = [...pages, page];
+    const sent = sentMessageFromToolItem(item)?.trim();
+    // Its id comes from the tool call, so a later look at the same run finds it posted.
+    const id = `msg_shown_${item.id}`;
+    if (sent && !store.hasChat(id)) {
+      post({ id, botId: bot.id, role: "bot", text: sent, createdAt: nowIso() });
+    }
+  }
+  if (pages.length > 0 && last?.role !== "bot") {
+    post({ id: newId("msg"), botId: bot.id, role: "bot", text: "", createdAt: nowIso() });
+  }
+  if (last !== null) post(last);
+  return posts;
 });
 
 /** What a turn ends with when it has nothing worth telling the user. */
@@ -689,31 +717,30 @@ export const finishRun = Effect.fn("ForkBot.finishRun")(function* (
           ? { role: "error" as const, text: `The turn ended: ${status.replace("_", " ")}.` }
           : text !== null
             ? { role: "bot" as const, text }
-            : turn.answersUser && !turn.said && !silent
-              ? { role: "error" as const, text: "The turn ended without a reply." }
-              : null;
+            : null;
       // A turn that did not complete may have lost what it was sent; the next one resends it all.
       if (status !== "completed") store.setSeenPacket(botId, null);
-      const renders = yield* unpostedRenders(bot, turn);
-      const message = (fields: { readonly role: "bot" | "error"; readonly text: string }) => ({
-        id: newId("msg"),
+      const posts = yield* withShown(
+        bot,
+        turn,
+        post === null ? null : { id: newId("msg"), botId, createdAt: nowIso(), ...post },
+      );
+      const owed = turn.answersUser && !turn.said && !silent && status === "completed";
+      store.endTurn(
         botId,
-        createdAt: nowIso(),
-        ...fields,
-      });
-      store.endTurn(botId, runId, [
-        ...(renders.length > 0 && post?.role !== "bot"
-          ? [{ ...message({ role: "bot", text: "" }), renders }]
-          : []),
-        ...(post === null
-          ? []
-          : [
+        runId,
+        owed && posts.length === 0
+          ? [
               {
-                ...message(post),
-                ...(post.role === "bot" && renders.length > 0 ? { renders } : {}),
+                id: newId("msg"),
+                botId,
+                role: "error",
+                text: "The turn ended without a reply.",
+                createdAt: nowIso(),
               },
-            ]),
-      ]);
+            ]
+          : posts,
+      );
       return true;
     }),
   );

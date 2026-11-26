@@ -723,6 +723,7 @@ function ChatLine({
           <ChatMarkdown
             text={message.text}
             cwd={undefined}
+            environmentId={environmentId}
             className="text-sm user-message-markdown"
             lineBreaks
             parseRawHtml={false}
@@ -755,7 +756,12 @@ function ChatLine({
           data-assistant-citation-environment={environmentId}
           data-assistant-citation-thread={botId}
         >
-          <ChatMarkdown text={message.text} cwd={undefined} className="text-sm" />
+          <ChatMarkdown
+            text={message.text}
+            cwd={undefined}
+            environmentId={environmentId}
+            className="text-sm"
+          />
         </div>
       )}
     </div>

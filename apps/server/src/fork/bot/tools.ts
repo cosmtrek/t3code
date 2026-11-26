@@ -37,7 +37,7 @@ import {
   rolePath,
   runtimeModeFor,
   tokenPath,
-  unpostedRenders,
+  withShown,
   ROLE_CHARS,
 } from "./operations.ts";
 import { renderNotebook } from "./packet.ts";
@@ -244,17 +244,11 @@ export const runTool = Effect.fn("ForkBot.runTool")(function* (input: ToolCall) 
       const text = textOf([sub ?? "", ...rest].filter(Boolean), input.stdin);
       if (text === "" || text.length > SAY_CHARS)
         return yield* fail(`Say 1 to ${SAY_CHARS} characters.`);
+      const said = { id: newId("msg"), botId, role: "bot" as const, text, createdAt: at };
       const bot = store.getBot(botId);
       const turn = store.getTurn(botId);
-      const renders = bot === null || turn === null ? [] : yield* unpostedRenders(bot, turn);
-      store.addChat({
-        id: newId("msg"),
-        botId,
-        role: "bot",
-        text,
-        createdAt: at,
-        ...(renders.length > 0 ? { renders } : {}),
-      });
+      const posts = bot === null || turn === null ? [said] : yield* withShown(bot, turn, said);
+      for (const post of posts) store.addChat(post);
       store.markSaid(botId);
       return touched("Posted.");
     }

@@ -602,6 +602,10 @@ export class BotStore {
       );
   }
 
+  hasChat(id: string): boolean {
+    return this.db.prepare("SELECT 1 FROM chat WHERE id = ?").get(id) !== undefined;
+  }
+
   /** The pages already posted since `since`, by attachment id. */
   postedRenderIds(botId: string, since: string): ReadonlySet<string> {
     const rows = this.db
