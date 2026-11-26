@@ -49,6 +49,8 @@ interface Harness {
   readonly userMessages: Map<string, Array<UserMessage>>;
   /** The runtime mode of each launch, and each later switch of one, in order. */
   readonly modes: string[];
+  /** Each thread's runtime mode, as its shell reads. */
+  readonly threadModes: Map<string, string>;
   /** The model selection of each launch, in order. */
   readonly models: unknown[];
   /** What T3 answers a steer with: a provider turn to join, or only the queue. */
@@ -108,6 +110,7 @@ async function harness(store = new BotStore(":memory:")): Promise<Harness> {
   const projects: Harness["projects"] = [];
   const ownedAtLaunch: boolean[] = [];
   const modes: string[] = [];
+  const threadModes = new Map<string, string>();
   const models: unknown[] = [];
   const nextRun = (threadId: string) => {
     const runId = `run-${runs.length + 1}`;
@@ -120,7 +123,10 @@ async function harness(store = new BotStore(":memory:")): Promise<Harness> {
     Layer.mock(ThreadManagement.ThreadManagementService)({
       getThreadTitles: () => Effect.succeed({}),
       dispatch: (command) => {
-        if (command.type === "thread.runtime-mode.set") modes.push(command.runtimeMode);
+        if (command.type === "thread.runtime-mode.set") {
+          modes.push(command.runtimeMode);
+          threadModes.set(command.threadId, command.runtimeMode);
+        }
         return Effect.succeed({} as never);
       },
       sendToThread: (input) => {
@@ -133,9 +139,10 @@ async function harness(store = new BotStore(":memory:")): Promise<Harness> {
       },
       getThreadShell: (threadId) => {
         const shell = shells.get(threadId);
-        return shell === undefined
-          ? Effect.fail("missing" as never)
-          : Effect.succeed({ ...shell, pendingRuntimeRequest: null } as never);
+        const runtimeMode = threadModes.get(threadId);
+        if (shell === undefined && runtimeMode === undefined)
+          return Effect.fail("missing" as never);
+        return Effect.succeed({ ...shell, runtimeMode, pendingRuntimeRequest: null } as never);
       },
       getProjectThreadRecords: (input, _fields, filter) =>
         Effect.succeed({
@@ -166,6 +173,7 @@ async function harness(store = new BotStore(":memory:")): Promise<Harness> {
         }
         packets.push(input.initialMessage?.text ?? "");
         modes.push(input.runtimeMode);
+        threadModes.set(input.threadId!, input.runtimeMode);
         models.push(input.modelSelection);
         const runId = nextRun(input.threadId!);
         return Effect.succeed({
@@ -205,6 +213,7 @@ async function harness(store = new BotStore(":memory:")): Promise<Harness> {
     projects,
     ownedAtLaunch,
     modes,
+    threadModes,
     models,
     layer,
   };
@@ -584,6 +593,13 @@ describe("bot turns", () => {
         });
         expect(h.modes).toEqual(["full-access", "auto-accept-edits"]);
         expect(h.runtime.store().getBot(botId)?.settings.runtimeMode).toBe("auto");
+
+        // Sending from the thread's composer set its own mode; the next turn restores the bot's.
+        const threadId = h.runtime.store().getBot(botId)!.workThreadId!;
+        h.threadModes.set(threadId, "full-access");
+        yield* endRun(h, botId, h.runs.length - 1, "Hello");
+        yield* Bots.sendMessage({ botId, text: "Again" });
+        expect(h.threadModes.get(threadId)).toBe("auto-accept-edits");
       }),
     ),
   );

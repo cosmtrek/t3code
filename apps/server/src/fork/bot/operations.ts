@@ -431,6 +431,25 @@ export const runtimeModeFor = Effect.fn("ForkBot.runtimeModeFor")(function* (
   }).pipe(Effect.orElseSucceed(() => wanted));
 });
 
+/**
+ * Puts the work thread in the bot's mode. The thread can drift from it: sending from its composer
+ * sets the composer's mode, so each turn re-applies the bot's.
+ */
+const alignWorkThreadMode = Effect.fn("ForkBot.alignWorkThreadMode")(function* (bot: Bot) {
+  if (bot.workThreadId === null) return;
+  const threads = yield* ThreadManagement.ThreadManagementService;
+  const threadId = ThreadId.make(bot.workThreadId);
+  const shell = yield* threads.getThreadShell(threadId);
+  const wanted = yield* runtimeModeFor(bot.modelSelection, bot.settings.runtimeMode);
+  if (shell === null || shell.runtimeMode === wanted) return;
+  yield* threads.dispatch({
+    type: "thread.runtime-mode.set",
+    commandId: CommandId.make(newId("fork-bot")),
+    threadId,
+    runtimeMode: wanted,
+  });
+});
+
 /** Sends the packet as a new turn: launches the work thread on the first one. */
 const dispatch = Effect.fn("ForkBot.dispatch")(function* (
   bot: Bot,
@@ -443,6 +462,11 @@ const dispatch = Effect.fn("ForkBot.dispatch")(function* (
   const messageId = MessageId.make(NodeCrypto.randomUUID());
   const modelSelection = bot.modelSelection;
   if (bot.workThreadId !== null && bot.workProjectId !== null) {
+    yield* alignWorkThreadMode(bot).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("A bot could not set its work thread's mode.", { cause }),
+      ),
+    );
     const sent = yield* threads.sendToThread({
       projectId: ProjectId.make(bot.workProjectId),
       commandId,
@@ -915,16 +939,9 @@ export const saveSettings = Effect.fn("ForkBot.saveSettings")(function* (input: 
     runtimeMode,
     connectors,
   };
-  if (bot.workThreadId !== null && runtimeMode !== bot.settings.runtimeMode) {
-    yield* (yield* ThreadManagement.ThreadManagementService)
-      .dispatch({
-        type: "thread.runtime-mode.set",
-        commandId: CommandId.make(newId("fork-bot")),
-        threadId: ThreadId.make(bot.workThreadId),
-        runtimeMode: yield* runtimeModeFor(bot.modelSelection, runtimeMode),
-      })
-      .pipe(Effect.mapError((cause) => badRequest(cause.message, "runtimeMode")));
-  }
+  yield* alignWorkThreadMode({ ...bot, settings }).pipe(
+    Effect.mapError((cause) => badRequest(cause.message, "runtimeMode")),
+  );
   store.setSettings(bot.id, settings);
   for (const { connector, instance } of saved) {
     if (connector.afterSave !== undefined) yield* connector.afterSave(bot.id, instance.id);
