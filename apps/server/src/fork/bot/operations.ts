@@ -46,6 +46,7 @@ import {
   type ChatMessage,
   type ConnectorSettings,
   type Turn,
+  TERMINAL_RUN_STATUSES,
 } from "./store.ts";
 
 /** Chat shown on the Bots page; older messages stay in the store. */
@@ -57,16 +58,9 @@ const SET_ASIDE_AFTER_DAYS = 14;
 /** A routine starting this much after its time tells the bot both times. */
 const LATE_MS = 15 * 60_000;
 
-const TERMINAL: ReadonlySet<OrchestrationV2RunStatus> = new Set([
-  "completed",
-  "interrupted",
-  "failed",
-  "cancelled",
-  "rolled_back",
-]);
+const TERMINAL: ReadonlySet<string> = new Set(TERMINAL_RUN_STATUSES);
 
-export const isTerminalRunStatus = (status: string) =>
-  TERMINAL.has(status as OrchestrationV2RunStatus);
+export const isTerminalRunStatus = (status: string) => TERMINAL.has(status);
 
 const badRequest = (detail: string, field?: string) =>
   new ForkHttpError({ status: 400, code: "bad_request", detail, ...(field ? { field } : {}) });
@@ -191,7 +185,7 @@ export const listBots = Effect.fn("ForkBot.listBots")(function* () {
       id: bot.id,
       name: bot.name,
       modelSelection: bot.modelSelection,
-      working: store!.getTurn(bot.id) !== null,
+      working: store!.workingSince(bot.id) !== null,
       paused: bot.paused,
       lastMessage: last
         ? {
@@ -209,12 +203,12 @@ export const listBots = Effect.fn("ForkBot.listBots")(function* () {
 const ACTIVITY_CHARS = 240;
 
 /**
- * The line a work-thread item gives the bot chat's status: the first line of a finished
- * assistant message. Streamed text and tool calls are left out, so it moves once per message.
+ * The line a thread item gives the bot chat's status: the first line of a finished assistant
+ * message. Streamed text, tool calls and NO_REPLY are left out, so it moves once per message.
  */
 export function activityLine(item: OrchestrationV2TurnItem): string | null {
   if (item.type !== "assistant_message" || item.streaming) return null;
-  const line = item.text
+  const line = (replyText(item.text) ?? "")
     .split("\n")
     .map((part) => chatPreview(part.replace(/^\s*(?:[#>*-]+|\d+\.)\s+/, "")))
     .find((part) => part !== "");
@@ -222,22 +216,25 @@ export function activityLine(item: OrchestrationV2TurnItem): string | null {
   return line.length > ACTIVITY_CHARS ? `${line.slice(0, ACTIVITY_CHARS - 1)}…` : line;
 }
 
-const activityOf = (runtime: BotRuntimeShape, botId: string, turn: Turn | null) => {
+/** The latest line since it started working, and the thread it came from. */
+const activityOf = (runtime: BotRuntimeShape, botId: string, since: string | null) => {
   const latest = runtime.activity.get(botId);
-  return turn !== null && latest?.runId === turn.runId ? latest.text : null;
+  return since === null || latest?.since !== since
+    ? null
+    : { text: latest.text, threadId: latest.threadId };
 };
 
 export const readBot = Effect.fn("ForkBot.readBot")(function* (params: URLSearchParams) {
   const runtime = yield* BotRuntime;
   const bot = yield* requireBot(params.get("botId") ?? "");
   const store = runtime.store();
-  const turn = store.getTurn(bot.id);
+  const since = store.workingSince(bot.id);
   return {
     // A count from an earlier day is spent: today starts at zero.
     bot: { ...bot, turnsToday: bot.lastTurnDay === localDay(new Date()) ? bot.turnsToday : 0 },
     role: yield* readRole(runtime.botsDir, bot.id),
-    workingSince: turn?.startedAt ?? null,
-    activity: activityOf(runtime, bot.id, turn),
+    workingSince: since,
+    activity: activityOf(runtime, bot.id, since),
     chat: store.recentChat(bot.id, CHAT_PAGE),
     notebook: yield* readNotebook(bot.id),
     questions: store.openQuestions(bot.id),

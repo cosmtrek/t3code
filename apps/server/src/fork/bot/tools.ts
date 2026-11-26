@@ -642,13 +642,11 @@ const threadCommand = Effect.fn("ForkBot.threadCommand")(function* (
         );
         if (itemId !== null) store.updateItem(botId, itemId, {}, nowIso());
         runtime.publish(botId);
-        return `Thread ${threadId} started in ${project.title}. It will wake you ${
+        return `Thread ${threadId} started in ${project.title}. ${
           follow === "now"
-            ? "when it stops"
-            : follow === "attention"
-              ? "if it fails or needs someone"
-              : "never; read it on a routine"
-        }. End your turn now.`;
+            ? "It will wake you when it stops; meanwhile the chat shows the user its progress. End your turn now, with NO_REPLY unless you have more to tell them."
+            : `It will wake you ${follow === "attention" ? "if it fails or needs someone" : "never; read it on a routine"}. End your turn now.`
+        }`;
       }),
     );
   }

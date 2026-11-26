@@ -366,6 +366,11 @@ export interface BotChatMessage {
   readonly renders?: ReadonlyArray<HtmlRenderReference>;
 }
 
+export interface BotActivity {
+  readonly text: string;
+  readonly threadId: string;
+}
+
 export interface BotDetail {
   readonly bot: {
     readonly id: string;
@@ -378,10 +383,10 @@ export interface BotDetail {
     readonly turnsToday: number;
   };
   readonly role: string;
-  /** When its current turn started; null while idle. */
+  /** When it started on what it works on: its turn, then the threads it follows `now`. */
   readonly workingSince: string | null;
-  /** Its work thread's latest message in this turn; null while idle. */
-  readonly activity: string | null;
+  /** The latest message of the thread working on it; null while idle. */
+  readonly activity: BotActivity | null;
   /** Oldest first. */
   readonly chat: ReadonlyArray<BotChatMessage>;
   readonly notebook: BotNotebook;

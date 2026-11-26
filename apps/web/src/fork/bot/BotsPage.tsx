@@ -103,6 +103,7 @@ import { IconAction } from "../inbox/IconAction";
 import { PaneHeader } from "../inbox/PaneHeader";
 import { formatSince, UnreadCount } from "../presentation";
 import type {
+  BotActivity,
   BotChatMessage,
   BotConnectorInstance,
   BotConnectorSettings,
@@ -512,20 +513,26 @@ function BotChat({
   // Pushed between reads; a newer read carries the line too, so it wins.
   const [pushed, setPushed] = useState<{
     readonly read: BotDetail | null;
-    readonly text: string;
+    readonly activity: BotActivity;
   } | null>(null);
-  const onActivity = useEffectEvent((text: string) => setPushed({ read: data, text }));
+  const onActivity = useEffectEvent((activity: BotActivity) => setPushed({ read: data, activity }));
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- follows the server's live status line for this bot's turn
   useEffect(
     () =>
       subscribeToForkEvents(environmentId, (event) => {
-        if (event.type === "bot-activity" && event.botId === botId && event.text !== undefined) {
-          onActivity(event.text);
+        if (
+          event.type === "bot-activity" &&
+          event.botId === botId &&
+          event.text !== undefined &&
+          event.threadId !== undefined
+        ) {
+          onActivity({ text: event.text, threadId: event.threadId });
         }
       }),
     [environmentId, botId],
   );
-  const activity = pushed !== null && pushed.read === data ? pushed.text : (data?.activity ?? null);
+  const activity =
+    pushed !== null && pushed.read === data ? pushed.activity : (data?.activity ?? null);
 
   const send = async (message: string) => {
     setSending(true);
@@ -561,12 +568,13 @@ function BotChat({
     event.stopPropagation();
   };
 
-  const openWorkThread = () => {
-    if (workThreadId === null) return;
+  const openThread = (threadId: string) =>
     void navigate({
       to: "/$environmentId/$threadId",
-      params: { environmentId, threadId: ThreadId.make(workThreadId) },
+      params: { environmentId, threadId: ThreadId.make(threadId) },
     });
+  const openWorkThread = () => {
+    if (workThreadId !== null) openThread(workThreadId);
   };
 
   return (
@@ -648,8 +656,8 @@ function BotChat({
             <WorkingRow
               environmentId={environmentId}
               since={data.workingSince}
-              activity={activity}
-              onOpen={workThreadId === null ? null : openWorkThread}
+              activity={activity?.text ?? null}
+              onOpen={activity === null ? null : () => openThread(activity.threadId)}
             />
           ) : null}
           {data?.bot.paused ? (
@@ -709,7 +717,7 @@ function BotChat({
   );
 }
 
-/** The bot's turn in progress, held above the composer with its work thread's latest line. */
+/** What the bot works on, held above the composer with the latest line of the thread doing it. */
 function WorkingRow({
   environmentId,
   since,
@@ -719,7 +727,7 @@ function WorkingRow({
   readonly environmentId: EnvironmentId;
   readonly since: string;
   readonly activity: string | null;
-  /** Opens the work thread the line comes from. */
+  /** Opens the thread the line comes from. */
   readonly onOpen: (() => void) | null;
 }) {
   return (

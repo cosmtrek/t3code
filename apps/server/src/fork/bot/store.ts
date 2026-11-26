@@ -180,6 +180,15 @@ export interface Routine {
 
 export type FollowUp = "now" | "attention" | "routine";
 
+export const TERMINAL_RUN_STATUSES = [
+  "completed",
+  "interrupted",
+  "failed",
+  "cancelled",
+  "rolled_back",
+] as const;
+const ENDED_SQL = TERMINAL_RUN_STATUSES.map((status) => `'${status}'`).join(", ");
+
 export interface OwnedThread {
   readonly threadId: string;
   readonly botId: string;
@@ -335,6 +344,8 @@ const MIGRATIONS: ReadonlyArray<string> = [
      PRIMARY KEY (channel_id, message_id)
    );`,
   `ALTER TABLE chat ADD COLUMN renders TEXT;`,
+  `ALTER TABLE bots ADD COLUMN working_since TEXT;
+   UPDATE bots SET working_since = (SELECT started_at FROM turns WHERE turns.bot_id = bots.id);`,
 ];
 
 type Row = Record<string, NodeSqlite.SQLOutputValue>;
@@ -715,6 +726,7 @@ export class BotStore {
       this.markAnswered(turn.botId, turn.runId, messageIds);
       const take = this.db.prepare("DELETE FROM queue WHERE id = ? AND bot_id = ?");
       for (const id of eventIds) take.run(id, turn.botId);
+      this.syncWorking(turn.botId, turn.startedAt);
     });
   }
 
@@ -740,7 +752,32 @@ export class BotStore {
         .prepare("DELETE FROM turns WHERE bot_id = ? AND run_id = ?")
         .run(botId, runId);
       if (Number(ended.changes) > 0) for (const reply of replies) this.addChat(reply);
+      this.syncWorking(botId);
     });
+  }
+
+  /**
+   * When the bot started working, or null when it is not: its own turn runs, or a thread it
+   * follows `now` does. One span from the user's ask to the answer, across hand-offs.
+   */
+  workingSince(botId: string): string | null {
+    const row = this.db.prepare("SELECT working_since FROM bots WHERE id = ?").get(botId) as
+      | Row
+      | undefined;
+    return row === undefined ? null : nullableText(row, "working_since");
+  }
+
+  private syncWorking(botId: string, at = new Date().toISOString()) {
+    this.db
+      .prepare(
+        `UPDATE bots SET working_since = CASE
+           WHEN EXISTS (SELECT 1 FROM turns WHERE bot_id = ?1)
+             OR EXISTS (SELECT 1 FROM threads WHERE bot_id = ?1 AND follow = 'now'
+                          AND taken_over = 0 AND status NOT IN (${ENDED_SQL}))
+           THEN COALESCE(working_since, ?2) END
+         WHERE id = ?1`,
+      )
+      .run(botId, at);
   }
 
   // Notebook
@@ -931,6 +968,7 @@ export class BotStore {
         next.handedBackAt,
         threadId,
       );
+    this.syncWorking(thread.botId);
   }
 
   addThread(
@@ -951,10 +989,13 @@ export class BotStore {
         thread.follow,
         thread.createdAt,
       );
+    this.syncWorking(thread.botId, thread.createdAt);
   }
 
   removeThread(threadId: string) {
+    const thread = this.getThread(threadId);
     this.db.prepare("DELETE FROM threads WHERE thread_id = ?").run(threadId);
+    if (thread !== null) this.syncWorking(thread.botId);
   }
 
   // Queue

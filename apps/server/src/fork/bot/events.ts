@@ -1,6 +1,6 @@
 /**
  * Turns domain events into bot events: the end of a run in a work thread ends that bot's turn,
- * its items give the chat a live status line, and what happens in a thread a bot started is
+ * its items and those of threads it follows `now` give the chat a live status line, and what happens in a thread a bot started is
  * queued for it. Every other event costs one map lookup.
  */
 import { ThreadId, type OrchestrationV2DomainEvent } from "@t3tools/contracts";
@@ -99,11 +99,12 @@ const observeThread = Effect.fn("ForkBot.observeThread")(function* (
 
   const key = `${change.runId}:${change.status}`;
   if (owned.lastRunKey === key) return;
-  store.updateThread(owned.threadId, { status: change.status, lastRunKey: key });
   if (takenOver) {
+    store.updateThread(owned.threadId, { status: change.status, lastRunKey: key });
     runtime.publish(botId);
     return;
   }
+  store.updateThread(owned.threadId, { lastRunKey: key });
   touch();
   const failed = change.status !== "completed";
   const wakes = owned.follow === "now" || (owned.follow === "attention" && failed);
@@ -111,7 +112,12 @@ const observeThread = Effect.fn("ForkBot.observeThread")(function* (
   const reply = yield* replyOf(owned.projectId, owned.threadId, change.runId).pipe(
     Effect.orElseSucceed(() => null),
   );
-  yield* notify(botId, stoppedEvent(describe(owned), change.status, reply), wakes);
+  // The status is recorded once the bot woke, so a bot taking up the answer stays working.
+  yield* notify(botId, stoppedEvent(describe(owned), change.status, reply), wakes).pipe(
+    Effect.ensuring(
+      Effect.sync(() => store.updateThread(owned.threadId, { status: change.status })),
+    ),
+  );
 });
 
 export const followThreads = Effect.fn("ForkBot.followThreads")(function* <E, R>(
@@ -120,20 +126,19 @@ export const followThreads = Effect.fn("ForkBot.followThreads")(function* <E, R>
   const runtime = yield* BotRuntime;
   // Work-thread requests already posted; a request is updated more than once while pending.
   const posted = new Set<string>();
+  const showActivity = (botId: string, threadId: string, line: string | null) => {
+    if (line === null) return;
+    const since = runtime.store().workingSince(botId);
+    const latest = runtime.activity.get(botId);
+    if (since === null || (latest?.text === line && latest.since === since)) return;
+    runtime.publishActivity(botId, { threadId, text: line, since });
+  };
   // Untraced: it runs for every domain event in the environment.
   const handle = Effect.fnUntraced(function* (event: OrchestrationV2DomainEvent) {
     const workBot = runtime.workThreads.get(event.threadId);
     if (workBot !== undefined) {
-      if (event.type === "turn-item.updated" && event.payload.runId !== null) {
-        const line = activityLine(event.payload);
-        const runId = event.payload.runId;
-        if (
-          line !== null &&
-          runtime.activity.get(workBot)?.text !== line &&
-          runtime.store().getTurn(workBot)?.runId === runId
-        ) {
-          runtime.publishActivity(workBot, runId, line);
-        }
+      if (event.type === "turn-item.updated") {
+        showActivity(workBot, event.threadId, activityLine(event.payload));
       }
       if (event.type === "run.updated" && isTerminalRunStatus(event.payload.status)) {
         yield* finishRun(workBot, event.payload.id, event.payload.status);
@@ -153,8 +158,16 @@ export const followThreads = Effect.fn("ForkBot.followThreads")(function* <E, R>
       return;
     }
     if (!runtime.ownedThreads.has(event.threadId)) return;
+    // Most items are streamed text or tools, which give no line: skip the read for those.
+    const line = event.type === "turn-item.updated" ? activityLine(event.payload) : null;
+    if (event.type === "turn-item.updated" && line === null) return;
     const owned = runtime.store().getThread(event.threadId);
     if (owned === null) return;
+    if (event.type === "turn-item.updated") {
+      if (owned.follow === "now" && !owned.takenOver)
+        showActivity(owned.botId, owned.threadId, line);
+      return;
+    }
     if (event.type === "run.updated") {
       yield* observeThread(owned, {
         type: "run",

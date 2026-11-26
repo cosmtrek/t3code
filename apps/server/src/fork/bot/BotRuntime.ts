@@ -19,7 +19,19 @@ import { BotStore } from "./store.ts";
 /** `bots` says a bot changed, so views refetch; `bot-activity` carries its turn's latest line. */
 export type BotEvent =
   | { readonly type: "bots"; readonly botId: string }
-  | { readonly type: "bot-activity"; readonly botId: string; readonly text: string };
+  | {
+      readonly type: "bot-activity";
+      readonly botId: string;
+      readonly threadId: string;
+      readonly text: string;
+    };
+
+interface Activity {
+  readonly threadId: string;
+  readonly text: string;
+  /** The working span it belongs to, by when that started. */
+  readonly since: string;
+}
 
 export interface BotRuntimeShape {
   readonly botsDir: string;
@@ -41,10 +53,10 @@ export interface BotRuntimeShape {
   readonly workThreads: Map<string, string>;
   /** Threads bots started, by id, to the bot that owns each. */
   readonly ownedThreads: Map<string, string>;
-  /** By bot: the latest line its work thread showed in a run, kept in memory only. */
-  readonly activity: Map<string, { readonly runId: string; readonly text: string }>;
+  /** By bot: the latest line its work thread or a thread it follows `now` showed, in memory only. */
+  readonly activity: Map<string, Activity>;
   readonly publish: (botId: string) => void;
-  readonly publishActivity: (botId: string, runId: string, text: string) => void;
+  readonly publishActivity: (botId: string, activity: Activity) => void;
   readonly subscribe: (listener: (event: BotEvent) => void) => () => void;
 }
 
@@ -68,7 +80,7 @@ const make = Effect.gen(function* () {
   const turnLock = yield* Semaphore.make(1);
   const threadStartLock = yield* Semaphore.make(1);
   const listeners = new Set<(event: BotEvent) => void>();
-  const activity = new Map<string, { readonly runId: string; readonly text: string }>();
+  const activity = new Map<string, Activity>();
   let cliWritten = false;
 
   yield* Effect.addFinalizer(() => Effect.sync(() => store?.close()));
@@ -98,9 +110,10 @@ const make = Effect.gen(function* () {
     publish: (botId) => {
       for (const listener of listeners) listener({ type: "bots", botId });
     },
-    publishActivity: (botId, runId, text) => {
-      activity.set(botId, { runId, text });
-      for (const listener of listeners) listener({ type: "bot-activity", botId, text });
+    publishActivity: (botId, latest) => {
+      activity.set(botId, latest);
+      const { threadId, text } = latest;
+      for (const listener of listeners) listener({ type: "bot-activity", botId, threadId, text });
     },
     subscribe: (listener) => {
       listeners.add(listener);

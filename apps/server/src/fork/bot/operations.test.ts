@@ -108,7 +108,7 @@ async function harness(store = new BotStore(":memory:")): Promise<Harness> {
     ),
     activity: new Map(),
     publish: () => undefined,
-    publishActivity: (botId, runId, text) => runtime.activity.set(botId, { runId, text }),
+    publishActivity: (botId, activity) => runtime.activity.set(botId, activity),
     subscribe: () => () => undefined,
   };
   const packets: string[] = [];
@@ -661,18 +661,18 @@ describe("bot turns", () => {
     ),
   );
 
-  it.effect("shows its work thread's latest message while a turn runs", () =>
+  it.effect("shows the latest line of its work thread while a turn runs", () =>
     withHarness((h) =>
       Effect.gen(function* () {
         const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
         yield* Bots.sendMessage({ botId, text: "Clean up" });
         const threadId = h.runtime.store().getBot(botId)!.workThreadId!;
         const runId = h.runs[0]!.runId;
-        const item = (fields: Record<string, unknown>, run = runId) =>
-          ({ type: "turn-item.updated", threadId, payload: { runId: run, ...fields } }) as never;
+        const item = (fields: Record<string, unknown>) =>
+          ({ type: "turn-item.updated", threadId, payload: { runId, ...fields } }) as never;
         const read = () => Bots.readBot(new URLSearchParams({ botId }));
 
-        // Streamed text, commands and other runs' messages leave the line alone.
+        // Streamed text, commands and NO_REPLY leave the line alone.
         yield* followThreads(
           Stream.make(
             item({ type: "assistant_message", streaming: true, text: "Half a thou" }),
@@ -682,13 +682,79 @@ describe("bot turns", () => {
               text: "\n## Checking   the branch\nthen more",
             }),
             item({ type: "command_execution", status: "running", input: "git status" }),
-            item({ type: "assistant_message", streaming: false, text: "Elsewhere" }, "other-run"),
+            item({ type: "assistant_message", streaming: false, text: "NO_REPLY" }),
           ),
         );
-        expect((yield* read()).activity).toBe("Checking the branch");
+        expect((yield* read()).activity).toEqual({ text: "Checking the branch", threadId });
 
-        // The line belongs to the turn: once it ends there is none.
+        // The line belongs to the work: once it ends there is none.
         yield* endRun(h, botId, 0, "Done.");
+        expect((yield* read()).workingSince).toBeNull();
+        expect((yield* read()).activity).toBeNull();
+      }),
+    ),
+  );
+
+  it.effect("stays working from the ask to the answer while a thread it follows now runs", () =>
+    withHarness((h) =>
+      Effect.gen(function* () {
+        const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+        const store = h.runtime.store();
+        const read = () => Bots.readBot(new URLSearchParams({ botId }));
+        yield* Bots.sendMessage({ botId, text: "Find old backups" });
+        const since = (yield* read()).workingSince;
+        expect(since).not.toBeNull();
+
+        // The turn hands the work to a thread and ends without a word.
+        for (const [threadId, follow] of [
+          ["t-now", "now"],
+          ["t-attention", "attention"],
+        ] as const) {
+          store.addThread({
+            threadId,
+            botId,
+            projectId: "p",
+            itemId: null,
+            follow,
+            createdAt: "t0",
+          });
+          h.runtime.ownedThreads.set(threadId, botId);
+        }
+        yield* endRun(h, botId, 0, "NO_REPLY");
+        expect(chatOf(h, botId).filter(([role]) => role !== "user")).toEqual([]);
+        expect((yield* read()).workingSince).toBe(since);
+        expect((yield* Bots.listBots()).bots[0]!.working).toBe(true);
+
+        // Its progress is the chat's line; a thread followed only on attention gives none.
+        const said = (threadId: string, text: string) =>
+          ({
+            type: "turn-item.updated",
+            threadId,
+            payload: {
+              runId: `${threadId}-run`,
+              type: "assistant_message",
+              streaming: false,
+              text,
+            },
+          }) as never;
+        yield* followThreads(
+          Stream.make(said("t-now", "Scanning /home"), said("t-attention", "Elsewhere")),
+        );
+        expect((yield* read()).activity).toEqual({ text: "Scanning /home", threadId: "t-now" });
+
+        // Its end wakes the bot, which takes up the answer in the same span.
+        h.replies.set("t-now-run", "Found 3 GB.");
+        yield* followThreads(
+          Stream.make({
+            type: "run.updated",
+            threadId: "t-now",
+            payload: { id: "t-now-run", status: "completed" },
+          } as never),
+        );
+        expect(h.runs).toHaveLength(2);
+        expect((yield* read()).workingSince).toBe(since);
+        yield* endRun(h, botId, 1, "3 GB of old backups.");
+        expect((yield* read()).workingSince).toBeNull();
         expect((yield* read()).activity).toBeNull();
       }),
     ),
