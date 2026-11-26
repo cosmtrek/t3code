@@ -29,20 +29,17 @@ export interface Bot {
 
 export type Permission = "allow" | "ask";
 
-/** One chat channel of the environment, as this bot may use it. */
-export interface ChannelSettings {
-  readonly send: Permission;
-  /** It wakes when someone mentions the user there; one bot per channel at most. */
-  readonly mentions: boolean;
-  /** When mentions were turned on: earlier ones are not this bot's to answer. */
-  readonly mentionsSince: string | null;
+/** One connector instance, as this bot may use it. */
+export interface ConnectorSettings {
+  /** Off: the instance is no command of this bot's. */
+  readonly enabled: boolean;
+  /** Per write operation; one missing here asks. */
+  readonly permissions: Readonly<Record<string, Permission>>;
+  /** The connector kind's own settings, decoded by that kind. */
+  readonly config: Readonly<Record<string, unknown>>;
 }
 
-const DEFAULT_CHANNEL: ChannelSettings = {
-  send: "ask",
-  mentions: false,
-  mentionsSince: null,
-};
+const CONNECTOR_OFF: ConnectorSettings = { enabled: false, permissions: {}, config: {} };
 
 export interface BotSettings {
   /** Starting threads and messaging its own; editing its role always asks. */
@@ -52,12 +49,8 @@ export interface BotSettings {
   readonly maxThreads: number;
   /** Its work thread and the threads it starts; a provider without it gets the next narrower. */
   readonly runtimeMode: RuntimeMode;
-  /** Off: no chat tools at all. */
-  readonly channelsEnabled: boolean;
-  /** Appended on its own line to what it sends; empty sends the text as written. */
-  readonly signature: string;
-  /** By channel id; a channel missing here has the defaults. */
-  readonly channels: Readonly<Record<string, ChannelSettings>>;
+  /** By connector instance id; one missing here is off. */
+  readonly connectors: Readonly<Record<string, ConnectorSettings>>;
 }
 
 const DEFAULT_SETTINGS: BotSettings = {
@@ -65,15 +58,25 @@ const DEFAULT_SETTINGS: BotSettings = {
   turnsPerDay: 100,
   maxThreads: 3,
   runtimeMode: "auto",
-  channelsEnabled: false,
-  signature: "",
-  channels: {},
+  connectors: {},
 };
 
-/** Earlier builds stored allow, ask or deny per action; deny now asks, never allows. */
+interface LegacyChannelSettings {
+  readonly send?: Permission;
+  readonly mentions?: boolean;
+  readonly mentionsSince?: string | null;
+}
+
+/**
+ * Earlier builds stored allow, ask or deny per action (deny now asks, never allows), and chat
+ * channels apart from connectors: one switch and signature for all, then per-channel settings.
+ */
 const toSettings = (value: string): BotSettings => {
   const parsed = JSON.parse(value) as Partial<BotSettings> & {
     readonly permissions?: Readonly<Record<string, string>>;
+    readonly channelsEnabled?: boolean;
+    readonly signature?: string;
+    readonly channels?: Readonly<Record<string, LegacyChannelSettings>>;
   };
   const legacy = parsed.permissions;
   const threads =
@@ -83,19 +86,37 @@ const toSettings = (value: string): BotSettings => {
       : legacy["thread.start"] === "allow" && legacy["thread.send"] !== "ask"
         ? "allow"
         : "ask");
+  const connectors =
+    parsed.connectors ??
+    Object.fromEntries(
+      Object.entries(parsed.channels ?? {}).map(([channelId, channel]) => {
+        const enabled = parsed.channelsEnabled === true;
+        const mentions = enabled && channel.mentions === true;
+        return [
+          channelId,
+          {
+            enabled,
+            permissions: { send: channel.send ?? "ask" },
+            config: {
+              signature: parsed.signature ?? "",
+              mentions,
+              mentionsSince: mentions ? (channel.mentionsSince ?? null) : null,
+            },
+          } satisfies ConnectorSettings,
+        ];
+      }),
+    );
   return {
     threads,
     turnsPerDay: parsed.turnsPerDay ?? DEFAULT_SETTINGS.turnsPerDay,
     maxThreads: parsed.maxThreads ?? DEFAULT_SETTINGS.maxThreads,
     runtimeMode: parsed.runtimeMode ?? DEFAULT_SETTINGS.runtimeMode,
-    channelsEnabled: parsed.channelsEnabled ?? DEFAULT_SETTINGS.channelsEnabled,
-    signature: parsed.signature ?? DEFAULT_SETTINGS.signature,
-    channels: parsed.channels ?? DEFAULT_SETTINGS.channels,
+    connectors,
   };
 };
 
-export const channelSettings = (settings: BotSettings, channelId: string): ChannelSettings =>
-  settings.channels[channelId] ?? DEFAULT_CHANNEL;
+export const connectorSettings = (settings: BotSettings, instanceId: string): ConnectorSettings =>
+  settings.connectors[instanceId] ?? CONNECTOR_OFF;
 
 export type ChatRole = "user" | "bot" | "error";
 
@@ -167,17 +188,6 @@ export interface OwnedThread {
   /** The user typed in it: theirs until they hand it back. */
   readonly takenOver: boolean;
   readonly handedBackAt: string | null;
-}
-
-/** Per conversation: mentions of the user already given to a bot, and one waiting its delay. */
-export interface MentionMark {
-  readonly channelId: string;
-  readonly conversationId: string;
-  /** Mentions at or before this are handled. */
-  readonly handledThrough: string;
-  /** The newest mention seen and not yet handled; null when none waits. */
-  readonly pendingAt: string | null;
-  readonly dueAt: string | null;
 }
 
 export type QuestionStatus = "open" | "approved" | "declined" | "expired";
@@ -408,14 +418,6 @@ const toQuestion = (row: Row): Question => {
   };
 };
 
-const toMention = (row: Row): MentionMark => ({
-  channelId: text(row, "channel_id"),
-  conversationId: text(row, "conversation_id"),
-  handledThrough: text(row, "handled_through"),
-  pendingAt: nullableText(row, "pending_at"),
-  dueAt: nullableText(row, "due_at"),
-});
-
 const toQueued = (row: Row): QueuedEvent => ({
   id: Number(row.id),
   botId: text(row, "bot_id"),
@@ -425,7 +427,8 @@ const toQueued = (row: Row): QueuedEvent => ({
 });
 
 export class BotStore {
-  private readonly db: NodeSqlite.DatabaseSync;
+  /** Connectors keep their own tables in this file and query them through it. */
+  readonly db: NodeSqlite.DatabaseSync;
 
   constructor(filePath: string) {
     if (filePath !== ":memory:") NodeFS.mkdirSync(NodePath.dirname(filePath), { recursive: true });
@@ -618,23 +621,6 @@ export class BotStore {
           .run(botId, botId, botId).changes,
       ) > 0
     );
-  }
-
-  // Chat messages bots sent as the user
-
-  recordSent(botId: string, channelId: string, messageId: string, at: string) {
-    this.db
-      .prepare(
-        "INSERT OR IGNORE INTO sent_messages (channel_id, message_id, bot_id, sent_at) VALUES (?, ?, ?, ?)",
-      )
-      .run(channelId, messageId, botId, at);
-  }
-
-  sentByBots(channelId: string, messageIds: ReadonlyArray<string>): ReadonlySet<string> {
-    const check = this.db.prepare(
-      "SELECT 1 FROM sent_messages WHERE channel_id = ? AND message_id = ?",
-    );
-    return new Set(messageIds.filter((id) => check.get(channelId, id) !== undefined));
   }
 
   /** User messages no turn has taken yet, oldest first. */
@@ -928,59 +914,6 @@ export class BotStore {
     return (
       this.db.prepare("SELECT * FROM queue WHERE bot_id = ? ORDER BY id").all(botId) as Row[]
     ).map(toQueued);
-  }
-
-  // Mentions of the user, per conversation
-
-  listMentions(channelId: string): ReadonlyArray<MentionMark> {
-    return (
-      this.db.prepare("SELECT * FROM mentions WHERE channel_id = ?").all(channelId) as Row[]
-    ).map(toMention);
-  }
-
-  dueMentions(at: string): ReadonlyArray<MentionMark> {
-    return (
-      this.db
-        .prepare("SELECT * FROM mentions WHERE due_at IS NOT NULL AND due_at <= ? ORDER BY due_at")
-        .all(at) as Row[]
-    ).map(toMention);
-  }
-
-  /** A newer mention waits; the first one sets when it is due, later ones join it. */
-  markMentionPending(
-    channelId: string,
-    conversationId: string,
-    pendingAt: string,
-    dueAt: string,
-    handledThrough: string,
-  ) {
-    this.db
-      .prepare(
-        `INSERT INTO mentions (channel_id, conversation_id, handled_through, pending_at, due_at)
-         VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT (channel_id, conversation_id) DO UPDATE SET
-           pending_at = excluded.pending_at,
-           due_at = COALESCE(mentions.due_at, excluded.due_at)`,
-      )
-      .run(channelId, conversationId, handledThrough, pendingAt, dueAt);
-  }
-
-  /** Tries a due mention again later, when the channel could not be read. */
-  delayMention(channelId: string, conversationId: string, dueAt: string) {
-    this.db
-      .prepare("UPDATE mentions SET due_at = ? WHERE channel_id = ? AND conversation_id = ?")
-      .run(dueAt, channelId, conversationId);
-  }
-
-  /** `through` is the caller's latest of the old mark and the new one. */
-  markMentionHandled(channelId: string, conversationId: string, through: string) {
-    this.db
-      .prepare(
-        `INSERT INTO mentions (channel_id, conversation_id, handled_through) VALUES (?, ?, ?)
-         ON CONFLICT (channel_id, conversation_id) DO UPDATE SET
-           handled_through = excluded.handled_through, pending_at = NULL, due_at = NULL`,
-      )
-      .run(channelId, conversationId, through);
   }
 
   // Questions

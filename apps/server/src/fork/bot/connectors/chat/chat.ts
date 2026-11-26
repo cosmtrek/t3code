@@ -1,20 +1,24 @@
 // @effect-diagnostics globalDate:off globalDateInEffect:off - Mention delays are wall-clock; adapter times are ISO text.
 /**
- * What bots do with the environment's chat channels: read them through the inbox's own reads,
- * send as the user through its `send`, and wake the one bot per channel that handles the user's
- * mentions. Mentions are found from the conversation list the inbox reads anyway, so a busy
+ * What bots do with one of the environment's chat channels: read it through the inbox's own
+ * reads, send as the user through its `send`, and wake the one bot per channel that handles the
+ * user's mentions. Mentions are found from the conversation list the inbox reads anyway, so a busy
  * conversation that never mentions the user costs nothing more.
  */
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 
-import type { ChannelView } from "../channels/hub.ts";
-import type { Conversation, Message } from "../channels/protocol.ts";
-import { InboxRuntime } from "../inbox/InboxRuntime.ts";
-import * as Inbox from "../inbox/operations.ts";
-import { BotRuntime } from "./BotRuntime.ts";
-import { channelName, notify, readableChannels } from "./operations.ts";
-import { channelSettings, type Bot, type BotStore, type MentionMark } from "./store.ts";
+import { channelAccess, type ChannelView } from "../../../channels/hub.ts";
+import type { Conversation, Message } from "../../../channels/protocol.ts";
+import { InboxRuntime } from "../../../inbox/InboxRuntime.ts";
+import * as Inbox from "../../../inbox/operations.ts";
+import { BotRuntime } from "../../BotRuntime.ts";
+import { notify } from "../../operations.ts";
+import { connectorSettings, type Bot, type BotStore, type ConnectorSettings } from "../../store.ts";
+import { toolError } from "../types.ts";
+import * as State from "./state.ts";
+import type { MentionMark } from "./state.ts";
 
 /** The sender gets this long to finish, and the user to answer first. */
 export const MENTION_DELAY_MS = 30_000;
@@ -33,9 +37,6 @@ const later = (left: string | null | undefined, right: string | null | undefined
 const latestOf = (left: string, right: string | null | undefined) =>
   later(right, left) ? right! : left;
 
-const toolError = (detail: string) =>
-  new Inbox.ForkHttpError({ status: 400, code: "tool_error", detail });
-
 /** The inbox's reads and send, where the environment has an inbox at all. */
 // Untraced: it only wraps inbox operations that carry their own spans.
 const withInbox = Effect.fnUntraced(function* <A, E, R>(effect: Effect.Effect<A, E, R>) {
@@ -52,13 +53,56 @@ const sendMessage = (body: unknown) => withInbox(Inbox.send(body));
 const clip = (text: string, chars: number) =>
   text.length > chars ? `${text.slice(0, chars)}… (cut)` : text;
 
+/** The environment's channels that are switched on, whatever their state. */
+export const configuredChannels = Effect.fn("ForkBot.configuredChannels")(function* () {
+  const inbox = yield* Effect.serviceOption(InboxRuntime);
+  if (Option.isNone(inbox)) return [] as ReadonlyArray<ChannelView>;
+  return inbox.value.hub.list().filter((channel) => channel.enabled);
+});
+
+export const channelName = (channel: ChannelView) => channel.config?.displayName ?? channel.name;
+
+/** The channel, when it can be read now. */
+const readableChannel = Effect.fn("ForkBot.readableChannel")(function* (channelId: string) {
+  return (
+    (yield* configuredChannels()).find(
+      (channel) => channel.id === channelId && channelAccess(channel.status).read,
+    ) ?? null
+  );
+});
+
+/** A bot's settings for one channel, beside the ones every connector has. */
+export interface ChatConfig {
+  /** Appended on its own line to what it sends; `{bot}` is its name. Empty sends as written. */
+  readonly signature: string;
+  /** It wakes when someone mentions the user there; one bot per channel at most. */
+  readonly mentions: boolean;
+  /** When mentions were turned on: earlier ones are not this bot's to answer. */
+  readonly mentionsSince: string | null;
+}
+
+const ChatConfigShape = Schema.Struct({
+  signature: Schema.optional(Schema.String),
+  mentions: Schema.optional(Schema.Boolean),
+  mentionsSince: Schema.optional(Schema.NullOr(Schema.String)),
+});
+
+const decodeChatConfig = Schema.decodeUnknownOption(ChatConfigShape);
+
+export const chatConfig = (settings: ConnectorSettings): ChatConfig => {
+  const decoded = decodeChatConfig(settings.config as unknown);
+  const config = Option.getOrElse(decoded, () => ({}) as typeof ChatConfigShape.Type);
+  return {
+    signature: config.signature ?? "",
+    mentions: settings.enabled && config.mentions === true,
+    mentionsSince: config.mentionsSince ?? null,
+  };
+};
+
 /** The bot that wakes on the user's mentions in this channel, if any. */
-const mentionBotFor = (store: BotStore, channelId: string): Bot | null =>
-  store
-    .listBots()
-    .find(
-      (bot) => bot.settings.channelsEnabled && channelSettings(bot.settings, channelId).mentions,
-    ) ?? null;
+export const mentionBotFor = (store: BotStore, channelId: string): Bot | null =>
+  store.listBots().find((bot) => chatConfig(connectorSettings(bot.settings, channelId)).mentions) ??
+  null;
 
 type MentionStep =
   | {
@@ -136,80 +180,70 @@ export interface ChatTarget {
   readonly raw: Conversation | null;
 }
 
-/** `<channel>/<conversation>`, a conversation id, or a conversation's exact name. */
+/** A conversation id or exact name in the channel; `<channel>/<id>` as earlier builds wrote it. */
 export const resolveConversation = Effect.fn("ForkBot.resolveConversation")(function* (
+  channel: ChannelView,
   ref: string | undefined,
 ) {
-  const wanted = ref?.trim() ?? "";
-  if (wanted === "") return yield* toolError("Name the conversation (see `chat list`).");
-  const channels = yield* readableChannels();
-  if (channels.length === 0) return yield* toolError("No chat channel can be read here.");
-  const slash = wanted.indexOf("/");
-  const named =
-    slash > 0 ? channels.find((channel) => channel.id === wanted.slice(0, slash)) : null;
-  const scope = named ? [named] : channels;
-  const id = named ? wanted.slice(slash + 1) : wanted;
-  const found: Array<ChatTarget> = [];
-  for (const channel of scope) {
-    const listing = yield* readChannel(channel.id).pipe(Effect.orElseSucceed(() => null));
-    for (const conversation of listing?.raw ?? []) {
-      if (
-        conversation.id === id ||
-        conversation.name.trim().toLowerCase() === id.trim().toLowerCase()
-      ) {
-        found.push({
-          channel,
-          conversationId: conversation.id,
-          name: conversation.name,
-          raw: conversation,
-        });
-      }
-    }
+  const prefix = `${channel.id}/`;
+  const raw = ref?.trim() ?? "";
+  const wanted = raw.startsWith(prefix) ? raw.slice(prefix.length) : raw;
+  if (wanted === "") return yield* toolError(`Name the conversation (see \`${channel.id} list\`).`);
+  const listing = yield* readChannel(channel.id).pipe(Effect.orElseSucceed(() => null));
+  const found = (listing?.raw ?? []).filter(
+    (conversation) =>
+      conversation.id === wanted || conversation.name.trim().toLowerCase() === wanted.toLowerCase(),
+  );
+  if (found.length === 1) {
+    const conversation = found[0]!;
+    return {
+      channel,
+      conversationId: conversation.id,
+      name: conversation.name,
+      raw: conversation,
+    } satisfies ChatTarget;
   }
-  if (found.length === 1) return found[0]!;
   if (found.length > 1) {
     return yield* toolError(
-      `"${id}" matches several conversations: ${found.map((target) => `${target.channel.id}/${target.conversationId} "${target.name}"`).join(", ")}. Give one of these.`,
+      `"${wanted}" matches several conversations: ${found.map((conversation) => `${conversation.id} "${conversation.name}"`).join(", ")}. Give one of these ids.`,
     );
   }
-  // Not in the recent list: an exact id still reads, in the one channel it can be in.
-  if (scope.length === 1 && (named || /^[\w-]+$/.test(id))) {
-    return { channel: scope[0]!, conversationId: id, name: id, raw: null } satisfies ChatTarget;
+  // Not in the recent list: an exact id still reads.
+  if (/^[\w-]+$/.test(wanted)) {
+    return { channel, conversationId: wanted, name: wanted, raw: null } satisfies ChatTarget;
   }
-  return yield* toolError(`No conversation "${id}". Run \`chat list --query <name>\`.`);
+  return yield* toolError(
+    `No conversation "${wanted}". Run \`${channel.id} list --query <name>\`.`,
+  );
 });
 
-/** `chat list` and `chat unread`: the conversations the inbox shows, as one line each. */
-export const listConversations = Effect.fn("ForkBot.listConversations")(function* (options: {
-  readonly query?: string;
-  readonly unreadOnly: boolean;
-}) {
-  const channels = yield* readableChannels();
-  if (channels.length === 0) return "No chat channel can be read here.";
+/** `list` and `unread`: the conversations the inbox shows, as one line each. */
+export const listConversations = Effect.fn("ForkBot.listConversations")(function* (
+  channel: ChannelView,
+  options: { readonly query?: string; readonly unreadOnly: boolean },
+) {
   const query = options.query?.trim().toLowerCase() ?? "";
   const lines: Array<{ readonly at: number; readonly text: string }> = [];
-  for (const channel of channels) {
-    const listing = yield* readChannel(channel.id).pipe(
-      Effect.mapError((error) => toolError(`${channelName(channel)}: ${error.detail}`)),
-    );
-    for (const conversation of listing.conversations) {
-      if (query !== "" && !conversation.name.toLowerCase().includes(query)) continue;
-      if (options.unreadOnly && !conversation.unread && !conversation.mentioned) continue;
-      const flags = [
-        conversation.mentioned ? "mentions the user" : null,
-        conversation.unread
-          ? `unread${conversation.unreadCount ? ` ${conversation.unreadCount}` : ""}`
-          : null,
-        conversation.muted ? "muted" : null,
-      ].filter((flag) => flag !== null);
-      const last = conversation.lastMessage;
-      lines.push({
-        at: ms(conversation.lastActivityAt),
-        text: `${channel.id}/${conversation.id} "${conversation.name}" (${conversation.kind}, ${shortTime(conversation.lastActivityAt)}${
-          flags.length > 0 ? `, ${flags.join(", ")}` : ""
-        })${last ? ` - ${last.author.isSelf ? "the user" : last.author.name}: ${clip(last.preview, 120)}` : ""}`,
-      });
-    }
+  const listing = yield* readChannel(channel.id).pipe(
+    Effect.mapError((error) => toolError(`${channelName(channel)}: ${error.detail}`)),
+  );
+  for (const conversation of listing.conversations) {
+    if (query !== "" && !conversation.name.toLowerCase().includes(query)) continue;
+    if (options.unreadOnly && !conversation.unread && !conversation.mentioned) continue;
+    const flags = [
+      conversation.mentioned ? "mentions the user" : null,
+      conversation.unread
+        ? `unread${conversation.unreadCount ? ` ${conversation.unreadCount}` : ""}`
+        : null,
+      conversation.muted ? "muted" : null,
+    ].filter((flag) => flag !== null);
+    const last = conversation.lastMessage;
+    lines.push({
+      at: ms(conversation.lastActivityAt),
+      text: `${conversation.id} "${conversation.name}" (${conversation.kind}, ${shortTime(conversation.lastActivityAt)}${
+        flags.length > 0 ? `, ${flags.join(", ")}` : ""
+      })${last ? ` - ${last.author.isSelf ? "the user" : last.author.name}: ${clip(last.preview, 120)}` : ""}`,
+    });
   }
   if (lines.length === 0) {
     return options.unreadOnly ? "Nothing unread and no mentions." : "No conversations match.";
@@ -223,13 +257,12 @@ export const listConversations = Effect.fn("ForkBot.listConversations")(function
   ].join("\n");
 });
 
-/** `chat read`: a page of the conversation, or one reply thread, oldest first. */
+/** `read`: a page of the conversation, or one reply thread, oldest first. */
 export const readMessages = Effect.fn("ForkBot.readMessages")(function* (
   target: ChatTarget,
   options: { readonly limit: number; readonly before?: string; readonly root?: string },
 ) {
-  const ref = `${target.channel.id}/${target.conversationId}`;
-  const header = `"${target.name}" in ${channelName(target.channel)} (${ref})`;
+  const header = `"${target.name}" (${target.conversationId})`;
   if (options.root !== undefined) {
     const thread = yield* readChain(target.channel.id, target.conversationId, options.root, {
       cacheMs: 5_000,
@@ -266,8 +299,8 @@ export const readMessages = Effect.fn("ForkBot.readMessages")(function* (
 });
 
 /** The text as it goes out: with the bot's signature on its own line, when it has one. */
-export const signed = (bot: Bot, text: string) => {
-  const signature = bot.settings.signature.trim().replaceAll("{bot}", bot.name);
+export const signed = (bot: Bot, config: ChatConfig, text: string) => {
+  const signature = config.signature.trim().replaceAll("{bot}", bot.name);
   return signature === "" ? text : `${text}\n\n${signature}`;
 };
 
@@ -371,7 +404,13 @@ export const sendAsUser = Effect.fn("ForkBot.sendAsUser")(function* (input: {
     format: "markdown",
     ...(mentions.length === 0 ? {} : { mentions }),
   });
-  store.recordSent(input.botId, input.target.channel.id, sent.messageId, new Date().toISOString());
+  State.recordSent(
+    store,
+    input.botId,
+    input.target.channel.id,
+    sent.messageId,
+    new Date().toISOString(),
+  );
   return sent;
 });
 
@@ -394,7 +433,8 @@ export const userWroteSince = Effect.fn("ForkBot.userWroteSince")(function* (
   if (!later(target.raw?.lastSelfMessageAt, at)) return false;
   const store = (yield* BotRuntime).store();
   const messages = yield* newestPage(target);
-  const sent = store.sentByBots(
+  const sent = State.sentByBots(
+    store,
     target.channel.id,
     messages.map((message) => message.id),
   );
@@ -409,20 +449,20 @@ export const scanMentions = Effect.fn("ForkBot.scanMentions")(function* (channel
   const store = (yield* BotRuntime).existingStore();
   const bot = store === null ? null : mentionBotFor(store, channelId);
   if (store === null || bot === null) return;
-  const channel = (yield* readableChannels()).find((candidate) => candidate.id === channelId);
-  if (channel === undefined) return;
+  if ((yield* readableChannel(channelId)) === null) return;
   const listing = yield* readChannel(channelId);
   const steps = trackMentions({
     conversations: listing.raw,
-    marks: store.listMentions(channelId),
-    since: channelSettings(bot.settings, channelId).mentionsSince ?? bot.createdAt,
+    marks: State.listMentions(store, channelId),
+    since: chatConfig(connectorSettings(bot.settings, channelId)).mentionsSince ?? bot.createdAt,
     now: new Date(),
   });
   for (const step of steps) {
     if (step.type === "handled") {
-      store.markMentionHandled(channelId, step.conversationId, step.through);
+      State.markMentionHandled(store, channelId, step.conversationId, step.through);
     } else {
-      store.markMentionPending(
+      State.markMentionPending(
+        store,
         channelId,
         step.conversationId,
         step.pendingAt,
@@ -438,7 +478,7 @@ export const fireDueMentions = Effect.fn("ForkBot.fireDueMentions")(function* ()
   const now = new Date();
   const store = (yield* BotRuntime).existingStore();
   if (store === null) return;
-  for (const mark of store.dueMentions(now.toISOString())) {
+  for (const mark of State.dueMentions(store, now.toISOString())) {
     const handled = yield* fireMention(store, mark).pipe(
       Effect.as(true),
       Effect.catchCause((cause) =>
@@ -448,7 +488,8 @@ export const fireDueMentions = Effect.fn("ForkBot.fireDueMentions")(function* ()
       ),
     );
     if (!handled) {
-      store.delayMention(
+      State.delayMention(
+        store,
         mark.channelId,
         mark.conversationId,
         new Date(now.getTime() + RETRY_MS).toISOString(),
@@ -463,16 +504,16 @@ const fireMention = Effect.fn("ForkBot.fireMention")(function* (
 ) {
   const pendingAt = mark.pendingAt ?? mark.handledThrough;
   const bot = mentionBotFor(store, mark.channelId);
-  const channel = (yield* readableChannels()).find((candidate) => candidate.id === mark.channelId);
-  if (bot === null || channel === undefined) {
-    store.markMentionHandled(mark.channelId, mark.conversationId, pendingAt);
+  const channel = yield* readableChannel(mark.channelId);
+  if (bot === null || channel === null) {
+    State.markMentionHandled(store, mark.channelId, mark.conversationId, pendingAt);
     return;
   }
   const listing = yield* readChannel(mark.channelId);
   const conversation = listing.raw.find((candidate) => candidate.id === mark.conversationId);
   const latest = latestOf(pendingAt, conversation?.lastMentionAt);
   if (conversation?.lastSelfMessageAt && !later(latest, conversation.lastSelfMessageAt)) {
-    store.markMentionHandled(mark.channelId, mark.conversationId, latest);
+    State.markMentionHandled(store, mark.channelId, mark.conversationId, latest);
     return;
   }
   // Back to the handled mark, so a mention a busy conversation pushed off the first page is found.
@@ -496,9 +537,9 @@ const fireMention = Effect.fn("ForkBot.fireMention")(function* (
     read.toSorted((left, right) => ms(left.createdAt) - ms(right.createdAt)),
     mark.handledThrough,
   );
-  store.markMentionHandled(mark.channelId, mark.conversationId, latest);
-  const ref = `${mark.channelId}/${mark.conversationId}`;
-  const where = `"${conversation?.name ?? mark.conversationId}" in ${channelName(channel)} (${ref})`;
+  State.markMentionHandled(store, mark.channelId, mark.conversationId, latest);
+  const command = channel.id;
+  const where = `"${conversation?.name ?? mark.conversationId}" in ${channelName(channel)} (${mark.conversationId})`;
   const lines =
     mentions.length === 0
       ? [
@@ -519,7 +560,7 @@ const fireMention = Effect.fn("ForkBot.fireMention")(function* (
     bot.id,
     [
       ...lines,
-      `Read around it with \`chat read ${ref}\` (add --root <thread> for a thread). Then tell the user what needs them, draft a reply with \`chat send\`, or start a thread for real work; end with NO_REPLY when it needs nothing.`,
+      `Read around it with \`${command} read ${mark.conversationId}\` (add --root <thread> for a thread). Then tell the user what needs them, draft a reply with \`${command} send\`, or start a thread for real work; end with NO_REPLY when it needs nothing.`,
     ].join("\n"),
     true,
   );

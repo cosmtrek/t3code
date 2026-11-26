@@ -308,10 +308,13 @@ export interface BotSummary {
 
 export type BotPermission = "allow" | "ask";
 
-export interface BotChannelSettings {
-  readonly send: BotPermission;
-  /** It wakes when someone mentions the user there; one bot per channel at most. */
-  readonly mentions: boolean;
+/** One connector instance, as this bot may use it. */
+export interface BotConnectorSettings {
+  readonly enabled: boolean;
+  /** Per write operation; one missing here asks. */
+  readonly permissions: Readonly<Record<string, BotPermission>>;
+  /** The kind's own settings; for chat: `signature`, `mentions`. */
+  readonly config: Readonly<Record<string, unknown>>;
 }
 
 export interface BotSettings {
@@ -320,20 +323,22 @@ export interface BotSettings {
   readonly turnsPerDay: number;
   readonly maxThreads: number;
   readonly runtimeMode: RuntimeMode;
-  /** Off: the bot has no chat tools at all. */
-  readonly channelsEnabled: boolean;
-  /** Appended to what it sends; empty sends the text as written. `{bot}` is its name. */
-  readonly signature: string;
-  /** By channel id; a channel missing here asks before sending and takes no mentions. */
-  readonly channels: Readonly<Record<string, BotChannelSettings>>;
+  /** By instance id; one missing here is off. */
+  readonly connectors: Readonly<Record<string, BotConnectorSettings>>;
 }
 
-/** A chat channel of the environment, for a bot's settings. */
-export interface BotChannelOption {
+/** A connector instance of the environment, such as a chat channel, for a bot's settings. */
+export interface BotConnectorInstance {
+  /** Also its `t3bot` command. */
   readonly id: string;
+  readonly kind: string;
   readonly name: string;
-  /** The bot that wakes on the user's mentions there now. */
-  readonly mentionBot: { readonly id: string; readonly name: string } | null;
+  readonly status: "ok" | "degraded" | "down";
+  readonly reason: string | null;
+  /** Its writes, each allow or ask per bot. */
+  readonly operations: ReadonlyArray<{ readonly id: string; readonly label: string }>;
+  /** What its kind adds; for chat, the bot that wakes on the user's mentions there now. */
+  readonly info: Readonly<Record<string, unknown>>;
 }
 
 /** An action the bot asked to take; approving runs exactly it. */
@@ -386,8 +391,8 @@ export interface BotDetail {
     readonly folder: string;
     readonly path: string;
   }>;
-  /** The environment's chat channels; empty where none is configured. */
-  readonly channels: ReadonlyArray<BotChannelOption>;
+  /** The environment's connector instances, such as its chat channels. */
+  readonly connectors: ReadonlyArray<BotConnectorInstance>;
 }
 
 export interface BotNotebook {

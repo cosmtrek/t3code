@@ -20,6 +20,9 @@ import * as Project from "../../project/ProjectService.ts";
 import * as DocumentText from "../../provider/DocumentText.ts";
 import { ManagedProjectFolders } from "../../project/ManagedProjectFolders.ts";
 import * as ProviderRegistry from "../../provider/ProviderRegistry.ts";
+import { ChannelHub } from "../channels/hub.ts";
+import { InboxRuntime } from "../inbox/InboxRuntime.ts";
+import { InboxStore } from "../inbox/store.ts";
 import { BotRuntime, type BotRuntimeShape } from "./BotRuntime.ts";
 import { followThreads, reconcileThreads } from "./events.ts";
 import * as Bots from "./operations.ts";
@@ -225,6 +228,48 @@ const withHarness = <E>(
         ),
       ),
     ),
+  );
+
+/** The harness plus the inbox, with the built-in example channel switched on. */
+const withChat = <E>(
+  program: (h: Harness) => Effect.Effect<void, E, HarnessServices | InboxRuntime>,
+) =>
+  withHarness((h) =>
+    Effect.gen(function* () {
+      const dir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-bot-chat-")),
+      );
+      const hub = new ChannelHub({
+        configPath: NodePath.join(dir, "channels.json"),
+        background: false,
+      });
+      yield* Effect.promise(async () => {
+        await hub.start();
+        const example = hub.list().find((channel) => channel.id === "example")!;
+        await hub.save(
+          {
+            id: example.id,
+            kind: example.kind,
+            name: example.name,
+            baseUrl: example.baseUrl,
+            tokenFile: example.tokenFile,
+            enabled: true,
+          },
+          { create: false },
+        );
+      });
+      const inbox = new InboxStore(":memory:");
+      yield* program(h).pipe(
+        Effect.provideService(InboxRuntime, {
+          hub,
+          store: inbox,
+          channelsDir: dir,
+          itemsDir: NodePath.join(dir, "items"),
+          subscribe: (listener) => hub.subscribe(listener),
+        }),
+        Effect.ensuring(Effect.promise(() => NodeFSP.rm(dir, { recursive: true, force: true }))),
+      );
+    }),
   );
 
 describe("bot turns", () => {
@@ -500,59 +545,155 @@ describe("bot turns", () => {
     ),
   );
 
-  it.effect("gives one bot per channel the user's mentions, and none while its chat is off", () =>
-    withHarness((h) =>
-      Effect.gen(function* () {
-        const store = h.runtime.store();
-        const first = yield* Bots.createBot({ name: "Inbox", modelSelection: MODEL });
-        const second = yield* Bots.createBot({ name: "Other", modelSelection: MODEL });
-        const save = (botId: string, channelsEnabled: boolean, mentions: boolean) =>
-          Bots.saveSettings({
-            botId,
-            settings: {
-              turnsPerDay: 100,
-              maxThreads: 3,
-              channelsEnabled,
-              channels: { lark: { send: "ask", mentions } },
-            },
-          });
-        const lark = (botId: string) => store.getBot(botId)!.settings.channels.lark;
-        expect(store.getBot(first.botId)!.settings.channelsEnabled).toBe(false);
+  it.effect(
+    "gives one bot per channel the user's mentions, and none while the channel is off",
+    () =>
+      withChat((h) =>
+        Effect.gen(function* () {
+          const store = h.runtime.store();
+          const first = yield* Bots.createBot({ name: "Inbox", modelSelection: MODEL });
+          const second = yield* Bots.createBot({ name: "Other", modelSelection: MODEL });
+          const save = (botId: string, enabled: boolean, mentions: boolean) =>
+            Bots.saveSettings({
+              botId,
+              settings: {
+                turnsPerDay: 100,
+                maxThreads: 3,
+                connectors: {
+                  example: { enabled, permissions: { send: "ask" }, config: { mentions } },
+                },
+              },
+            });
+          const example = (botId: string) => store.getBot(botId)!.settings.connectors.example;
+          expect(example(first.botId)).toBeUndefined();
 
-        yield* save(first.botId, true, true);
-        const since = lark(first.botId)?.mentionsSince;
-        expect(since).toEqual(expect.any(String));
-        // Saving again keeps when it took mentions on.
-        yield* save(first.botId, true, true);
-        expect(lark(first.botId)?.mentionsSince).toBe(since);
+          yield* save(first.botId, true, true);
+          const since = example(first.botId)?.config.mentionsSince;
+          expect(since).toEqual(expect.any(String));
+          // Saving again keeps when it took mentions on.
+          yield* save(first.botId, true, true);
+          expect(example(first.botId)?.config.mentionsSince).toBe(since);
 
-        yield* save(second.botId, true, true);
-        expect(lark(first.botId)?.mentions).toBe(false);
-        expect(lark(second.botId)?.mentions).toBe(true);
+          yield* save(second.botId, true, true);
+          expect(example(first.botId)?.config.mentions).toBe(false);
+          expect(example(second.botId)?.config.mentions).toBe(true);
 
-        yield* save(second.botId, false, true);
-        expect(lark(second.botId)?.mentions).toBe(false);
+          yield* save(second.botId, false, true);
+          expect(example(second.botId)?.config.mentions).toBe(false);
 
-        // A setting from before the threads switch: a denied action now asks, never allows.
-        store.setSettings(first.botId, {
-          permissions: { "thread.start": "deny", "thread.send": "allow" },
-        } as never);
-        expect(store.getBot(first.botId)!.settings.threads).toBe("ask");
-      }),
-    ),
+          const unknown = yield* Effect.flip(
+            Bots.saveSettings({
+              botId: first.botId,
+              settings: {
+                turnsPerDay: 100,
+                maxThreads: 3,
+                connectors: { lark: { enabled: true } },
+              },
+            }),
+          );
+          expect(unknown.detail).toBe('No connector "lark" here.');
+
+          // A setting from before the threads switch: a denied action now asks, never allows.
+          store.setSettings(first.botId, {
+            permissions: { "thread.start": "deny", "thread.send": "allow" },
+          } as never);
+          expect(store.getBot(first.botId)!.settings.threads).toBe("ask");
+        }),
+      ),
   );
+
+  it("moves chat settings from before connectors onto each channel", () => {
+    const store = new BotStore(":memory:");
+    store.createBot(
+      { id: "bot_1", name: "Old", modelSelection: MODEL as never, createdAt: "2026-11-01" },
+      "auto",
+    );
+    store.setSettings("bot_1", {
+      channelsEnabled: true,
+      signature: "-- {bot}",
+      channels: { lark: { send: "allow", mentions: true, mentionsSince: "2026-11-02" } },
+    } as never);
+    expect(store.getBot("bot_1")!.settings.connectors).toEqual({
+      lark: {
+        enabled: true,
+        permissions: { send: "allow" },
+        config: { signature: "-- {bot}", mentions: true, mentionsSince: "2026-11-02" },
+      },
+    });
+  });
 
   it.effect("offers no chat where the environment has no chat channel", () =>
     withHarness(() =>
       Effect.gen(function* () {
         const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
         expect(yield* runTool({ bot: botId, argv: ["help"], stdin: "" })).not.toContain(
-          "chat read",
+          "send <conversation>",
         );
         const refused = yield* Effect.flip(
           runTool({ bot: botId, argv: ["chat", "unread"], stdin: "" }),
         );
-        expect(refused.detail).toBe("No chat channel is set up here.");
+        expect(refused.detail).toBe(
+          "No chat channel is on for you; the user can turn one on in your settings.",
+        );
+        const unknown = yield* Effect.flip(
+          runTool({ bot: botId, argv: ["example", "unread"], stdin: "" }),
+        );
+        expect(unknown.detail).toBe('Unknown command "example". Run help.');
+      }),
+    ),
+  );
+
+  it.effect("names each chat channel as its own command, and gates every send", () =>
+    withChat((h) =>
+      Effect.gen(function* () {
+        const store = h.runtime.store();
+        const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+        const tool = (...argv: string[]) => runTool({ bot: botId, argv, stdin: "" });
+        const save = (enabled: boolean, send: "allow" | "ask", signature = "") =>
+          Bots.saveSettings({
+            botId,
+            settings: {
+              turnsPerDay: 100,
+              maxThreads: 3,
+              connectors: { example: { enabled, permissions: { send }, config: { signature } } },
+            },
+          });
+
+        expect((yield* Effect.flip(tool("example", "unread"))).detail).toBe(
+          "Example is off for you; the user can turn it on in your settings.",
+        );
+        yield* save(true, "ask", "-- {bot}");
+        const help = yield* tool("help");
+        expect(help).toContain("example send <conversation>");
+        expect((yield* Effect.flip(tool("chat", "unread"))).detail).toContain(
+          "`example …` for Example",
+        );
+        expect(yield* tool("example", "list")).toContain('c-dm-jordan "Jordan Lee"');
+
+        // Asking stores the call; nothing reaches the channel until the user approves it.
+        const asked = yield* tool("example", "send", "c-dm-jordan", "On", "it");
+        expect(asked).toContain("the user must approve this");
+        const [question] = store.openQuestions(botId);
+        expect(question?.text).toBe('Example: send as you to "Jordan Lee"\n\nOn it\n\n-- Bot');
+        expect(yield* tool("example", "read", "c-dm-jordan")).not.toContain("On it");
+        const approved = yield* answerQuestion({ botId, questionId: question!.id, approve: true });
+        expect(approved.ok).toBe(true);
+        expect(yield* tool("example", "read", "c-dm-jordan")).toContain("On it");
+
+        // Approval resolves the call again: a channel turned off since runs nothing.
+        yield* tool("example", "send", "c-dm-jordan", "Later");
+        const [later] = store.openQuestions(botId);
+        yield* save(false, "ask");
+        const lapsed = yield* answerQuestion({ botId, questionId: later!.id, approve: true });
+        expect(lapsed).toEqual({
+          ok: false,
+          output: "Example is off for you; the user can turn it on in your settings.",
+        });
+
+        yield* save(true, "allow");
+        expect(yield* tool("example", "send", "Jordan Lee", "Sent", "now")).toContain(
+          'Sent as the user to "Jordan Lee"',
+        );
       }),
     ),
   );
@@ -785,11 +926,6 @@ describe("t3bot arguments", () => {
       flags: {},
     },
     {
-      argv: ["chat", "send", "lark/oc_1", "--reply-to", "om_2", "Done,", "--see-above"],
-      positional: ["chat", "send", "lark/oc_1", "Done,", "--see-above"],
-      flags: { "reply-to": "om_2" },
-    },
-    {
       argv: ["item", "add", "--note=a=b", "--unknown", "Title"],
       positional: ["item", "add", "--unknown", "Title"],
       flags: { note: "a=b" },
@@ -798,6 +934,17 @@ describe("t3bot arguments", () => {
     const parsed = parseArgs(argv);
     expect(parsed.positional).toEqual(positional);
     expect(Object.fromEntries(parsed.flags)).toEqual(flags);
+  });
+
+  it("parses a connector's flags from its own spec", () => {
+    const parsed = parseArgs(
+      ["lark", "send", "oc_1", "--reply-to", "om_2", "Done,", "--see-above"],
+      {
+        values: ["reply-to"],
+      },
+    );
+    expect(parsed.positional).toEqual(["lark", "send", "oc_1", "Done,", "--see-above"]);
+    expect(Object.fromEntries(parsed.flags)).toEqual({ "reply-to": "om_2" });
   });
 
   it.each([

@@ -22,7 +22,6 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 
@@ -31,19 +30,18 @@ import * as ThreadManagement from "../../orchestration-v2/ThreadManagementServic
 import * as ThreadMessageIntake from "../../orchestration-v2/ThreadMessageIntake.ts";
 import { ManagedProjectFolders } from "../../project/ManagedProjectFolders.ts";
 import * as ProviderRegistry from "../../provider/ProviderRegistry.ts";
-import { channelAccess, type ChannelView } from "../channels/hub.ts";
-import { InboxRuntime } from "../inbox/InboxRuntime.ts";
 import { firstProviderDefault, ForkHttpError } from "../inbox/operations.ts";
 import { BotRuntime, type BotRuntimeShape } from "./BotRuntime.ts";
 import { buildPacket, chatPreview, RECENT_CHAT_LIMIT, type Notebook } from "./packet.ts";
 import { nextDueAt } from "./routines.ts";
 import { listSkills, ownSkillsPath, sharedSkillsPath } from "./skills.ts";
+import { briefFor, listInstances } from "./connectors/registry.ts";
 import {
-  channelSettings,
+  connectorSettings,
   type Bot,
   type BotSettings,
-  type ChannelSettings,
   type ChatMessage,
+  type ConnectorSettings,
 } from "./store.ts";
 
 /** Chat shown on the Bots page; older messages stay in the store. */
@@ -65,30 +63,6 @@ const TERMINAL: ReadonlySet<OrchestrationV2RunStatus> = new Set([
 
 export const isTerminalRunStatus = (status: string) =>
   TERMINAL.has(status as OrchestrationV2RunStatus);
-
-/** The environment's chat channels; none when it has no inbox or the user configured none. */
-export const configuredChannels = Effect.fn("ForkBot.configuredChannels")(function* () {
-  const inbox = yield* Effect.serviceOption(InboxRuntime);
-  if (Option.isNone(inbox)) return [] as ReadonlyArray<ChannelView>;
-  return inbox.value.hub.list().filter((channel) => channel.enabled);
-});
-
-/** Those a bot can read now. */
-export const readableChannels = Effect.fn("ForkBot.readableChannels")(function* () {
-  return (yield* configuredChannels()).filter((channel) => channelAccess(channel.status).read);
-});
-
-export const channelName = (channel: ChannelView) => channel.config?.displayName ?? channel.name;
-
-/** The channels a bot may use: none while its Channels switch is off. */
-const botChannels = Effect.fn("ForkBot.botChannels")(function* (bot: Bot) {
-  if (!bot.settings.channelsEnabled) return [];
-  return (yield* configuredChannels()).map((channel) => ({
-    id: channel.id,
-    name: channelName(channel),
-    ...channelSettings(bot.settings, channel.id),
-  }));
-});
 
 const badRequest = (detail: string, field?: string) =>
   new ForkHttpError({ status: 400, code: "bad_request", detail, ...(field ? { field } : {}) });
@@ -243,20 +217,12 @@ export const readBot = Effect.fn("ForkBot.readBot")(function* (params: URLSearch
     notesPath: notesPath(runtime.botsDir, bot.id),
     notes: yield* listNotes(runtime.botsDir, bot.id),
     skills: yield* Effect.promise(() => listSkills(runtime.botsDir, bot.id)),
-    // For its settings: each channel, and which bot wakes on the user's mentions there.
-    channels: (yield* configuredChannels()).map((channel) => {
-      const mentionBot = store
-        .listBots()
-        .find(
-          (other) =>
-            other.settings.channelsEnabled && channelSettings(other.settings, channel.id).mentions,
-        );
-      return {
-        id: channel.id,
-        name: channelName(channel),
-        mentionBot: mentionBot ? { id: mentionBot.id, name: mentionBot.name } : null,
-      };
-    }),
+    // For its settings: the environment's connector instances, with what each kind adds.
+    connectors: yield* Effect.forEach(yield* listInstances(), ({ connector, instance }) =>
+      (connector.info?.(instance.id) ?? Effect.succeed({})).pipe(
+        Effect.map((info) => ({ ...instance, info })),
+      ),
+    ),
   };
 });
 
@@ -572,7 +538,7 @@ const wake = Effect.fn("ForkBot.wake")(function* (botId: string) {
           events: queued.map((event) => event.text),
           now,
           firstTurnToday,
-          channels: yield* botChannels(bot),
+          connectors: yield* briefFor(bot),
         },
         seen,
       );
@@ -840,15 +806,19 @@ const SettingsInput = Schema.Struct({
     turnsPerDay: Schema.Number,
     maxThreads: Schema.Number,
     runtimeMode: Schema.optional(RuntimeMode),
-    channelsEnabled: Schema.optional(Schema.Boolean),
-    signature: Schema.optional(Schema.String),
-    channels: Schema.optional(
-      Schema.Record(Schema.String, Schema.Struct({ send: Permission, mentions: Schema.Boolean })),
+    /** By instance id; instances left out keep what they had. */
+    connectors: Schema.optional(
+      Schema.Record(
+        Schema.String,
+        Schema.Struct({
+          enabled: Schema.Boolean,
+          permissions: Schema.optional(Schema.Record(Schema.String, Permission)),
+          config: Schema.optional(Schema.Unknown),
+        }),
+      ),
     ),
   }),
 });
-
-const SIGNATURE_CHARS = 200;
 
 /** Only the user sets these; the bot has no tool for them. */
 export const saveSettings = Effect.fn("ForkBot.saveSettings")(function* (input: unknown) {
@@ -864,39 +834,41 @@ export const saveSettings = Effect.fn("ForkBot.saveSettings")(function* (input: 
   if (!Number.isInteger(maxThreads) || maxThreads < 1 || maxThreads > 50) {
     return yield* badRequest("Give 1 to 50 threads at once.", "maxThreads");
   }
-  const signature = decoded.settings.signature ?? bot.settings.signature;
-  if (signature.length > SIGNATURE_CHARS) {
-    return yield* badRequest(
-      `Keep the signature under ${SIGNATURE_CHARS} characters.`,
-      "signature",
-    );
-  }
-  const channelsEnabled = decoded.settings.channelsEnabled ?? bot.settings.channelsEnabled;
+  const instances = yield* listInstances();
   const now = nowIso();
-  const channels: Record<string, ChannelSettings> = { ...bot.settings.channels };
-  for (const [channelId, wanted] of Object.entries(decoded.settings.channels ?? {})) {
-    const before = channelSettings(bot.settings, channelId);
-    const mentions = channelsEnabled && wanted.mentions;
-    channels[channelId] = {
-      send: wanted.send,
-      mentions,
-      // Turning mentions on starts from now: earlier ones were the user's to handle.
-      mentionsSince: mentions ? (before.mentions ? before.mentionsSince : now) : null,
+  const connectors: Record<string, ConnectorSettings> = Object.fromEntries(
+    // Settings of instances the environment no longer has are dropped.
+    Object.entries(bot.settings.connectors).filter(([id]) =>
+      instances.some((entry) => entry.instance.id === id),
+    ),
+  );
+  const saved: Array<(typeof instances)[number]> = [];
+  for (const [instanceId, wanted] of Object.entries(decoded.settings.connectors ?? {})) {
+    const entry = instances.find((candidate) => candidate.instance.id === instanceId);
+    if (entry === undefined) return yield* badRequest(`No connector "${instanceId}" here.`);
+    const before = connectorSettings(bot.settings, instanceId);
+    const operations = new Set(entry.instance.operations.map((operation) => operation.id));
+    connectors[instanceId] = {
+      enabled: wanted.enabled,
+      permissions: Object.fromEntries(
+        Object.entries({ ...before.permissions, ...wanted.permissions }).filter(([operation]) =>
+          operations.has(operation),
+        ),
+      ),
+      config: yield* entry.connector.config(wanted.config ?? {}, {
+        before,
+        enabled: wanted.enabled,
+        now,
+      }),
     };
-  }
-  if (!channelsEnabled) {
-    for (const [channelId, value] of Object.entries(channels)) {
-      channels[channelId] = { ...value, mentions: false, mentionsSince: null };
-    }
+    saved.push(entry);
   }
   const settings: BotSettings = {
     threads: decoded.settings.threads ?? bot.settings.threads,
     turnsPerDay,
     maxThreads,
     runtimeMode,
-    channelsEnabled,
-    signature,
-    channels,
+    connectors,
   };
   if (bot.workThreadId !== null && runtimeMode !== bot.settings.runtimeMode) {
     yield* (yield* ThreadManagement.ThreadManagementService)
@@ -909,21 +881,8 @@ export const saveSettings = Effect.fn("ForkBot.saveSettings")(function* (input: 
       .pipe(Effect.mapError((cause) => badRequest(cause.message, "runtimeMode")));
   }
   store.setSettings(bot.id, settings);
-  // One bot per channel wakes on mentions: taking a channel takes it from the bot that had it.
-  for (const [channelId, value] of Object.entries(channels)) {
-    if (!value.mentions) continue;
-    for (const other of store.listBots()) {
-      const held = other.settings.channels[channelId];
-      if (other.id === bot.id || held?.mentions !== true) continue;
-      store.setSettings(other.id, {
-        ...other.settings,
-        channels: {
-          ...other.settings.channels,
-          [channelId]: { ...held, mentions: false, mentionsSince: null },
-        },
-      });
-      runtime.publish(other.id);
-    }
+  for (const { connector, instance } of saved) {
+    if (connector.afterSave !== undefined) yield* connector.afterSave(bot.id, instance.id);
   }
   runtime.publish(bot.id);
   // A raised budget may let a held wake run now.

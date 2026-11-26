@@ -1,7 +1,7 @@
 // @effect-diagnostics globalDate:off - Fixed instants stand in for the mention clock.
 import { describe, expect, it } from "@effect/vitest";
 
-import type { Message } from "../channels/protocol.ts";
+import type { Message } from "../../../channels/protocol.ts";
 import {
   MENTION_DELAY_MS,
   mentionsIn,

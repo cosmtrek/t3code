@@ -23,19 +23,10 @@ import * as ThreadMessageIntake from "../../orchestration-v2/ThreadMessageIntake
 import * as Project from "../../project/ProjectService.ts";
 import { ForkHttpError } from "../inbox/operations.ts";
 import { BotRuntime } from "./BotRuntime.ts";
-import {
-  describeReply,
-  listConversations,
-  readMessages,
-  READ_LIMIT as CHAT_READ_LIMIT,
-  resolveConversation,
-  sendAsUser,
-  signed,
-  userWroteSince,
-} from "./chat.ts";
+import { enabledFor, helpFor, listInstances, RESERVED_COMMANDS } from "./connectors/registry.ts";
+import { textOf, toolError, type FlagSpec } from "./connectors/types.ts";
 import { decide, QUESTION_TTL_MS } from "./gate.ts";
 import {
-  configuredChannels,
   decode,
   isTerminalRunStatus,
   newId,
@@ -50,17 +41,12 @@ import {
 } from "./operations.ts";
 import { renderNotebook } from "./packet.ts";
 import { describeSchedule, nextDueAt, parseSchedule } from "./routines.ts";
-import { channelSettings, type FollowUp, type ItemStatus, type Permission } from "./store.ts";
+import { connectorSettings, type FollowUp, type ItemStatus, type Permission } from "./store.ts";
 
 export const MEMORY_BYTES = 4_096;
 const SAY_CHARS = 20_000;
 const READ_LIMIT = 20;
 const READ_CHARS = 1_500;
-
-interface FlagSpec {
-  readonly values?: ReadonlyArray<string>;
-  readonly booleans?: ReadonlyArray<string>;
-}
 
 const ROUTINE_FLAGS: FlagSpec = { values: ["title", "daily", "weekdays", "every"] };
 /**
@@ -79,21 +65,7 @@ const FLAGS: Readonly<Record<string, FlagSpec>> = {
     booleans: ["worktree"],
   },
   "thread read": { values: ["limit"] },
-  "chat list": { values: ["query"] },
-  "chat read": { values: ["limit", "before", "root"] },
-  "chat send": { values: ["reply-to"] },
 };
-
-const CHAT_HELP = `
-  chat unread                    conversations with unread messages or mentions of the user
-  chat list [--query <name>]     recent conversations; each line starts with its <channel>/<id>
-  chat read <conversation> [--limit n] [--before <cursor>] [--root <message>]
-                                 newest messages, oldest first; --root reads one reply thread
-  chat send <conversation> [--reply-to <message>] <text> | -
-                                 sends as the user, in that message's thread with --reply-to;
-                                 @Name of someone in the conversation notifies them
-                                 <conversation> is <channel>/<id>, an id, or an exact name
-`;
 
 const HELP = `t3bot <command> - everything you do goes through these.
 
@@ -122,7 +94,7 @@ const HELP = `t3bot <command> - everything you do goes through these.
   thread send <thread> <text>    message a thread you own, unless the user took it over
   thread read <thread> [--limit n]
   thread list
-{chat}
+{connectors}
 Flags take --name value or --name=value. Text that itself starts with -- goes after a bare --.
 
 Some actions need the user's approval. Then the command does not run: it becomes a question in
@@ -133,8 +105,11 @@ interface Parsed {
   readonly flags: ReadonlyMap<string, string>;
 }
 
-export function parseArgs(argv: ReadonlyArray<string>): Parsed {
-  const spec = FLAGS[`${argv[0]} ${argv[1]}`] ?? {};
+/** `spec` defaults to the core command's; a connector passes its operation's. */
+export function parseArgs(
+  argv: ReadonlyArray<string>,
+  spec: FlagSpec = FLAGS[`${argv[0]} ${argv[1]}`] ?? {},
+): Parsed {
   const positional: string[] = [];
   const flags = new Map<string, string>();
   for (let index = 0; index < argv.length; index += 1) {
@@ -159,8 +134,7 @@ export function parseArgs(argv: ReadonlyArray<string>): Parsed {
   return { positional, flags };
 }
 
-const fail = (message: string) =>
-  new ForkHttpError({ status: 400, code: "tool_error", detail: message });
+const fail = toolError;
 
 const idOf = (value: string | undefined, what: string) => {
   const id = Number(value?.replace(/^#/, ""));
@@ -168,10 +142,6 @@ const idOf = (value: string | undefined, what: string) => {
     ? Effect.succeed(id)
     : Effect.fail(fail(`Give the ${what} id.`));
 };
-
-/** The words after the subcommand, or stdin for `-`. */
-const textOf = (words: ReadonlyArray<string>, stdin: string) =>
-  (words.length === 1 && words[0] === "-" ? stdin : words.join(" ")).trim();
 
 const ToolRequest = Schema.Struct({
   bot: Schema.String,
@@ -250,6 +220,9 @@ const gate = Effect.fn("ForkBot.gate")(function* (
 });
 
 export const runTool = Effect.fn("ForkBot.runTool")(function* (input: ToolCall) {
+  if (input.argv[0] !== undefined && !RESERVED_COMMANDS.has(input.argv[0])) {
+    return yield* connectorCommand(input);
+  }
   const { positional, flags } = parseArgs(input.argv);
   const [command, sub, ...rest] = positional;
   const botId = input.bot;
@@ -264,9 +237,7 @@ export const runTool = Effect.fn("ForkBot.runTool")(function* (input: ToolCall) 
   switch (command) {
     case undefined:
     case "help": {
-      const bot = store.getBot(botId)!;
-      const chat = bot.settings.channelsEnabled && (yield* configuredChannels()).length > 0;
-      return HELP.replace("{chat}", chat ? CHAT_HELP : "");
+      return HELP.replace("{connectors}", yield* helpFor(store.getBot(botId)!));
     }
     case "say": {
       const text = textOf([sub ?? "", ...rest].filter(Boolean), input.stdin);
@@ -370,7 +341,7 @@ export const runTool = Effect.fn("ForkBot.runTool")(function* (input: ToolCall) 
     case "thread":
       return yield* threadCommand(input, sub, rest, flags);
     case "chat":
-      return yield* chatCommand(input, sub, rest, flags);
+      return yield* chatMoved(botId);
     default:
       return yield* fail(`Unknown command "${command}". Run help.`);
   }
@@ -703,75 +674,61 @@ const threadCommand = Effect.fn("ForkBot.threadCommand")(function* (
   return yield* fail("thread start | send | read | list");
 });
 
-const chatCommand = Effect.fn("ForkBot.chatCommand")(function* (
-  call: ToolCall,
-  sub: string | undefined,
-  rest: ReadonlyArray<string>,
-  flags: ReadonlyMap<string, string>,
-) {
+/** Earlier builds had one `chat` command for every channel; each channel is its own now. */
+const chatMoved = Effect.fn("ForkBot.chatMoved")(function* (botId: string) {
+  const bot = (yield* BotRuntime).store().getBot(botId)!;
+  const chats = (yield* enabledFor(bot)).filter((entry) => entry.instance.kind === "chat");
+  return yield* fail(
+    chats.length === 0
+      ? "No chat channel is on for you; the user can turn one on in your settings."
+      : `Each chat channel is its own command now: ${chats.map((entry) => `\`${entry.instance.id} …\` for ${entry.instance.name}`).join(", ")}. Run help, and fix any skill or note that says \`chat\`.`,
+  );
+});
+
+/**
+ * `<instance> <operation> …`: the connector resolves the call, and every write it resolves to
+ * passes the gate here, so no connector can write without the user's say.
+ */
+const connectorCommand = Effect.fn("ForkBot.connectorCommand")(function* (call: ToolCall) {
+  const [command, operation] = call.argv;
   const bot = (yield* BotRuntime).store().getBot(call.bot)!;
-  if ((yield* configuredChannels()).length === 0) {
-    return yield* fail("No chat channel is set up here.");
-  }
-  if (!bot.settings.channelsEnabled) {
-    return yield* fail("Your chat channels are off; the user can turn them on in your settings.");
-  }
-  if (sub === "unread") return yield* listConversations({ unreadOnly: true });
-  if (sub === "list") {
-    return yield* listConversations({
-      query: flags.get("query") ?? rest.join(" "),
-      unreadOnly: false,
-    });
-  }
-  if (sub === "read") {
-    const target = yield* resolveConversation(rest[0]);
-    const limit = Math.min(
-      Math.max(Number(flags.get("limit") ?? CHAT_READ_LIMIT) || CHAT_READ_LIMIT, 1),
-      100,
+  const entry = (yield* listInstances()).find(
+    (candidate) => candidate.callable && candidate.instance.id === command,
+  );
+  if (entry === undefined) return yield* fail(`Unknown command "${command}". Run help.`);
+  const { connector, instance } = entry;
+  const settings = connectorSettings(bot.settings, instance.id);
+  if (!settings.enabled) {
+    return yield* fail(
+      `${instance.name} is off for you; the user can turn it on in your settings.`,
     );
-    const before = flags.get("before");
-    const root = flags.get("root");
-    return yield* readMessages(target, {
-      limit,
-      ...(before === undefined ? {} : { before }),
-      ...(root === undefined ? {} : { root }),
-    });
   }
-  if (sub !== "send") return yield* fail("chat unread | list | read | send");
-  const target = yield* resolveConversation(rest[0]);
-  const text = textOf(rest.slice(1), call.stdin);
-  if (text === "" || text.length > SAY_CHARS) {
-    return yield* fail(`Write 1 to ${SAY_CHARS} characters.`);
+  if (instance.status === "down") {
+    return yield* fail(`${instance.name} cannot be used now: ${instance.reason ?? "it is down"}.`);
   }
-  const replyToId = flags.get("reply-to");
-  const outgoing = signed(bot, text);
+  const { positional, flags } = parseArgs(
+    call.argv,
+    operation === undefined ? {} : (connector.flags[operation] ?? {}),
+  );
+  const action = yield* connector.resolve({
+    bot,
+    instance,
+    settings,
+    operation: positional[1],
+    args: positional.slice(2),
+    flags,
+    stdin: call.stdin,
+  });
+  if (action.effect === "read") return yield* action.run;
   const asked = yield* gate(
     call,
-    channelSettings(bot.settings, target.channel.id).send,
+    settings.permissions[action.operation] ?? "ask",
     false,
-    `send as you to "${target.name}"${
-      replyToId === undefined ? "" : `, replying to ${yield* describeReply(target, replyToId)}`
-    }`,
-    outgoing,
+    `${instance.name}: ${action.what}`,
+    action.detail,
   );
   if (asked !== null) return asked;
-  if (call.askedAt !== undefined && (yield* userWroteSince(target, call.askedAt))) {
-    return yield* fail(
-      `Not sent: the user wrote in "${target.name}" after you drafted this. Read it again and draft anew if it still needs saying. Your draft: ${text}`,
-    );
-  }
-  const sent = yield* sendAsUser({
-    botId: bot.id,
-    target,
-    text: outgoing,
-    ...(replyToId === undefined ? {} : { replyToId }),
-  });
-  return [
-    `Sent as the user to "${target.name}" (message ${sent.messageId}).`,
-    ...(sent.unresolvedMentions.length > 0
-      ? [`Not notified (mention went out as plain text): ${sent.unresolvedMentions.join(", ")}.`]
-      : []),
-  ].join(" ");
+  return yield* action.run(call.askedAt === undefined ? {} : { askedAt: call.askedAt });
 });
 
 const AnswerInput = Schema.Struct({

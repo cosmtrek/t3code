@@ -210,16 +210,17 @@ a bot, pause it.
 
 Chat is optional: an environment has a chat channel only when the user configured one in the
 inbox, and most have none. Everything below follows the channels configured in that environment,
-not a fixed chat app. Without one, bots show no Channels settings, get no chat commands in their
-help or wake packet, and the service watches no channel. Configuring a channel changes no bot: each
-bot's Channels switch is off until the user turns it on. A removed channel's settings go with it.
+not a fixed chat app. Each channel is a [connector](./bot-connectors.md) whose command is the
+channel's id (`t3bot lark read …`). Without one, bots show no channel settings, get no chat
+commands in their help or wake packet, and the service watches no channel. Configuring a channel
+changes no bot: it is off for every bot until the user turns it on for one. A removed channel's
+settings go with it.
 
 To everyone in the chat app there is only the user. Bots stay behind them: nobody can mention a
 bot, and nothing a bot sends names it.
 
-- **Channels switch.** One switch per bot turns its chat channels on or off. It is off for a new
-  bot and the user turns it on. Off, the bot has no chat tools at all.
-- **Per channel.** Under it, each channel configured in the environment has its own settings:
+- **Per channel.** Each channel configured in the environment has its own settings per bot:
+  - **Use the channel**: off for a new bot. Off, the bot has no command for it.
   - **Send messages**: ask (default) or allow. Later, the user can add rules for what goes out
     without asking. Reading any conversation of the channel is always allowed.
   - **Wake on my @-mentions**: on for at most one bot per channel; switching it on for another
@@ -230,8 +231,7 @@ bot, and nothing a bot sends names it.
   user wrote in that conversation since the mention, nothing happens. Otherwise the bot wakes with
   one line per mention (conversation, message, reply thread) and reads the context itself. Mentions
   in that window, or while it runs, join one wake.
-- **Signature.** Each bot has an optional signature, set beside its Channels switch and used for
-  every channel. It is empty by default, and then messages go out exactly as written. When set,
+- **Signature.** Each bot has an optional signature per channel. It is empty by default, and then messages go out exactly as written. When set,
   the service, not the model, appends it on its own line; `{bot}` in it becomes the bot's name
   when sending.
 - **No loops.** Messages sent as the user never wake a bot, so bots cannot answer themselves or

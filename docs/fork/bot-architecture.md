@@ -106,8 +106,9 @@ bots/
 ```
 
 `bots.sqlite` holds what has structure: `bots` (name, model, permissions, budget,
-scope, paused, and its chat settings: the channels switch (off by default), the
-signature, and, per channel, send permission and whether it wakes on mentions), `items`
+scope, paused, and per [connector](./bot-connectors.md) instance whether it is on, its
+write permissions, and the kind's own settings, for a chat channel the signature and whether it
+wakes on mentions), `items`
 (status, next step, waiting on, last touched, set aside), `routines` (schedule, prompt, next due), `memory` (one row per note; their total is
 capped at 4 KB), `threads` (thread id, bot, item, follow-up mode,
 role `work` or `worker`, handed-back marker), `chat` (the bot's conversation with the user),
@@ -276,11 +277,8 @@ t3bot thread start --item N --project P --follow now|attention|routine
                    [--worktree] [--provider I] [--model M] -
 t3bot thread send|interrupt|settle <thread>
 t3bot thread read <thread> [--page]     any thread in scope, paged
-t3bot chat list [--query <name>]        conversations: name, last activity, unread, mentioned
-t3bot chat unread                       unread or mentioning the user, as the inbox shows them
-t3bot chat read <conversation> [--limit n] [--before <cursor>] [--root <message>]
-t3bot chat send <conversation> [--reply-to <message>] -
-                                        through the gate; the card shows the message as drafted
+t3bot <instance> <operation> …         a connector, such as a chat channel by its id:
+                                        lark unread | list | read | send; see bot-connectors.md
 ```
 
 Each call is one HTTP request and one service operation, and the CLI never waits on a turn.
@@ -326,12 +324,9 @@ protection, and guided by the role.
 
 Reading goes through the inbox's operations, so a bot sees the conversation list, unread and
 mention state exactly as the inbox derives them, and messages a page at a time from the hub's
-cache. A bot with its channels switch on can read every conversation of every channel.
-
-Chat tools exist only where channels do. With no channel configured, `help` and the wake packet
-list no `chat` commands, `chat` calls fail with "No chat channel here", and the runtime does not
-subscribe to `ChannelHub`. Per-channel settings are keyed by channel id and ignored once the
-channel is removed.
+cache. Each channel is a connector instance (`connectors/chat/`): a bot with a channel on can
+read every conversation of it. Chat commands exist only for the channels a bot has on, so with
+no channel configured `help` and the wake packet name none.
 
 Sending reuses the inbox's `send` operation with the user's identity, and the service appends the
 bot's signature, when it has one, on its own line. Each `@name` of someone seen on the
@@ -342,7 +337,7 @@ tells the bot, which drafts anew if it still needs saying. Messages bots sent ar
 they never count as the user writing.
 
 **Mentions.** Per channel, at most one bot wakes on mentions; setting it on another bot clears it
-on the first in the same write. Turning a bot's channels switch off clears it too. On each hub event for a channel, the runtime reads the conversation
+on the first in the same write. Turning the channel off for a bot clears it too. On each hub event for a channel, the runtime reads the conversation
 list (the inbox reads it anyway, so it is cached) and compares each conversation's
 `lastMentionAt` with the time already handled in `mentions`:
 
@@ -370,9 +365,9 @@ nothing is tracked.
 - **Inbox bridge**: a bot target in the delegate dialog (creates an item with the messages'
   link).
 - **Settings**: permission mode; start and run threads (allow or ask); turns a day and threads
-  at once on one row; and a Channels switch, off for a new bot, with the signature and one group
-  per channel configured in the environment (send messages ask or allow, wake on my
-  @-mentions). Role edits always ask and have no row.
+  at once on one row; and one group per connector instance, such as each chat channel (use it,
+  off for a new bot; send messages ask or allow; signature; wake on my @-mentions). Role edits
+  always ask and have no row.
 - **Live updates**: the fork's one SSE stream (`/api/fork/inbox/events`) also carries
   `{ type: "bots", botId }`, which only says a bot changed; the client refetches, as the inbox does.
 

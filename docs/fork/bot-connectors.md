@@ -1,6 +1,6 @@
 # Bot connectors (draft)
 
-Status: design, not built. How a bot reaches systems outside T3 Code. The bot itself is in
+Status: built for chat channels; `exec` and `mcp` are sketches. How a bot reaches systems outside T3 Code. The bot itself is in
 [bot.md](./bot.md) and [bot-architecture.md](./bot-architecture.md); the chat channel it uses
 first is in [inbox-architecture.md](./inbox-architecture.md).
 
@@ -99,11 +99,11 @@ connectors: Record<
 >;
 ```
 
-- A kind may veto or adjust a save (`onSave`), for rules across bots. Chat uses it for "at most
-  one bot wakes on mentions per channel": turning it on for one bot turns it off for the other in
-  the same write.
-- The signature moves into chat's `config` per instance. Today's single signature is copied to
-  every channel when settings migrate.
+- A kind decodes and checks its own `config` on save, and may apply rules across bots after it
+  (`afterSave`). Chat uses that for "at most one bot wakes on mentions per channel": turning it on
+  for one bot turns it off for the other.
+- The signature is in chat's `config` per instance. A bot's single signature from before was copied to
+  every channel when its settings migrated.
 - Settings of an instance that no longer exists are ignored and dropped on the next save.
 
 ## State
@@ -124,21 +124,21 @@ kind's rule, not the core's: chat wakes the one bot that handles mentions in tha
 - Each instance reports `ok`, `degraded`, or `down` with a reason. The Bots page shows it, and the
   packet line says when an instance cannot be used, so the bot does not retry blindly. Chat maps
   the channel's own status ("Sign-in needed" reads but cannot send).
-- The core caps what a connector returns: past the cap, the bot gets the head and the path of a
-  file in its workspace with the rest. Connectors that page (chat) keep their pages small anyway;
-  `exec` and `mcp` output relies on the cap.
+- Output size is the connector's job for now: chat pages and clips what it prints. When `exec` or
+  `mcp` arrive, the core caps what any connector returns and leaves the rest in a file in the
+  bot's workspace, since their output has no pages.
 
 ## Chat: the first kind
 
-The behavior is today's, moved out of the core:
+The behavior is what bots had before connectors, moved out of the core:
 
-| Today                                             | In the chat connector                          |
+| Before                                            | In the chat connector                          |
 | ------------------------------------------------- | ---------------------------------------------- |
 | `t3bot chat …`, conversations as `<channel>/<id>` | `t3bot <channel> …`, conversations by their id |
 | Channels switch per bot                           | `enabled` per instance                         |
 | Per-channel send permission                       | `permissions.send`                             |
 | One signature per bot                             | `config.signature` per instance                |
-| Wake on mentions, one bot per channel             | `config.mentions`, enforced in `onSave`        |
+| Wake on mentions, one bot per channel             | `config.mentions`, enforced in `afterSave`     |
 | Stale draft check after approval                  | in `run`, from `askedAt`                       |
 | `watchMentions` in `layer.ts`                     | the kind's background task                     |
 

@@ -45,7 +45,7 @@ const input = (patch: Partial<PacketInput>): PacketInput => ({
   events: [],
   now: NOW,
   firstTurnToday: false,
-  channels: [],
+  connectors: [],
   ...patch,
 });
 

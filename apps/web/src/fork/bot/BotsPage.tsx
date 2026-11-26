@@ -94,9 +94,9 @@ import { IconAction } from "../inbox/IconAction";
 import { PaneHeader } from "../inbox/PaneHeader";
 import { formatSince, UnreadCount } from "../presentation";
 import type {
-  BotChannelOption,
-  BotChannelSettings,
   BotChatMessage,
+  BotConnectorInstance,
+  BotConnectorSettings,
   BotDetail,
   BotNotebook,
   BotPermission,
@@ -656,7 +656,7 @@ function BotChat({
           name={data.bot.name}
           instanceId={data.bot.modelSelection.instanceId}
           settings={data.bot.settings}
-          channels={data.channels}
+          connectors={data.connectors}
           turnsToday={data.bot.turnsToday}
           onClose={() => setEditingSettings(false)}
         />
@@ -1277,7 +1277,7 @@ function CountField({
   );
 }
 
-const NO_CHANNEL: BotChannelSettings = { send: "ask", mentions: false };
+const CONNECTOR_OFF: BotConnectorSettings = { enabled: false, permissions: {}, config: {} };
 
 /** Each change saves at once, like T3's own settings dialogs. */
 function SettingsDialog({
@@ -1286,7 +1286,7 @@ function SettingsDialog({
   name,
   instanceId,
   settings,
-  channels,
+  connectors,
   turnsToday,
   onClose,
 }: {
@@ -1295,16 +1295,16 @@ function SettingsDialog({
   readonly name: string;
   readonly instanceId: string;
   readonly settings: BotSettings;
-  readonly channels: ReadonlyArray<BotChannelOption>;
+  readonly connectors: ReadonlyArray<BotConnectorInstance>;
   readonly turnsToday: number;
   readonly onClose: () => void;
 }) {
   const modes = useRuntimeModes(environmentId, instanceId);
   const [current, setCurrent] = useState(settings);
-  const [signature, setSignature] = useState(settings.signature);
   const [error, setError] = useState<string | null>(null);
-  const channelOf = (channelId: string) => current.channels[channelId] ?? NO_CHANNEL;
-  const save = async (patch: Partial<BotSettings>) => {
+  const connectorOf = (id: string) => current.connectors[id] ?? CONNECTOR_OFF;
+  /** `connector` names the one instance this change touches; the server keeps the others. */
+  const save = async (patch: Partial<BotSettings>, connector?: string) => {
     const before = current;
     const next = { ...current, ...patch };
     setCurrent(next);
@@ -1319,14 +1319,9 @@ function SettingsDialog({
             turnsPerDay: next.turnsPerDay,
             maxThreads: next.maxThreads,
             runtimeMode: next.runtimeMode,
-            channelsEnabled: next.channelsEnabled,
-            signature: next.signature,
-            channels: Object.fromEntries(
-              channels.map((channel) => {
-                const { send, mentions } = next.channels[channel.id] ?? NO_CHANNEL;
-                return [channel.id, { send, mentions }];
-              }),
-            ),
+            ...(connector === undefined
+              ? {}
+              : { connectors: { [connector]: next.connectors[connector] ?? CONNECTOR_OFF } }),
           },
         },
       });
@@ -1335,10 +1330,8 @@ function SettingsDialog({
       setError(errorText(cause));
     }
   };
-  const saveChannel = (channelId: string, patch: Partial<BotChannelSettings>) =>
-    save({
-      channels: { ...current.channels, [channelId]: { ...channelOf(channelId), ...patch } },
-    });
+  const saveConnector = (id: string, patch: Partial<BotConnectorSettings>) =>
+    save({ connectors: { ...current.connectors, [id]: { ...connectorOf(id), ...patch } } }, id);
   return (
     <Dialog
       open
@@ -1405,87 +1398,15 @@ function SettingsDialog({
                 }
               />
             </SettingsGroup>
-            {channels.length > 0 ? (
-              <>
-                <SettingsGroup>
-                  <SettingsRow
-                    title="Channels"
-                    description="Read and write your chat apps. Others see only you."
-                    control={
-                      <Switch
-                        aria-label="Channels"
-                        checked={current.channelsEnabled}
-                        onCheckedChange={(channelsEnabled) => void save({ channelsEnabled })}
-                      />
-                    }
-                  />
-                  {current.channelsEnabled ? (
-                    <SettingsRow
-                      title="Signature"
-                      description="Added on its own line to what it sends; {bot} is its name. Empty sends as written."
-                      control={
-                        <Input
-                          aria-label="Signature"
-                          value={signature}
-                          maxLength={200}
-                          placeholder="None"
-                          onChange={(event) => setSignature(event.target.value)}
-                          onBlur={() => {
-                            if (signature !== current.signature) void save({ signature });
-                          }}
-                          className="w-48"
-                        />
-                      }
-                    />
-                  ) : null}
-                </SettingsGroup>
-                {current.channelsEnabled
-                  ? channels.map((channel) => {
-                      const value = channelOf(channel.id);
-                      const holder =
-                        channel.mentionBot !== null && channel.mentionBot.id !== botId
-                          ? channel.mentionBot.name
-                          : null;
-                      return (
-                        <section key={channel.id} className="flex flex-col gap-2">
-                          <h3 className="px-1 text-xs font-medium text-muted-foreground">
-                            {channel.name}
-                          </h3>
-                          <SettingsGroup>
-                            <SettingsRow
-                              title="Send messages"
-                              control={
-                                <PermissionSelect
-                                  label={`Send messages in ${channel.name}`}
-                                  value={value.send}
-                                  onChange={(send) => void saveChannel(channel.id, { send })}
-                                />
-                              }
-                            />
-                            <SettingsRow
-                              title="Wake on my @-mentions"
-                              description={
-                                holder !== null && !value.mentions
-                                  ? `One bot per channel. ${holder} has them now; turning this on moves them here.`
-                                  : "One bot per channel."
-                              }
-                              control={
-                                <Switch
-                                  aria-label={`Wake on my @-mentions in ${channel.name}`}
-                                  checked={value.mentions}
-                                  onCheckedChange={(mentions) =>
-                                    void saveChannel(channel.id, { mentions })
-                                  }
-                                />
-                              }
-                            />
-                          </SettingsGroup>
-                        </section>
-                      );
-                    })
-                  : null}
-              </>
-            ) : null}
+            {connectors.map((instance) => (
+              <ConnectorSection
+                key={instance.id}
+                botId={botId}
+                instance={instance}
+                value={connectorOf(instance.id)}
+                onChange={(patch) => void saveConnector(instance.id, patch)}
+              />
+            ))}
             {error ? <p className="text-xs text-destructive-foreground">{error}</p> : null}
           </div>
         </DialogPanel>
@@ -1494,6 +1415,123 @@ function SettingsDialog({
         </DialogFooter>
       </DialogPopup>
     </Dialog>
+  );
+}
+
+/** One connector instance: whether the bot uses it, each write's permission, and its kind's own rows. */
+function ConnectorSection({
+  botId,
+  instance,
+  value,
+  onChange,
+}: {
+  readonly botId: string;
+  readonly instance: BotConnectorInstance;
+  readonly value: BotConnectorSettings;
+  readonly onChange: (patch: Partial<BotConnectorSettings>) => void;
+}) {
+  const chat = instance.kind === "chat";
+  return (
+    <section className="flex flex-col gap-2">
+      <h3 className="px-1 text-xs font-medium text-muted-foreground">{instance.name}</h3>
+      <SettingsGroup>
+        <SettingsRow
+          title={`Use ${instance.name}`}
+          description={
+            instance.status !== "ok" && instance.reason !== null
+              ? `Now: ${instance.reason}.`
+              : chat
+                ? `Read and send as you with t3bot ${instance.id}. Others see only you.`
+                : `Its command is t3bot ${instance.id}.`
+          }
+          control={
+            <Switch
+              aria-label={`Use ${instance.name}`}
+              checked={value.enabled}
+              onCheckedChange={(enabled) => onChange({ enabled })}
+            />
+          }
+        />
+        {value.enabled
+          ? instance.operations.map((operation) => (
+              <SettingsRow
+                key={operation.id}
+                title={operation.label}
+                control={
+                  <PermissionSelect
+                    label={`${operation.label} in ${instance.name}`}
+                    value={value.permissions[operation.id] ?? "ask"}
+                    onChange={(permission) =>
+                      onChange({
+                        permissions: { ...value.permissions, [operation.id]: permission },
+                      })
+                    }
+                  />
+                }
+              />
+            ))
+          : null}
+        {value.enabled && chat ? (
+          <ChatRows botId={botId} instance={instance} value={value} onChange={onChange} />
+        ) : null}
+      </SettingsGroup>
+    </section>
+  );
+}
+
+function ChatRows({
+  botId,
+  instance,
+  value,
+  onChange,
+}: {
+  readonly botId: string;
+  readonly instance: BotConnectorInstance;
+  readonly value: BotConnectorSettings;
+  readonly onChange: (patch: Partial<BotConnectorSettings>) => void;
+}) {
+  const saved = typeof value.config.signature === "string" ? value.config.signature : "";
+  const mentions = value.config.mentions === true;
+  const [signature, setSignature] = useState(saved);
+  const mentionBot = instance.info.mentionBot as { id: string; name: string } | null | undefined;
+  const holder = mentionBot != null && mentionBot.id !== botId ? mentionBot.name : null;
+  const setConfig = (patch: Record<string, unknown>) =>
+    onChange({ config: { signature: saved, mentions, ...patch } });
+  return (
+    <>
+      <SettingsRow
+        title="Signature"
+        description="Added on its own line to what it sends; {bot} is its name. Empty sends as written."
+        control={
+          <Input
+            aria-label={`Signature in ${instance.name}`}
+            value={signature}
+            maxLength={200}
+            placeholder="None"
+            onChange={(event) => setSignature(event.target.value)}
+            onBlur={() => {
+              if (signature !== saved) setConfig({ signature });
+            }}
+            className="w-48"
+          />
+        }
+      />
+      <SettingsRow
+        title="Wake on my @-mentions"
+        description={
+          holder !== null && !mentions
+            ? `One bot per channel. ${holder} has them now; turning this on moves them here.`
+            : "One bot per channel."
+        }
+        control={
+          <Switch
+            aria-label={`Wake on my @-mentions in ${instance.name}`}
+            checked={mentions}
+            onCheckedChange={(next) => setConfig({ mentions: next })}
+          />
+        }
+      />
+    </>
   );
 }
 

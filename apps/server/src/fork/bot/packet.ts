@@ -53,32 +53,8 @@ export interface PacketInput {
   /** Set on the first turn of a day: list items untouched for a week. */
   readonly now: Date;
   readonly firstTurnToday: boolean;
-  /** The chat channels it may use; empty when its Channels switch is off or there are none. */
-  readonly channels: ReadonlyArray<{
-    readonly id: string;
-    readonly name: string;
-    readonly send: "allow" | "ask";
-    readonly mentions: boolean;
-  }>;
-}
-
-/** What the brief says about chat; nothing when the bot has no channel. */
-function chatBrief(channels: PacketInput["channels"]): ReadonlyArray<string> {
-  if (channels.length === 0) return [];
-  const mentions = channels.filter((channel) => channel.mentions);
-  return [
-    `- You can read the user's chat app (${channels.map((channel) => `${channel.name}: ${channel.id}`).join(", ")})`,
-    "  with `chat unread`, `chat list` and `chat read`. Nobody there knows you exist: what you",
-    "  send with `chat send` goes out as the user, so send only what they would. Sending to",
-    `  ${channels.every((channel) => channel.send === "ask") ? "any channel asks the user first" : channels.map((channel) => `${channel.name} ${channel.send === "ask" ? "asks the user first" : "goes out at once"}`).join(", ")}.`,
-    ...(mentions.length > 0
-      ? [
-          `- You handle the user's @-mentions in ${mentions.map((channel) => channel.name).join(", ")}. When one wakes`,
-          "  you, read around it, then tell the user what needs them, draft a reply, or start a",
-          "  thread for real work. A mention that needs nothing ends with NO_REPLY.",
-        ]
-      : []),
-  ];
+  /** Brief lines for the connectors it has on, such as chat channels. */
+  readonly connectors: ReadonlyArray<string>;
 }
 
 const clip = (value: string, chars = MESSAGE_CHARS) =>
@@ -200,7 +176,7 @@ export function buildPacket(input: PacketInput, seen: PacketSections | null = nu
       "  before a task it applies to.",
       "- Do real work in threads you start with `thread start`, not here. They wake you when they",
       "  stop, so start one and end your turn; never wait on it.",
-      ...chatBrief(input.channels),
+      ...input.connectors,
     ].join("\n"),
     notebook: renderNotebook(input.notebook),
     notes: [
