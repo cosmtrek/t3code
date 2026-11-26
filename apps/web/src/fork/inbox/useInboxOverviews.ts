@@ -26,9 +26,10 @@ const toInbox = (
         ),
       };
 
-const anyEvent = () => true;
+// A bot's live status line changes nothing here, and comes once per work-thread item.
+const anyEvent = (event: ForkEvent) => event.type !== "bot-activity";
 // "synced x ago" is only shown on the inbox page; the sidebar badge ignores sync events.
-const notSync = (event: ForkEvent) => event.type !== "sync";
+const notSync = (event: ForkEvent) => anyEvent(event) && event.type !== "sync";
 
 /**
  * Each connected environment's enabled channels. Environments without the inbox (other builds)

@@ -32,6 +32,7 @@ import type {
 import { useForkResource, type ForkRefreshFilter } from "../useForkResource";
 import { IconAction } from "./IconAction";
 import { useFormatTimestamp } from "../presentation";
+import { useBlockedThreadIds } from "./DelegationPane";
 import { ConversationMenu, FollowUpStatus } from "./InboxList";
 import {
   topFollowUp,
@@ -61,10 +62,9 @@ import { loadReply, replyDraftKey, saveReply } from "./replyDrafts";
 
 export interface ConversationPaneHandlers {
   readonly onBack: () => void;
-  readonly onSetRead: (conversation: InboxConversation, read: boolean) => void;
   readonly onDiscardDrafts: (conversation: InboxConversation) => void;
   readonly onSelectDelegation: (delegation: InboxDelegation) => void;
-  /** Follow up starting at `message`; `later` is what the chat shows after it. */
+  /** Delegate starting at `message`; `later` is what the chat shows after it. */
   readonly onDelegate: (message: InboxMessage, later: ReadonlyArray<InboxMessage>) => void;
   /** The user acts in the conversation, such as starting a reply: what arrived since is read. */
   readonly onEngage: () => void;
@@ -254,7 +254,6 @@ export function ConversationPane({
           onClose={onCloseDelegation}
         />
         <ConversationMenu
-          place="header"
           conversation={conversation}
           drafts={delegations.filter((delegation) => delegation.hasDraft).length}
           onDiscardDrafts={handlers.onDiscardDrafts}
@@ -290,7 +289,10 @@ export function ConversationPane({
   );
 }
 
-/** The conversation's follow-ups: the one that matters most, and the way to open them. */
+/**
+ * The conversation's follow-ups and the way to open them. It names what waits on you, else just
+ * that there are delegations; their full states are in the menu and on the messages.
+ */
 function FollowUpsControl({
   environmentId,
   conversation,
@@ -306,17 +308,20 @@ function FollowUpsControl({
   readonly onSelect: (delegation: InboxDelegation) => void;
   readonly onClose: () => void;
 }) {
+  const blockedThreadIds = useBlockedThreadIds(environmentId);
   if (delegations.length === 0) return null;
-  const top = topFollowUp(delegations) ?? delegations[0]!;
+  const top = topFollowUp(delegations, blockedThreadIds) ?? delegations[0]!;
   const active = delegations.some((delegation) => delegation.id === selectedDelegationId);
   const label = (
     <>
-      <FollowUpStatus environmentId={environmentId} delegation={top} idle="Following" />
+      <FollowUpStatus
+        environmentId={environmentId}
+        delegation={top}
+        idle="Delegated"
+        onlyNeedsYou
+      />
       {delegations.length > 1 ? (
-        <span className="text-muted-foreground tabular-nums">
-          {delegations.filter((delegation) => delegation.settledAt === null).length}/
-          {delegations.length}
-        </span>
+        <span className="text-muted-foreground tabular-nums">· {delegations.length}</span>
       ) : null}
     </>
   );
@@ -325,7 +330,7 @@ function FollowUpsControl({
       <Button
         size="xs"
         variant="ghost"
-        aria-label="Follow-up"
+        aria-label="Delegation"
         aria-pressed={active}
         data-pressed={active ? "" : undefined}
         onClick={() => (active ? onClose() : onSelect(top))}
@@ -341,7 +346,7 @@ function FollowUpsControl({
           <Button
             size="xs"
             variant="ghost"
-            aria-label="Follow-ups"
+            aria-label="Delegations"
             data-pressed={active ? "" : undefined}
           />
         }
@@ -899,7 +904,7 @@ function DelegationChip({
 }) {
   return (
     <Button size="xs" variant="ghost-muted" onClick={() => onSelect(delegation)}>
-      <FollowUpStatus environmentId={environmentId} delegation={delegation} idle="Following" />
+      <FollowUpStatus environmentId={environmentId} delegation={delegation} idle="Delegated" />
     </Button>
   );
 }
@@ -933,7 +938,7 @@ function MessageToolbar({
           <MessageSquareReplyIcon />
         </IconAction>
       ) : null}
-      <IconAction label="Follow up" disabled={readOnly} onClick={onDelegate}>
+      <IconAction label="Delegate" disabled={readOnly} onClick={onDelegate}>
         <BotIcon />
       </IconAction>
       {message.openUrl ? (

@@ -95,7 +95,7 @@ T3 decides a conversation's state from the conversation alone:
 
 - `unreadCount` (optional): the chat app's unread badge for the conversation, or `null` when the
   adapter is not sure. T3 shows it as the number on an unread conversation and sums it into the
-  Unread tab; whether the conversation is unread still comes from the fields above. Once T3 has
+  inbox's unread count; whether the conversation is unread still comes from the fields above. Once T3 has
   read past `selfReadThroughAt` (and my last message), the badge includes messages read in T3, so
   T3 treats the count as unknown and shows 1.
 

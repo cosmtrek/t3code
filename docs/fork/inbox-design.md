@@ -31,12 +31,17 @@ conversation; they are not a second place to go. So the inbox has one list, orde
 and every way into a conversation lands in the same place.
 
 An earlier design gave delegations their own Agent view. The same group then had two entries, each
-opening at a different position, and the user bounced between them. Do not bring back a list of
-follow-ups beside the conversation list.
+opening at a different position, and the user bounced between them. A later one split the list
+into Unread, Following, and All tabs and then grouped each tab again by state, so the same
+question was answered twice and the user switched views to see their work. Do not bring back a
+list of follow-ups beside the conversation list, or tabs over the one list.
 
 ### Follow-ups
 
-A follow-up (code: delegation) is a set of messages someone handles for the user. Today the
+A follow-up (code: delegation; in the UI, **Delegate**) is a set of messages someone handles for
+the user. The UI says Delegate everywhere: the message action, the dialog, "Delegate again…", and
+"Delegated" as the marker's idle state. "Following" reads as subscribing to a chat, so the UI does
+not use it. Today the
 handler is an agent: a new thread, which sees the messages and the project. Bots as handlers are
 planned (see [Planned: bots](#planned-bots)).
 
@@ -68,18 +73,28 @@ Not built yet; the integration is still being weighed. The intent:
 
 ### One list, one order
 
-Each conversation row has one state, and the list sorts by state, then by time:
+The inbox is one list with no view tabs. It has two groups, each in the chat app's order:
 
-| State     | When                                                                       | Counted |
-| --------- | -------------------------------------------------------------------------- | ------- |
-| Needs you | unread DM, a mention of you, or an open follow-up with a result or a draft | yes     |
-| Following | an open follow-up, nothing waiting on you                                  | no      |
-| Other     | group messages                                                             | no      |
+- **Needs you**: an unread DM, a mention of you, or an open follow-up with a result, a draft, or
+  a thread blocked on you (Input, an approval, a guest's request, as the sidebar shows it).
+- **Others**: everything else, including follow-ups still working.
 
-Unread and Following sort by state and head each group once there is more than one; All keeps the
-chat app's order. A row shows its top follow-up's status beside the unread mark, in the words and
-colors the sidebar uses for a thread (Draft, Input, Working). Following filters conversations with
-an open follow-up; it is not another list of objects.
+A heading names each group when both have rows. A conversation opened from Needs you stays there
+while it is open, so reading it does not move it under the pointer. The filter menu narrows by
+kind (DMs, groups, topic groups).
+
+A follow-up's states fall in three kinds: waiting on you (Input, Approval, Request, Failed,
+Limited, a Draft, or Done for a result not yet seen), in progress (Working, Waiting), and finished
+(Replied, Settled). The words and colors are the sidebar's. Each place shows the kind it answers
+for, from one definition that also decides Needs you:
+
+- A list row and the conversation header show only what waits on you; otherwise the row shows
+  nothing and the header shows "Delegated", with a count when there are several.
+- The marker on the message and the header's menu show every state.
+- T3 Code's own thread status (sidebar, the thread's header and chat) is left as it is.
+
+Opening a conversation reads it; there is no per-row mark read or unread, and "Mark all as read"
+in the header is the only bulk triage.
 
 ### Where things open
 
@@ -97,10 +112,10 @@ an open follow-up; it is not another list of objects.
 Replies to the chat app leave from one place: the reply box. An agent's draft lands in its
 follow-up's reply box, and the user sends it there.
 
-The same goes for menus: each one offers what fits the moment, not the same set everywhere. A list
-row's menu triages (mark read or unread, copy the chat ID); the open conversation's header menu acts
-on what is open (copy the chat ID, discard drafts). Marking unread a conversation you are reading
-belongs to the list, not the header.
+The same goes for menus: each one offers what fits the moment, not the same set everywhere. The
+open conversation's header menu acts on what is open (copy the chat ID, discard drafts). A
+follow-up's panel shows **Settle** as a button, since it is how a follow-up ends; its menu holds
+the rest (copy the messages, "Delegate again…" to rerun it with another agent or model).
 
 Every reply the user edits, typed or drafted by the agent, goes through one reply box
 (`ReplyBox`), shaped like T3 Code's composer. Enter sends, as in the chat app, unless the user's

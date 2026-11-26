@@ -3,18 +3,17 @@ import { describe, expect, it } from "vite-plus/test";
 import type { InboxConversation, InboxDelegation, InboxMessage } from "../types";
 import {
   anchorOf,
-  attentionOf,
   conversationRows,
   delegationPreview,
   draftReplyMode,
-  emptyViewTitle,
-  inView,
+  emptyListTitle,
   lastMessageLine,
   mentionablePeople,
   mentionParts,
   mentionSuggestions,
   mentionsIn,
   mergeConversationPages,
+  needsYou,
   minuteToMs,
   matchesFilter,
   quoteOf,
@@ -24,73 +23,66 @@ import {
   shortLink,
   topFollowUp,
   topicsOf,
-  unreadMessageCount,
   withoutMention,
 } from "./inboxView";
 
-describe("emptyViewTitle", () => {
+describe("emptyListTitle", () => {
   it.each([
-    ["unread", "all", "Nothing unread"],
-    ["unread", "dm", "No unread DMs"],
-    ["following", "groups", "No follow-ups in groups"],
-    ["unread", "topics", "No unread topic groups"],
-    ["all", "dm", "No DMs"],
-  ] as const)("names an empty %s list filtered to %s", (view, filter, title) => {
-    expect(emptyViewTitle(view, filter)).toBe(title);
+    ["all", "No conversations"],
+    ["dm", "No DMs"],
+    ["topics", "No topic groups"],
+  ] as const)("names an empty list filtered to %s", (filter, title) => {
+    expect(emptyListTitle(filter)).toBe(title);
   });
 });
 
-describe("inView", () => {
-  const conversation = (unread: boolean, mentioned = false, muted = false) =>
-    ({ id: "c", kind: "group", unread, mentioned, muted }) as InboxConversation;
-
-  it("lists in Unread what has new messages or a mention", () => {
-    expect(inView("unread", "all", conversation(true))).toBe(true);
-    expect(inView("unread", "all", conversation(false, true))).toBe(true);
-    expect(inView("unread", "all", conversation(false))).toBe(false);
-    expect(inView("all", "all", conversation(false))).toBe(true);
-  });
-
-  it("lists a muted conversation in Unread only when it mentions you", () => {
-    expect(inView("unread", "all", conversation(true, false, true))).toBe(false);
-    expect(inView("unread", "all", conversation(true, true, true))).toBe(true);
-    expect(inView("all", "all", conversation(true, false, true))).toBe(true);
-  });
-
-  it("keeps the held conversation in Unread after it is read, and only that one", () => {
-    expect(inView("unread", "all", conversation(false), "c")).toBe(true);
-    expect(inView("unread", "all", conversation(false), "other")).toBe(false);
-    expect(inView("unread", "dm", conversation(false), "c")).toBe(false);
-  });
-
-  it("lists in Unread a follow-up that left you something, and in Following any open one", () => {
-    const waiting = [{ agentUnseen: false, hasDraft: true }];
-    const working = [{ agentUnseen: false, hasDraft: false }];
-    expect(inView("unread", "all", conversation(false), null, waiting)).toBe(true);
-    expect(inView("unread", "all", conversation(false), null, working)).toBe(false);
-    expect(inView("following", "all", conversation(false), null, working)).toBe(true);
-    expect(inView("following", "all", conversation(true), null, [])).toBe(false);
-  });
-});
-
-describe("attentionOf", () => {
+describe("needsYou", () => {
   const conversation = (extra: Partial<InboxConversation>) =>
     ({ kind: "group", unread: false, mentioned: false, ...extra }) as InboxConversation;
-  const followUp = (agentUnseen: boolean, hasDraft: boolean) => ({ agentUnseen, hasDraft });
+  const delegation = (agentUnseen: boolean, hasDraft: boolean) => ({
+    agentUnseen,
+    hasDraft,
+    thread: null,
+  });
 
-  it("puts what waits on you first, then what is followed up, then the rest", () => {
-    expect(attentionOf(conversation({ kind: "dm", unread: true }), [])).toBe(0);
-    expect(attentionOf(conversation({ mentioned: true }), [])).toBe(0);
-    expect(attentionOf(conversation({}), [followUp(true, false)])).toBe(0);
-    expect(attentionOf(conversation({}), [followUp(false, true)])).toBe(0);
-    expect(attentionOf(conversation({ unread: true }), [followUp(false, false)])).toBe(1);
-    expect(attentionOf(conversation({ unread: true }), [])).toBe(2);
+  it("is an unread DM, a mention, or a delegation that left a result or a draft", () => {
+    expect(needsYou(conversation({ kind: "dm", unread: true }), [])).toBe(true);
+    expect(needsYou(conversation({ mentioned: true }), [])).toBe(true);
+    expect(needsYou(conversation({}), [delegation(true, false)])).toBe(true);
+    expect(needsYou(conversation({}), [delegation(false, true)])).toBe(true);
+  });
+
+  it("is a delegation whose live thread is blocked on you", () => {
+    const thread = (detachedAt: string | null) =>
+      ({ threadId: "t", detachedAt }) as InboxDelegation["thread"];
+    const blocked = new Set(["t"]);
+    const live = { agentUnseen: false, hasDraft: false, thread: thread(null) };
+    const detached = {
+      agentUnseen: false,
+      hasDraft: false,
+      thread: thread("2026-11-26T00:00:00Z"),
+    };
+    expect(needsYou(conversation({}), [live], blocked)).toBe(true);
+    expect(needsYou(conversation({}), [live], new Set())).toBe(false);
+    expect(needsYou(conversation({}), [detached], blocked)).toBe(false);
+  });
+
+  it("is not group chatter or a delegation still working", () => {
+    expect(needsYou(conversation({ unread: true }), [delegation(false, false)])).toBe(false);
+    expect(needsYou(conversation({ unread: true }), [])).toBe(false);
   });
 });
 
 describe("topFollowUp", () => {
   const delegation = (id: string, extra: Partial<InboxDelegation> = {}) =>
-    ({ id, agentUnseen: false, hasDraft: false, settledAt: null, ...extra }) as InboxDelegation;
+    ({
+      id,
+      agentUnseen: false,
+      hasDraft: false,
+      settledAt: null,
+      thread: null,
+      ...extra,
+    }) as InboxDelegation;
 
   it("shows the open follow-up that needs you, else the newest open one, never a settled one", () => {
     expect(topFollowUp([delegation("new"), delegation("draft", { hasDraft: true })])?.id).toBe(
@@ -100,32 +92,6 @@ describe("topFollowUp", () => {
     expect(topFollowUp([delegation("done", { settledAt: "2026-11-26T00:00:00Z" })])).toBe(
       undefined,
     );
-  });
-});
-
-describe("unreadMessageCount", () => {
-  it("counts unread messages, 1 without a count, and only the mention when muted", () => {
-    const conversation = (extra: Partial<InboxConversation>) =>
-      ({
-        id: "c",
-        kind: "group",
-        unread: true,
-        mentioned: false,
-        muted: false,
-        ...extra,
-      }) as InboxConversation;
-    expect(
-      unreadMessageCount("all", [
-        conversation({ unreadCount: 12 }),
-        conversation({ unreadCount: null }),
-        conversation({ unreadCount: 0 }),
-        conversation({ unreadCount: 30, muted: true }),
-        conversation({ unreadCount: 30, muted: true, mentioned: true }),
-        conversation({ unread: false, unreadCount: 0 }),
-        conversation({ kind: "dm", unreadCount: 5 }),
-      ]),
-    ).toBe(12 + 1 + 1 + 1 + 5);
-    expect(unreadMessageCount("dm", [conversation({ kind: "dm", unreadCount: 5 })])).toBe(5);
   });
 });
 

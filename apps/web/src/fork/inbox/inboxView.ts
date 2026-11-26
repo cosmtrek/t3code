@@ -8,14 +8,7 @@ import type {
 } from "../types";
 import { formatSince, formatSpan } from "../presentation";
 
-export type InboxView = "unread" | "all" | "following";
 export type InboxFilter = "all" | "dm" | "groups" | "topics";
-
-export const INBOX_VIEWS: ReadonlyArray<{ readonly id: InboxView; readonly label: string }> = [
-  { id: "unread", label: "Unread" },
-  { id: "following", label: "Following" },
-  { id: "all", label: "All" },
-];
 
 export const INBOX_FILTERS: ReadonlyArray<{ readonly id: InboxFilter; readonly label: string }> = [
   { id: "all", label: "All conversations" },
@@ -24,31 +17,15 @@ export const INBOX_FILTERS: ReadonlyArray<{ readonly id: InboxFilter; readonly l
   { id: "topics", label: "Topic groups" },
 ];
 
-const EMPTY_VIEW_TITLES: Readonly<Record<InboxView, string>> = {
-  unread: "Nothing unread",
-  all: "No conversations",
-  following: "Nothing to follow up",
-};
-
-const FILTER_NOUNS: Readonly<Record<Exclude<InboxFilter, "all">, string>> = {
+const FILTER_NOUNS: Readonly<Record<InboxFilter, string>> = {
+  all: "conversations",
   dm: "DMs",
   groups: "groups",
   topics: "topic groups",
 };
 
-/** "Nothing unread", or "No unread DMs" when a filter is what empties the list. */
-export function emptyViewTitle(view: InboxView, filter: InboxFilter): string {
-  if (filter === "all") return EMPTY_VIEW_TITLES[view];
-  const noun = FILTER_NOUNS[filter];
-  switch (view) {
-    case "unread":
-      return `No unread ${noun}`;
-    case "all":
-      return `No ${noun}`;
-    case "following":
-      return `No follow-ups in ${noun}`;
-  }
-}
+/** "No conversations", or "No DMs" when a filter is what empties the list. */
+export const emptyListTitle = (filter: InboxFilter) => `No ${FILTER_NOUNS[filter]}`;
 
 /** "3 items from the adapter could not be read." */
 export function skippedNotice(skipped: number): string | null {
@@ -65,75 +42,46 @@ const FILTER_KINDS: Readonly<Record<Exclude<InboxFilter, "all">, ConversationKin
 export const matchesFilter = (filter: InboxFilter, kind: ConversationKind | undefined) =>
   filter === "all" || kind === FILTER_KINDS[filter];
 
-/** A follow-up that left something for the user: a result they have not seen, or a draft. */
-export const followUpNeedsYou = (delegation: Pick<InboxDelegation, "agentUnseen" | "hasDraft">) =>
-  delegation.agentUnseen || delegation.hasDraft;
+type DelegationAttention = Pick<InboxDelegation, "agentUnseen" | "hasDraft" | "thread">;
+const NO_THREADS: ReadonlySet<string> = new Set();
+
+/**
+ * A delegation that waits on the user: a result they have not seen, a draft, or its thread
+ * blocked on them (`blockedThreadIds`: input, an approval, or a guest's request).
+ */
+export const followUpNeedsYou = (
+  delegation: DelegationAttention,
+  blockedThreadIds: ReadonlySet<string> = NO_THREADS,
+) =>
+  delegation.agentUnseen ||
+  delegation.hasDraft ||
+  (delegation.thread !== null &&
+    delegation.thread.detachedAt === null &&
+    blockedThreadIds.has(delegation.thread.threadId));
 
 /** The follow-up a conversation shows: one that needs you, else the newest open one. */
 export function topFollowUp(
   delegations: ReadonlyArray<InboxDelegation>,
+  blockedThreadIds: ReadonlySet<string> = NO_THREADS,
 ): InboxDelegation | undefined {
   const open = delegations.filter((delegation) => delegation.settledAt === null);
-  return open.find(followUpNeedsYou) ?? open[0];
+  return open.find((delegation) => followUpNeedsYou(delegation, blockedThreadIds)) ?? open[0];
 }
 
-/** Lists order by this: what waits on you, then what an agent is following up, then the rest. */
-export type Attention = 0 | 1 | 2;
-export const ATTENTION_LABELS = ["Needs you", "Following", "Other"] as const;
-
-export function attentionOf(
+/**
+ * The list puts what waits on you on top: an unread DM, a mention of you, or a delegation that
+ * waits on you. Everything else follows in the chat app's order.
+ */
+export function needsYou(
   conversation: Pick<InboxConversation, "kind" | "unread" | "mentioned">,
-  openFollowUps: ReadonlyArray<Pick<InboxDelegation, "agentUnseen" | "hasDraft">>,
-): Attention {
-  if (
+  openDelegations: ReadonlyArray<DelegationAttention>,
+  blockedThreadIds: ReadonlySet<string> = NO_THREADS,
+): boolean {
+  return (
     (conversation.kind === "dm" && conversation.unread) ||
     conversation.mentioned ||
-    openFollowUps.some(followUpNeedsYou)
-  ) {
-    return 0;
-  }
-  return openFollowUps.length > 0 ? 1 : 2;
-}
-
-/**
- * Whether the conversation belongs in a view. Unread is people's messages and follow-ups that
- * left you something; a muted conversation shows only when it mentions you, as in the chat app.
- * Following is every conversation with an open follow-up. The held one, opened from the view,
- * stays there once read, so reading it does not pull it out from under the pointer.
- */
-export function inView(
-  view: InboxView,
-  filter: InboxFilter,
-  conversation: Pick<InboxConversation, "id" | "kind" | "unread" | "mentioned" | "muted">,
-  heldId: string | null = null,
-  openFollowUps: ReadonlyArray<Pick<InboxDelegation, "agentUnseen" | "hasDraft">> = [],
-): boolean {
-  if (!matchesFilter(filter, conversation.kind)) return false;
-  if (view === "all" || conversation.id === heldId) return true;
-  if (view === "following") return openFollowUps.length > 0;
-  return (
-    (conversation.unread && !conversation.muted) ||
-    conversation.mentioned ||
-    openFollowUps.some(followUpNeedsYou)
+    openDelegations.some((delegation) => followUpNeedsYou(delegation, blockedThreadIds))
   );
-}
-
-/**
- * The Unread tab's number: unread messages, as the chat app counts them. A conversation without a
- * count counts 1, a muted one counts only its mention, and the held one is already read.
- */
-export function unreadMessageCount(
-  filter: InboxFilter,
-  conversations: ReadonlyArray<
-    Pick<InboxConversation, "id" | "kind" | "unread" | "mentioned" | "muted" | "unreadCount">
-  >,
-): number {
-  let total = 0;
-  for (const conversation of conversations) {
-    if (!inView("unread", filter, conversation)) continue;
-    total += conversation.muted ? 1 : Math.max(conversation.unreadCount ?? 0, 1);
-  }
-  return total;
 }
 
 const QUOTE_CHARS = 40;

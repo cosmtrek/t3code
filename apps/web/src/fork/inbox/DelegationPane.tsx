@@ -24,7 +24,7 @@ import { useDiffPanelStore } from "../../diffPanelStore";
 import type { SideChatParentPanel } from "../../lib/sideChatPane";
 import { cn } from "../../lib/utils";
 import { useRightPanelStore } from "../../rightPanelStore";
-import { useThreadShell } from "../../state/entities";
+import { useQuietThreadShells, useThreadShell } from "../../state/entities";
 import type { DelegationDetail, LinkedThread } from "../types";
 import { skippedNotice } from "./inboxView";
 import { ReplyBox, useSendKey } from "./ReplyBox";
@@ -60,6 +60,29 @@ const SIDEBAR_STATUS: Readonly<
   limited: { label: "Limited", icon: CircleAlertIcon, className: "text-warning-foreground" },
   failed: { label: "Failed", icon: CircleAlertIcon, className: "text-error-foreground" },
 };
+
+/** Thread states that wait on the user: the list ranks them as Needs you and shows only these. */
+const NEEDS_YOU_STATUSES: ReadonlySet<SidebarThreadStatus> = new Set([
+  "approval",
+  "input",
+  "request",
+  "limited",
+  "failed",
+]);
+
+/** The environment's threads that wait on the user, by thread ID. */
+export function useBlockedThreadIds(environmentId: EnvironmentId): ReadonlySet<string> {
+  const shells = useQuietThreadShells();
+  return new Set(
+    shells
+      .filter(
+        (shell) =>
+          shell.environmentId === environmentId &&
+          NEEDS_YOU_STATUSES.has(resolveSidebarRowStatus(shell)),
+      )
+      .map((shell) => shell.id as string),
+  );
+}
 
 /**
  * A delegation: the reply the thread drafted, over the thread itself. The delegated messages are
@@ -259,10 +282,13 @@ export function ThreadStatus({
   environmentId,
   thread,
   fallback = null,
+  onlyNeedsYou = false,
 }: {
   readonly environmentId: EnvironmentId;
   readonly thread: LinkedThread;
   readonly fallback?: ReactNode;
+  /** Show only a state that waits on the user, else the fallback. */
+  readonly onlyNeedsYou?: boolean;
 }) {
   const shell = useThreadShell(scopeThreadRef(environmentId, ThreadId.make(thread.threadId)));
   const status = shell
@@ -270,6 +296,9 @@ export function ThreadStatus({
     : thread.status === "running"
       ? "working"
       : null;
+  if (onlyNeedsYou) {
+    if (status === null || !NEEDS_YOU_STATUSES.has(status)) return fallback;
+  }
   if (status !== null && status !== "ready") {
     const { label, icon, className } = SIDEBAR_STATUS[status];
     return <StatusLabel icon={icon} label={label} className={className} />;
