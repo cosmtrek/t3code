@@ -646,6 +646,7 @@ function BotChat({
           detail={data}
           overlay={!wide}
           onHide={() => setNotebookOpen(false)}
+          onOpenSettings={() => setEditingSettings(true)}
         />
       ) : null}
       {editingSettings && data ? (
@@ -809,12 +810,14 @@ function NotebookPanel({
   detail,
   overlay,
   onHide,
+  onOpenSettings,
 }: {
   readonly environmentId: EnvironmentId;
   readonly detail: BotDetail;
   /** Narrow screens: float over the chat instead of taking a column. */
   readonly overlay: boolean;
   readonly onHide: () => void;
+  readonly onOpenSettings: () => void;
 }) {
   const navigate = useNavigate();
   const width = useResizableWidth({
@@ -853,12 +856,16 @@ function NotebookPanel({
   const open = notebook.items.filter((item) => item.status !== "done" && !item.setAside);
   const setAside = notebook.items.filter((item) => item.status !== "done" && item.setAside);
   const unlinked = notebook.threads.filter((thread) => thread.itemId === null);
+  const connectors = detail.connectors.filter(
+    (instance) => detail.bot.settings.connectors[instance.id]?.enabled === true,
+  );
   const empty = [
     open.length === 0 && unlinked.length === 0 && "No work",
     notebook.routines.length === 0 && "No routines",
     notebook.memory.length === 0 && "No memory",
     detail.notes.length === 0 && "No notes",
     detail.skills.length === 0 && "No skills",
+    connectors.length === 0 && "No connectors",
   ].filter((label) => label !== false);
 
   return (
@@ -1031,6 +1038,26 @@ function NotebookPanel({
             ))}
           </NotebookSection>
         ) : null}
+        {connectors.length > 0 ? (
+          <NotebookSection
+            title="Connectors"
+            count={connectors.length}
+            action={
+              <IconAction label="Connector settings" onClick={onOpenSettings}>
+                <SettingsIcon />
+              </IconAction>
+            }
+          >
+            {connectors.map((instance) => (
+              <ConnectorSummary
+                key={instance.id}
+                instance={instance}
+                value={detail.bot.settings.connectors[instance.id]!}
+                onOpen={onOpenSettings}
+              />
+            ))}
+          </NotebookSection>
+        ) : null}
         {empty.length > 0 ? (
           <p className="px-3 py-3 text-xs text-muted-foreground">{empty.join(" · ")}</p>
         ) : null}
@@ -1044,6 +1071,45 @@ function NotebookPanel({
         />
       ) : null}
     </aside>
+  );
+}
+
+/** One connector the bot has on: its command, what it may do unasked, and whether it works now. */
+function ConnectorSummary({
+  instance,
+  value,
+  onOpen,
+}: {
+  readonly instance: BotConnectorInstance;
+  readonly value: BotConnectorSettings;
+  readonly onOpen: () => void;
+}) {
+  const facts = [
+    ...instance.operations.map(
+      (operation) =>
+        `${operation.label}: ${value.permissions[operation.id] === "allow" ? "allowed" : "asks you"}`,
+    ),
+    ...(instance.kind === "chat" && value.config.mentions === true ? ["Wakes on @-mentions"] : []),
+  ];
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className="flex min-w-0 flex-col text-left hover:text-foreground"
+    >
+      <span className="flex min-w-0 items-center gap-1.5 text-sm">
+        <span className="min-w-0 flex-1 truncate">{instance.name}</span>
+        <span className="shrink-0 font-mono text-xs text-muted-foreground">
+          t3bot {instance.id}
+        </span>
+      </span>
+      {instance.status !== "ok" && instance.reason !== null ? (
+        <span className="line-clamp-2 text-xs text-warning-foreground">{instance.reason}</span>
+      ) : null}
+      {facts.length > 0 ? (
+        <span className="line-clamp-2 text-xs text-muted-foreground">{facts.join(" · ")}</span>
+      ) : null}
+    </button>
   );
 }
 
@@ -1398,6 +1464,14 @@ function SettingsDialog({
                 }
               />
             </SettingsGroup>
+            <div className="flex flex-col gap-0.5 px-1 pt-2">
+              <h3 className="text-sm font-medium">Connectors</h3>
+              <p className="text-xs text-muted-foreground">
+                {connectors.length > 0
+                  ? "Outside systems this bot can use, each through t3bot and its name."
+                  : "Outside systems this bot can use. None here yet: chat channels you add in Settings appear here."}
+              </p>
+            </div>
             {connectors.map((instance) => (
               <ConnectorSection
                 key={instance.id}
