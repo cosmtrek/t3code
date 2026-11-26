@@ -309,6 +309,7 @@ function FollowUpsControl({
   readonly onClose: () => void;
 }) {
   const blockedThreadIds = useBlockedThreadIds(environmentId);
+  const formatTimestamp = useFormatTimestamp();
   if (delegations.length === 0) return null;
   const top = topFollowUp(delegations, blockedThreadIds) ?? delegations[0]!;
   const active = delegations.some((delegation) => delegation.id === selectedDelegationId);
@@ -354,9 +355,9 @@ function FollowUpsControl({
         {label}
       </MenuTrigger>
       <MenuPopup align="end">
-        {delegations.map((delegation) => (
+        {delegations.toSorted(newestFirst).map((delegation) => (
           <MenuItem key={delegation.id} onClick={() => onSelect(delegation)}>
-            <span className="flex w-full max-w-72 min-w-0 items-center gap-2">
+            <span className="flex w-full max-w-80 min-w-0 items-center gap-2">
               <span className="min-w-0 flex-1 truncate">
                 {delegationPreview(
                   conversation.name,
@@ -365,6 +366,12 @@ function FollowUpsControl({
                 )}
               </span>
               <FollowUpStatus environmentId={environmentId} delegation={delegation} />
+              <time
+                dateTime={delegation.createdAt}
+                className="shrink-0 text-xs text-muted-foreground tabular-nums"
+              >
+                {formatTimestamp(delegation.createdAt)}
+              </time>
             </span>
           </MenuItem>
         ))}
@@ -372,6 +379,9 @@ function FollowUpsControl({
     </Menu>
   );
 }
+
+const newestFirst = (a: InboxDelegation, b: InboxDelegation) =>
+  b.createdAt.localeCompare(a.createdAt);
 
 function useShown(ref: RefObject<HTMLElement | null>): boolean {
   const [shown, setShown] = useState(false);
