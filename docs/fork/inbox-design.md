@@ -24,16 +24,66 @@ serves it, and where each one already lives. Then change the arrangement so each
 place. Hiding, recoloring, or adding a state to the one element that drew the complaint usually
 moves the problem instead of solving it.
 
-The inbox has two jobs, and each has its own place:
+## The conversation is the unit of attention
 
-- **People waiting on you.** Unread and All list conversations. A row carries only chat signals:
-  one unread mark on the right, a count when the chat app gives one and a dot otherwise.
-- **The agent waiting on you.** The Agent view lists delegations with their thread status. Its tab
-  counts delegations with an unseen result or a draft to send. Running work is status, not a
-  to-do, so it is not counted.
+The user attends to conversations: "what in this group needs me". Agents and bots help with a
+conversation; they are not a second place to go. So the inbox has one list, ordered by one rule,
+and every way into a conversation lands in the same place.
 
-A conversation's delegations open from its header, where the user is already working on that
-conversation. They do not repeat on its list row.
+An earlier design gave delegations their own Agent view. The same group then had two entries, each
+opening at a different position, and the user bounced between them. Do not bring back a list of
+follow-ups beside the conversation list.
+
+### Follow-ups
+
+A follow-up (code: delegation) is a set of messages someone handles for the user. The handler is
+an agent (a new thread, which sees the messages and the project) or a bot (which also has its
+notebook: items, memory, earlier threads). The handler can change: an agent's follow-up can be
+handed to a bot, with its thread.
+
+```text
+following up ──► needs you (result, draft, question) ──► done
+      ▲                                                    │
+      └──────────────────── reopen ◄───────────────────────┘
+```
+
+- Only the user marks a follow-up done. Sending a reply does not: "looking into it" ends nothing.
+  The reply box offers **Send and done** beside Send. A bot may propose done; the panel shows the
+  proposal and the user confirms it.
+- A done follow-up leaves every signal and every derivation, and stays as history in its
+  conversation. Reopening brings it back.
+- A bot that takes an @-mention on its own opens a follow-up on that message, so its work is
+  visible and closable like any other.
+
+### One list, one order
+
+Each conversation row has one state, and the list sorts by state, then by time:
+
+| State           | When                                                                              | Row shows                                                    |
+| --------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| Needs you       | unread DM, a mention of you, or a follow-up with a draft, a result, or a question | `[Draft]`, `[Question]` or `[Done]` before the preview; mark |
+| Following up    | a follow-up is running and nothing waits on you                                   | a muted "following up"; not counted, not raised              |
+| Everything else | group messages                                                                    | as the chat app                                              |
+
+`[Draft]` before the preview is Feishu's own convention for an unsent draft. A "Following up"
+filter beside Unread and All lists conversations with an open follow-up: it filters
+conversations, it is not another list of objects.
+
+### Where things open
+
+- Opening a conversation from anywhere lands at the reading position: the first unread message,
+  else the bottom. It never jumps to an old follow-up's first message.
+- A follow-up shows twice in the chat, each with its own job: a small marker under its first
+  message (shaped like the reply count), and a side panel that holds its result, draft,
+  questions, and agent chat. The panel is not permanent: it opens with the conversation when a
+  follow-up needs you, from the marker, or from the header, and the user can close it. On narrow
+  screens it is a drawer over the chat.
+- Only an explicit "Show the message" in the panel scrolls the chat back to the follow-up's
+  messages.
+- One route: `/inbox/<conversation>?followup=<id>`. Each conversation keeps one reading position.
+
+Replies to the chat app leave from one place: the reply box. A draft from an agent or a bot lands
+in its follow-up's reply box, and the user sends it there.
 
 The same goes for menus: each one offers what fits the moment, not the same set everywhere. A list
 row's menu triages (mark read or unread, copy the chat ID); the open conversation's header menu acts
