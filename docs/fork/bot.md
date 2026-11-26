@@ -45,7 +45,7 @@ The bot's own work threads have no project; the threads it starts for work go in
 work is in.
 
 Each bot has its own state: role, items, routines, memory, its chat, and its threads.
-Nothing is shared between bots.
+Nothing is shared between bots except skills a bot writes to the shared folder (see [The notebook](#the-notebook)).
 
 ## Creating a bot
 
