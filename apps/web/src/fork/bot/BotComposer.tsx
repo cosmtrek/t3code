@@ -106,7 +106,7 @@ export function BotComposer({
       <ComposerSurface.Shell className="max-w-none">
         <ComposerSurface.Host>
           <div className="relative z-10 flex flex-col">
-            <div className="px-1 pt-1.5">
+            <div className="px-4 pt-3.5 pb-2 sm:pt-4">
               <ComposerPromptEditor
                 editorRef={editorRef}
                 draftKey={draftKey}
@@ -134,8 +134,8 @@ export function BotComposer({
                 onPaste={() => {}}
               />
             </div>
-            <div className="flex min-w-0 items-center gap-1 px-2.5 pb-2.5">
-              <div className="min-w-0 flex-1 truncate text-xs">{status}</div>
+            <div className="flex min-w-0 items-center gap-1 px-2 pb-2">
+              <div className="min-w-0 flex-1 truncate ps-2 text-xs">{status}</div>
               <SendButton
                 sending={sending}
                 disabled={!canSend}
