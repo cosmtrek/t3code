@@ -7,8 +7,9 @@ export interface ForkEvent {
   readonly type: string;
   readonly channelId?: string;
   readonly botId?: string;
-  /** A `bot-activity` event's line, and the thread it came from. */
+  /** A `bot-activity` event's line, its tool call if it is one, and the thread it came from. */
   readonly text?: string;
+  readonly step?: unknown;
   readonly threadId?: string;
 }
 

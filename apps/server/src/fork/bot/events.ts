@@ -11,6 +11,7 @@ import * as ThreadManagement from "../../orchestration-v2/ThreadManagementServic
 import { BotRuntime } from "./BotRuntime.ts";
 import {
   activityLine,
+  type ActivityLine,
   finishRun,
   isTerminalRunStatus,
   notify,
@@ -126,19 +127,20 @@ export const followThreads = Effect.fn("ForkBot.followThreads")(function* <E, R>
   const runtime = yield* BotRuntime;
   // Work-thread requests already posted; a request is updated more than once while pending.
   const posted = new Set<string>();
-  const showActivity = (botId: string, threadId: string, line: string | null) => {
+  const showActivity = (botId: string, threadId: string, line: ActivityLine | null) => {
     if (line === null) return;
     const since = runtime.store().workingSince(botId);
     const latest = runtime.activity.get(botId);
-    if (since === null || (latest?.text === line && latest.since === since)) return;
-    runtime.publishActivity(botId, { threadId, text: line, since });
+    if (since === null || (latest?.key === line.key && latest.since === since)) return;
+    runtime.publishActivity(botId, { threadId, ...line, since });
   };
   // Untraced: it runs for every domain event in the environment.
   const handle = Effect.fnUntraced(function* (event: OrchestrationV2DomainEvent) {
     const workBot = runtime.workThreads.get(event.threadId);
     if (workBot !== undefined) {
       if (event.type === "turn-item.updated") {
-        showActivity(workBot, event.threadId, activityLine(event.payload));
+        const shown = runtime.activity.get(workBot)?.key;
+        showActivity(workBot, event.threadId, activityLine(event.payload, shown));
       }
       if (event.type === "run.updated" && isTerminalRunStatus(event.payload.status)) {
         yield* finishRun(workBot, event.payload.id, event.payload.status);
@@ -158,9 +160,10 @@ export const followThreads = Effect.fn("ForkBot.followThreads")(function* <E, R>
       return;
     }
     if (!runtime.ownedThreads.has(event.threadId)) return;
-    // Most items are streamed text or tools, which give no line: skip the read for those.
-    const line = event.type === "turn-item.updated" ? activityLine(event.payload) : null;
-    if (event.type === "turn-item.updated" && line === null) return;
+    // Most items are streamed text or a tool's repeated updates: skip the read for those.
+    const shown = runtime.activity.get(runtime.ownedThreads.get(event.threadId) ?? "")?.key;
+    const line = event.type === "turn-item.updated" ? activityLine(event.payload, shown) : null;
+    if (event.type === "turn-item.updated" && (line === null || line.key === shown)) return;
     const owned = runtime.store().getThread(event.threadId);
     if (owned === null) return;
     if (event.type === "turn-item.updated") {

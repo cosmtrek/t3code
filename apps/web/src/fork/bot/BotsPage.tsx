@@ -5,6 +5,7 @@ import {
   type ModelSelection,
   type RuntimeMode,
 } from "@t3tools/contracts";
+import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import {
   BotMessageSquareIcon,
@@ -87,6 +88,7 @@ import { formatWorkingTimerNow } from "../../components/chat/TimelineWorkGroupRo
 import { tickTextContent } from "../../lib/tickTextContent";
 import { Switch } from "../../components/ui/switch";
 import { Textarea } from "../../components/ui/textarea";
+import { WorkEntryIcon } from "../../components/chat/TimelineToolActivityIcon";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../../components/ui/tooltip";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { useEnvironmentSettings } from "../../hooks/useSettings";
@@ -113,6 +115,8 @@ import type {
   BotSettings,
   BotSummary,
 } from "../types";
+import { useProject, useQuietThreadShell } from "../../state/entities";
+import { botStep } from "./botStep";
 import { subscribeToForkEvents, useForkResource, type ForkEvent } from "../useForkResource";
 import { BotComposer, type BotComposerHandle } from "./BotComposer";
 import { revealCitedText } from "./revealCitedText";
@@ -447,7 +451,11 @@ function BotChat({
           event.text !== undefined &&
           event.threadId !== undefined
         ) {
-          onActivity({ text: event.text, threadId: event.threadId });
+          onActivity({
+            text: event.text,
+            threadId: event.threadId,
+            ...(event.step === undefined ? {} : { step: event.step }),
+          });
         }
       }),
     [environmentId, botId],
@@ -570,17 +578,17 @@ function BotChat({
                 question={question}
               />
             ))}
+            {data?.workingSince ? (
+              <WorkingRow
+                environmentId={environmentId}
+                since={data.workingSince}
+                activity={activity}
+                onOpen={activity === null ? null : () => openThread(activity.threadId)}
+              />
+            ) : null}
           </div>
         </div>
         <div className="mx-auto w-full max-w-3xl px-4 pb-4" onClickCapture={revealOnCitationClick}>
-          {data?.workingSince ? (
-            <WorkingRow
-              environmentId={environmentId}
-              since={data.workingSince}
-              activity={activity?.text ?? null}
-              onOpen={activity === null ? null : () => openThread(activity.threadId)}
-            />
-          ) : null}
           {data?.bot.paused ? (
             <Alert variant="warning" className="mb-2">
               <PauseIcon />
@@ -638,7 +646,7 @@ function BotChat({
   );
 }
 
-/** What the bot works on, held above the composer with the latest line of the thread doing it. */
+/** The bot at work, as the thread timeline's working row, with its latest step under it. */
 function WorkingRow({
   environmentId,
   since,
@@ -647,42 +655,51 @@ function WorkingRow({
 }: {
   readonly environmentId: EnvironmentId;
   readonly since: string;
-  readonly activity: string | null;
-  /** Opens the thread the line comes from. */
+  readonly activity: BotActivity | null;
+  /** Opens the thread the step comes from. */
   readonly onOpen: (() => void) | null;
 }) {
+  const thread = useQuietThreadShell(
+    activity === null ? null : scopeThreadRef(environmentId, ThreadId.make(activity.threadId)),
+  );
+  const project = useProject(
+    thread === null ? null : scopeProjectRef(environmentId, thread.projectId),
+  );
+  const root = thread?.worktreePath ?? project?.workspaceRoot ?? undefined;
+  const step = activity === null ? null : botStep(activity.step, root);
   return (
-    <div className="flex min-w-0 items-baseline gap-1.5 px-1 pb-2 text-sm text-muted-foreground">
-      <span className="shrink-0">
+    <div className="flex min-w-0 flex-col gap-1 px-1 text-sm text-muted-foreground">
+      <span className="tabular-nums">
         Working for{" "}
-        <span
-          ref={tickTextContent(() => formatWorkingTimerNow(since, environmentId), true)}
-          className="tabular-nums"
-        />
+        <span ref={tickTextContent(() => formatWorkingTimerNow(since, environmentId), true)} />
       </span>
       {activity ? (
-        <>
-          <span aria-hidden className="shrink-0">
-            ·
-          </span>
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <button
-                  type="button"
-                  disabled={onOpen === null}
-                  onClick={onOpen ?? undefined}
-                  className="min-w-0 truncate text-left text-foreground/80 enabled:hover:text-foreground"
-                />
-              }
-            >
-              {activity}
-            </TooltipTrigger>
-            <TooltipPopup side="top" className="max-w-md">
-              {activity}
-            </TooltipPopup>
-          </Tooltip>
-        </>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <button
+                type="button"
+                disabled={onOpen === null}
+                onClick={onOpen ?? undefined}
+                className="group flex min-w-0 items-center gap-2 text-left text-xs enabled:hover:text-foreground"
+              />
+            }
+          >
+            <WorkEntryIcon
+              name={step?.icon ?? "message-circle"}
+              className="size-3.5 shrink-0 opacity-70"
+            />
+            <span className="min-w-0 truncate text-foreground/75 group-enabled:group-hover:text-foreground">
+              {step?.label ?? activity.text}
+            </span>
+            <span className="ml-auto hidden shrink-0 pl-2 group-enabled:group-hover:inline">
+              Open thread
+            </span>
+          </TooltipTrigger>
+          <TooltipPopup side="top" className="max-w-md">
+            {step?.label ?? activity.text}
+          </TooltipPopup>
+        </Tooltip>
       ) : null}
     </div>
   );

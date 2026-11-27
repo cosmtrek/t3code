@@ -19,6 +19,7 @@ import {
   ProjectId,
   RunId,
   RuntimeMode,
+  OrchestrationV2TurnItemJson,
   ThreadId,
   type OrchestrationV2RunStatus,
   type OrchestrationV2TurnItem,
@@ -207,19 +208,82 @@ export const listBots = Effect.fn("ForkBot.listBots")(function* () {
 });
 
 const ACTIVITY_CHARS = 240;
+/** A step's item stays small on the wire; a bigger one goes as its text alone. */
+const STEP_JSON_CHARS = 8_192;
+
+/** What a thread item gives the bot chat's status: a finished message's line, or a tool step. */
+export interface ActivityLine {
+  /** Repeats of the same key are not pushed again. */
+  readonly key: string;
+  readonly text: string;
+  /** The tool item, JSON-encoded without its output, so clients label it as the timeline does. */
+  readonly step?: unknown;
+}
+
+const STEP_TYPES = new Set<OrchestrationV2TurnItem["type"]>([
+  "command_execution",
+  "file_change",
+  "file_search",
+  "web_search",
+  "dynamic_tool",
+  "subagent",
+]);
+
+const encodeStep = Schema.encodeUnknownOption(OrchestrationV2TurnItemJson);
+
+function withoutOutput(item: OrchestrationV2TurnItem): OrchestrationV2TurnItem {
+  switch (item.type) {
+    case "command_execution":
+    case "dynamic_tool": {
+      const { output: _output, ...bare } = item;
+      return bare;
+    }
+    case "file_change": {
+      const { diffStr: _diff, oldStr: _old, newStr: _new, ...bare } = item;
+      return bare;
+    }
+    default:
+      return item;
+  }
+}
+
+function stepOf(item: OrchestrationV2TurnItem): unknown {
+  const bare = withoutOutput(item);
+  const encoded = encodeStep(bare);
+  if (encoded._tag === "None") return undefined;
+  return JSON.stringify(encoded.value).length > STEP_JSON_CHARS ? undefined : encoded.value;
+}
+
+const clip = (line: string) =>
+  line.length > ACTIVITY_CHARS ? `${line.slice(0, ACTIVITY_CHARS - 1)}…` : line;
 
 /**
- * The line a thread item gives the bot chat's status: the first line of a finished assistant
- * message. Streamed text, tool calls and NO_REPLY are left out, so it moves once per message.
+ * The first line of a finished assistant message, or a tool call once as it starts. Streamed
+ * text, reasoning and NO_REPLY are left out, so it moves once per message or tool.
  */
-export function activityLine(item: OrchestrationV2TurnItem): string | null {
+export function activityLine(
+  item: OrchestrationV2TurnItem,
+  /** The key last shown: a step already shown is not encoded again. */
+  shownKey?: string,
+): ActivityLine | null {
+  if (STEP_TYPES.has(item.type)) {
+    if (shownKey === `step:${item.id}`) return null;
+    const fallback =
+      item.type === "command_execution" ? item.input.split("\n")[0] : (item.title ?? item.type);
+    const step = stepOf(item);
+    return {
+      key: `step:${item.id}`,
+      text: clip(chatPreview(fallback ?? "") || item.type),
+      ...(step === undefined ? {} : { step }),
+    };
+  }
   if (item.type !== "assistant_message" || item.streaming) return null;
   const line = (replyText(item.text) ?? "")
     .split("\n")
     .map((part) => chatPreview(part.replace(/^\s*(?:[#>*-]+|\d+\.)\s+/, "")))
     .find((part) => part !== "");
   if (line === undefined) return null;
-  return line.length > ACTIVITY_CHARS ? `${line.slice(0, ACTIVITY_CHARS - 1)}…` : line;
+  return { key: `text:${line}`, text: clip(line) };
 }
 
 /** The latest line since it started working, and the thread it came from. */
@@ -227,7 +291,11 @@ const activityOf = (runtime: BotRuntimeShape, botId: string, since: string | nul
   const latest = runtime.activity.get(botId);
   return since === null || latest?.since !== since
     ? null
-    : { text: latest.text, threadId: latest.threadId };
+    : {
+        text: latest.text,
+        threadId: latest.threadId,
+        ...(latest.step === undefined ? {} : { step: latest.step }),
+      };
 };
 
 export const readBot = Effect.fn("ForkBot.readBot")(function* (params: URLSearchParams) {

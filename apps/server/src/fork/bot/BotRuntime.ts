@@ -24,11 +24,15 @@ export type BotEvent =
       readonly botId: string;
       readonly threadId: string;
       readonly text: string;
+      readonly step?: unknown;
     };
 
 interface Activity {
   readonly threadId: string;
+  readonly key: string;
   readonly text: string;
+  /** A tool call's item, for clients to label; absent for a message's line. */
+  readonly step?: unknown;
   /** The working span it belongs to, by when that started. */
   readonly since: string;
 }
@@ -112,8 +116,16 @@ const make = Effect.gen(function* () {
     },
     publishActivity: (botId, latest) => {
       activity.set(botId, latest);
-      const { threadId, text } = latest;
-      for (const listener of listeners) listener({ type: "bot-activity", botId, threadId, text });
+      const { threadId, text, step } = latest;
+      for (const listener of listeners) {
+        listener({
+          type: "bot-activity",
+          botId,
+          threadId,
+          text,
+          ...(step === undefined ? {} : { step }),
+        });
+      }
     },
     subscribe: (listener) => {
       listeners.add(listener);

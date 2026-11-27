@@ -381,6 +381,8 @@ export interface BotChatMessage {
 export interface BotActivity {
   readonly text: string;
   readonly threadId: string;
+  /** A tool call's item as JSON; absent when the line is a message's. */
+  readonly step?: unknown;
 }
 
 export interface BotDetail {
@@ -397,7 +399,7 @@ export interface BotDetail {
   readonly role: string;
   /** When it started on what it works on: its turn, then the threads it follows `now`. */
   readonly workingSince: string | null;
-  /** The latest message of the thread working on it; null while idle. */
+  /** The latest message or tool call of the thread working on it; null while idle. */
   readonly activity: BotActivity | null;
   /** Oldest first. */
   readonly chat: ReadonlyArray<BotChatMessage>;

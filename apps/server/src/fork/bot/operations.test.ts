@@ -682,7 +682,7 @@ describe("bot turns", () => {
           ({ type: "turn-item.updated", threadId, payload: { runId, ...fields } }) as never;
         const read = () => Bots.readBot(new URLSearchParams({ botId }));
 
-        // Streamed text, commands and NO_REPLY leave the line alone.
+        // Streamed text and NO_REPLY leave the line alone.
         yield* followThreads(
           Stream.make(
             item({ type: "assistant_message", streaming: true, text: "Half a thou" }),
@@ -691,11 +691,22 @@ describe("bot turns", () => {
               streaming: false,
               text: "\n## Checking   the branch\nthen more",
             }),
-            item({ type: "command_execution", status: "running", input: "git status" }),
             item({ type: "assistant_message", streaming: false, text: "NO_REPLY" }),
           ),
         );
         expect((yield* read()).activity).toEqual({ text: "Checking the branch", threadId });
+
+        // A tool call shows as it starts, once; its output never reaches the line.
+        const command = (status: string, output?: string) =>
+          item({
+            id: "item-1",
+            type: "command_execution",
+            status,
+            input: "git status\n--short",
+            ...(output === undefined ? {} : { output }),
+          });
+        yield* followThreads(Stream.make(command("running"), command("running", "M a.ts")));
+        expect((yield* read()).activity).toEqual({ text: "git status", threadId });
 
         // The line belongs to the work: once it ends there is none.
         yield* endRun(h, botId, 0, "Done.");
@@ -1308,5 +1319,36 @@ describe("t3bot arguments", () => {
       "'/Users/me/Library/Application Support/t3'",
     );
     expect(Bots.shellQuote("it's")).toBe("'it'\\''s'");
+  });
+});
+
+describe("activityLine", () => {
+  it("carries a tool step's item for clients to label, without its output", () => {
+    const at = DateTime.makeUnsafe("2026-11-27T00:00:00.000Z");
+    const line = Bots.activityLine({
+      type: "command_execution",
+      id: "item-1",
+      threadId: "thread-1",
+      runId: null,
+      nodeId: null,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 0,
+      status: "running",
+      title: null,
+      startedAt: at,
+      completedAt: null,
+      updatedAt: at,
+      input: "rg -n token src",
+      output: "src/a.ts:1: token",
+    } as never);
+    expect(line).toMatchObject({ key: "step:item-1", text: "rg -n token src" });
+    expect(line?.step).toMatchObject({ type: "command_execution", input: "rg -n token src" });
+    expect(line?.step).not.toHaveProperty("output");
+    expect(
+      Bots.activityLine({ type: "command_execution", id: "item-1" } as never, "step:item-1"),
+    ).toBeNull();
   });
 });
