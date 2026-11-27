@@ -582,10 +582,15 @@ function ConversationMessages({
       }
     />
   );
-  const chipsFor = (row: ConversationRow) =>
+  const chipsFor = (row: ConversationRow, post = false) =>
     row.delegations.length > 0 ? (
-      // The negative margin lines the ghost buttons' labels up with the bubble's edge.
-      <span className="-mx-[calc(--spacing(2)-1px)] flex flex-wrap items-center gap-1 text-xs">
+      <span
+        className={cn(
+          "flex flex-wrap items-center gap-1 text-xs",
+          // A post has no bubble edge, so the ghost buttons' labels line up with its text instead.
+          post && "-mx-[calc(--spacing(2)-1px)]",
+        )}
+      >
         {row.delegations.map((delegation) => (
           <DelegationChip
             key={delegation.id}
@@ -675,7 +680,7 @@ function ConversationMessages({
         // Inside a topic, a reply to the topic itself needs no quote.
         quote={row.message.replyTo?.id === rootId ? null : row.quote}
       >
-        {chipsFor(row)}
+        {chipsFor(row, true)}
       </MessageView>
       <div className="absolute top-0.5 end-2 z-10">{toolbarFor(row, later)}</div>
     </div>
@@ -838,7 +843,7 @@ function ConversationMessages({
                     row.thread.length === 0,
                   )}
                   {row.thread.length > 0 ? (
-                    <li className="-ms-[3px] mt-1 flex min-w-0 flex-col gap-3">
+                    <li className="ms-1 mt-1 flex min-w-0 flex-col gap-3">
                       <span className="flex min-w-0 flex-wrap items-center gap-1">
                         <Button
                           size="xs"
