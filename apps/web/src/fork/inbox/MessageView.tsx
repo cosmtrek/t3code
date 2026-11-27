@@ -11,7 +11,13 @@ import { cn } from "../../lib/utils";
 import { forkUrl, renewForkAccess, renewStaleForkAccess, useForkAccess } from "../forkApiAccess";
 import { useFormatTimestamp } from "../presentation";
 import type { InboxMessage } from "../types";
-import { mentionParts, nameOrUnknown, shortLink } from "./inboxView";
+import {
+  looksLikeMarkdown,
+  mentionMarkdownExtensions,
+  mentionParts,
+  nameOrUnknown,
+  shortLink,
+} from "./inboxView";
 
 type Mentions = InboxMessage["mentions"];
 
@@ -69,7 +75,9 @@ export function MessageView({
         : self
           ? "self"
           : "muted";
-  const markdown = message.format === "markdown";
+  // A topic post is long-form, so Markdown typed as plain text renders as the agent's would.
+  const typedMarkdown = post && message.format !== "markdown" && looksLikeMarkdown(message.text);
+  const markdown = message.format === "markdown" || typedMarkdown;
   // The adapter's list marks my mention in the text itself; without it the header says so.
   const selfMarked = message.mentions?.some((mention) => mention.isSelf) ?? false;
   const media = (
@@ -154,6 +162,10 @@ export function MessageView({
           text={message.text}
           cwd={undefined}
           headingLevelOffset={3}
+          extensions={mentionMarkdownExtensions(message.mentions)}
+          // Typed text keeps its line breaks, and its HTML stays text.
+          lineBreaks={typedMarkdown}
+          parseRawHtml={!typedMarkdown}
           className="text-sm"
         />
       ) : hasText ? (

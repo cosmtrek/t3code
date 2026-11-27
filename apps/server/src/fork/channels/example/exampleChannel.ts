@@ -190,6 +190,23 @@ function seed(now: number): ExampleConversation[] {
           richSummary: "[Card] Release 2.14.0 · 37 changes · Approve / Reject",
           links: ["https://ci.example.com/releases/2.14.0/changes?view=summary&group=team"],
         }),
+        message(
+          "m-45",
+          null,
+          2,
+          SAM,
+          [
+            "### 1. Deploy plan has its own route",
+            "- Preview moves from `POST /deployments?dry_run=true` to `POST /apps/:app_id/deployment-plan`.",
+            "- `POST /deployments` only starts a deploy and rejects `dry_run`.",
+            "",
+            "### 2. Live versions",
+            "- The release panel shows the **live** version per lane.",
+            "",
+            "@Alex Rivera @Priya Shah please review before Thursday.",
+          ].join("\n"),
+          { mentionsSelf: true },
+        ),
         message("m-50", null, 26, JORDAN, "Can we move the freeze to Thursday?"),
         message("m-51", "m-50", 25, SELF, "Fine by me if QA agrees.", { inThread: true }),
         message("m-52", "m-51", 1, PRIYA, "QA agrees. @Alex Rivera can you update the calendar?", {

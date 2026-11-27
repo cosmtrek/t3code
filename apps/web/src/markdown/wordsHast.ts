@@ -44,6 +44,13 @@ export interface MarkdownExtensions {
   };
   /** Expand GitHub `:alias:` emoji shortcodes in prose outside code. */
   readonly githubEmoji?: boolean;
+  /** Splits prose outside code and links into runs; a run with `self` set is a chat `@name`. */
+  readonly mentions?: (
+    text: string,
+  ) => ReadonlyArray<{
+    readonly text: string;
+    readonly mention: { readonly self: boolean } | null;
+  }>;
 }
 
 export interface WordsHastOptions {
@@ -1184,10 +1191,46 @@ export function wordsHast(text: string, options: WordsHastOptions): Root {
   if (insights) restorePositions(hast, insights.toOriginal);
   if (extensions.inert) makeInert(hast);
   if (extensions.preview) return flattenPreview(hast, extensions.preview);
+  if (extensions.mentions) markMentions(hast, extensions.mentions);
   addHeadingIds(hast);
   addTextDirection(hast as never);
   groupChipPunctuation(hast as never);
   return hast;
+}
+
+const MENTION_CLASS = ["text-primary"];
+const SELF_MENTION_CLASS = ["rounded", "bg-primary", "px-1", "text-primary-foreground"];
+
+/** After sanitizing, so the mention classes stay; code and links keep their text as written. */
+function markMentions(
+  node: Root | Element,
+  split: NonNullable<MarkdownExtensions["mentions"]>,
+): void {
+  const children = node.children as ElementContent[];
+  for (let index = 0; index < children.length; index++) {
+    const child = children[index]!;
+    if (child.type === "element") {
+      if (child.tagName !== "code" && child.tagName !== "pre" && child.tagName !== "a") {
+        markMentions(child, split);
+      }
+      continue;
+    }
+    if (child.type !== "text" || !child.value.includes("@")) continue;
+    const parts = split(child.value);
+    if (!parts.some((part) => part.mention)) continue;
+    const marked: ElementContent[] = parts.map((part) =>
+      part.mention
+        ? {
+            type: "element",
+            tagName: "span",
+            properties: { className: part.mention.self ? SELF_MENTION_CLASS : MENTION_CLASS },
+            children: [{ type: "text", value: part.text }],
+          }
+        : { type: "text", value: part.text },
+    );
+    children.splice(index, 1, ...marked);
+    index += marked.length - 1;
+  }
 }
 
 export interface CodexDirectiveSource {

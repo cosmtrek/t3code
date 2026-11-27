@@ -6,6 +6,7 @@ import type {
   InboxMessage,
   Mention,
 } from "../types";
+import type { MarkdownExtensions } from "../../markdown/wordsHast";
 import { formatSince, formatSpan } from "../presentation";
 
 export type InboxFilter = "all" | "dm" | "groups" | "topics";
@@ -342,6 +343,13 @@ export function channelBanner(
   }
 }
 
+// Headings, lists, quotes, fences, tables, inline code, bold, and links: what people paste from an agent.
+const MARKDOWN_SYNTAX =
+  /^(?:#{1,6}\s+\S|\s*```|\s*(?:[-*+]|\d+[.)])\s+\S|>\s|\|.*\|\s*$)|`[^`\n]+`|\*\*[^*\n]+\*\*|\[[^\]\n]+\]\(https?:\/\//mu;
+
+/** Plain text a person wrote in Markdown, which the chat app sends as text. */
+export const looksLikeMarkdown = (text: string) => MARKDOWN_SYNTAX.test(text);
+
 // Without the adapter's mentions, a name runs to the next space or punctuation, as the chat app ends it.
 const GUESSED_MENTION = /(?<![A-Za-z0-9_.+-])@[^\s@,，.。:：;；!！?？()（）[\]【】"“”'‘’]+/gu;
 
@@ -384,6 +392,21 @@ export function mentionParts(
   }
   if (last < text.length) parts.push({ text: text.slice(last), mention: null });
   return parts;
+}
+
+const mentionMarkdown = new Map<string, MarkdownExtensions>();
+
+/** One extension object per set of names, so messages that share it share a parse cache. */
+export function mentionMarkdownExtensions(
+  mentions?: ReadonlyArray<{ readonly name: string; readonly isSelf: boolean }> | null,
+): MarkdownExtensions {
+  const key = mentions == null ? "" : JSON.stringify(mentions.map((m) => [m.name, m.isSelf]));
+  let extensions = mentionMarkdown.get(key);
+  if (extensions === undefined) {
+    extensions = { mentions: (text) => mentionParts(text, mentions) };
+    mentionMarkdown.set(key, extensions);
+  }
+  return extensions;
 }
 
 /** Who a reply can mention: everyone else who wrote, except a name two people share. */

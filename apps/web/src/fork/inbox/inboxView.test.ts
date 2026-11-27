@@ -8,6 +8,7 @@ import {
   draftReplyMode,
   emptyListTitle,
   lastMessageLine,
+  looksLikeMarkdown,
   mentionablePeople,
   mentionParts,
   mentionSuggestions,
@@ -383,5 +384,21 @@ describe("mentionParts", () => {
       "{@Zhang Sanfeng} and [@Zhang San], not @Li",
     );
     expect(marked("@Li here", [])).toBe("@Li here");
+  });
+});
+
+describe("looksLikeMarkdown", () => {
+  it("takes headings, lists, code, bold, and links as Markdown", () => {
+    expect(looksLikeMarkdown("### 1. 部署通道契约收敛\n- 通道统一")).toBe(true);
+    expect(looksLikeMarkdown("改为 `POST /apps/:app_id/deployment-plan`")).toBe(true);
+    expect(looksLikeMarkdown("这是 **破坏性变更**")).toBe(true);
+    expect(looksLikeMarkdown("见 [Note](https://example.com/a)")).toBe(true);
+    expect(looksLikeMarkdown("1. first\n2. second")).toBe(true);
+  });
+
+  it("leaves chat text alone", () => {
+    expect(looksLikeMarkdown("ok, ship it #123")).toBe(false);
+    expect(looksLikeMarkdown("@Zhang San 看下 https://example.com/x?a=1")).toBe(false);
+    expect(looksLikeMarkdown("3*4 = 12, a_b_c")).toBe(false);
   });
 });
