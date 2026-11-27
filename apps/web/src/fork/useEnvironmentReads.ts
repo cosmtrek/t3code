@@ -104,8 +104,10 @@ export function useEnvironmentReads<Body, Value>(
     };
   }, [connectedKey, path, toValue, accept]);
 
-  const connectedIds = new Set(connected.map((target) => target.id));
+  // A reconnecting environment (sleep, lock, network blip) keeps its last read until it reads
+  // again, so what it hides or shows does not flash back in the meantime.
+  const knownIds = new Set(environments.map((environment) => environment.environmentId));
   return [...values.entries()]
-    .filter(([environmentId]) => connectedIds.has(environmentId))
+    .filter(([environmentId]) => knownIds.has(environmentId))
     .map(([, value]) => value);
 }
