@@ -7,7 +7,7 @@ import {
 } from "@t3tools/contracts";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import {
-  BotIcon,
+  BotMessageSquareIcon,
   CheckIcon,
   CopyIcon,
   EllipsisIcon,
@@ -194,7 +194,7 @@ function BotsEmpty({
   return (
     <Empty size="compact">
       <EmptyMedia variant="icon">
-        <BotIcon />
+        <BotMessageSquareIcon />
       </EmptyMedia>
       <EmptyHeader>
         <EmptyTitle>{title}</EmptyTitle>

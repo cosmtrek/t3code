@@ -2,7 +2,13 @@ import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/model
 import type { EnvironmentId } from "@t3tools/contracts";
 import { useLocation, useNavigate, useSearch } from "@tanstack/react-router";
 import * as Schema from "effect/Schema";
-import { BotIcon, ChevronDownIcon, InboxIcon, PauseIcon, PlusIcon } from "lucide-react";
+import {
+  BotMessageSquareIcon,
+  ChevronDownIcon,
+  MessagesSquareIcon,
+  PauseIcon,
+  PlusIcon,
+} from "lucide-react";
 import { useState, type ReactNode } from "react";
 
 import { Button } from "../../components/ui/button";
@@ -10,7 +16,7 @@ import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../../components/ui/menu
 import { useSidebar } from "../../components/ui/sidebar";
 import { useLocalStorage } from "../../hooks/useLocalStorage";
 import { useNowMinute } from "../../hooks/useNowMinute";
-import { resolveSidebarRowStatus } from "../../components/Sidebar.logic";
+import { resolveSidebarRowStatus, type SidebarThreadStatus } from "../../components/Sidebar.logic";
 import { cn } from "../../lib/utils";
 import { useQuietThreadShells } from "../../state/entities";
 import { CreateBotDialog, rememberBot } from "../bot/BotsPage";
@@ -62,6 +68,25 @@ function withoutThreads(threads: ReadonlyArray<EnvironmentThreadShell>, hidden: 
   return threads.filter((thread) => !keys.has(`${thread.environmentId}:${thread.id}`));
 }
 
+type GroupDot = "attention" | "failed" | "unread" | "working";
+
+/** Same colors as a closed project folder's dot. */
+const GROUP_DOT_CLASS_NAME: Record<GroupDot, string> = {
+  attention: "bg-warning",
+  failed: "bg-error",
+  unread: "bg-success",
+  working: "bg-info",
+};
+
+const GROUP_DOT_LABEL: Record<GroupDot, string> = {
+  attention: ", needs you",
+  failed: ", failed",
+  unread: ", unread",
+  working: ", working",
+};
+
+const DOT_ORDER: ReadonlyArray<GroupDot> = ["attention", "failed", "unread", "working"];
+
 const BOTS_COLLAPSED_KEY = "t3code:fork-sidebar-bots-collapsed";
 const INBOX_COLLAPSED_KEY = "t3code:fork-sidebar-inbox-collapsed";
 
@@ -86,7 +111,8 @@ function GroupHeader({
   icon,
   label,
   collapsed,
-  attention,
+  dot,
+  count,
   onOpen,
   onToggle,
   action,
@@ -94,8 +120,9 @@ function GroupHeader({
   readonly icon: ReactNode;
   readonly label: string;
   readonly collapsed: boolean;
-  /** A dot while collapsed, so a hidden row that needs the user still shows. */
-  readonly attention: boolean;
+  /** While collapsed, the most pressing hidden status and how many rows are hidden. */
+  readonly dot: GroupDot | null;
+  readonly count: number;
   readonly onOpen: () => void;
   readonly onToggle: () => void;
   readonly action?: ReactNode;
@@ -105,7 +132,7 @@ function GroupHeader({
       <button
         type="button"
         onClick={onOpen}
-        className="flex h-8 min-w-0 flex-1 cursor-pointer items-center gap-2.5 rounded-(--control-radius) px-(--sidebar-row-content-inset) text-left outline-none hover:bg-sidebar-row-hover focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+        className="flex h-8 min-w-0 flex-1 cursor-pointer items-center gap-2.5 rounded-(--control-radius) ps-(--sidebar-row-content-inset) pe-8 text-left outline-none hover:bg-sidebar-row-hover focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
       >
         <span className="flex size-4 shrink-0 items-center justify-center text-sidebar-foreground/90 [&_svg]:size-4">
           {icon}
@@ -113,9 +140,20 @@ function GroupHeader({
         <span className="min-w-0 flex-1 truncate text-sm font-medium text-sidebar-foreground/90">
           {label}
         </span>
-        {collapsed && attention ? (
-          <span className="size-1.5 shrink-0 rounded-full bg-warning">
-            <span className="sr-only">, needs you</span>
+        {collapsed && dot ? (
+          <span className={cn("size-1.5 shrink-0 rounded-full", GROUP_DOT_CLASS_NAME[dot])}>
+            <span className="sr-only">{GROUP_DOT_LABEL[dot]}</span>
+          </span>
+        ) : null}
+        {collapsed && count > 0 ? (
+          <span
+            className={cn(
+              "shrink-0 text-xs tabular-nums text-sidebar-muted-foreground",
+              action &&
+                "group-hover/fork-group:invisible group-focus-within/fork-group:invisible pointer-coarse:invisible",
+            )}
+          >
+            {count}
           </span>
         ) : null}
       </button>
@@ -149,7 +187,7 @@ function GroupRow({
 }: {
   readonly title: string;
   readonly status: ReactNode;
-  readonly preview: string;
+  readonly preview: ReactNode;
   readonly active?: boolean;
   readonly onClick: () => void;
 }) {
@@ -174,7 +212,7 @@ function GroupRow({
             {status}
           </span>
         </span>
-        {preview === "" ? null : (
+        {preview === "" || preview === null ? null : (
           <span className="mt-0.5 min-w-0 truncate text-xs text-secondary-label">{preview}</span>
         )}
       </button>
@@ -192,8 +230,18 @@ function BotsGroup({ listings }: { readonly listings: ReadonlyArray<EnvironmentB
   const now = minuteToMs(useNowMinute());
   const [collapsed, setCollapsed] = useLocalStorage(BOTS_COLLAPSED_KEY, false, Schema.Boolean);
   const [creatingIn, setCreatingIn] = useState<EnvironmentId | null>(null);
+  const threadStatus = useThreadStatuses();
   const named = listings.length > 1;
-  const rows = listings.flatMap((listing) => listing.bots.map((bot) => ({ listing, bot })));
+  const rows = listings.flatMap((listing) =>
+    listing.bots.map((bot) => ({
+      listing,
+      bot,
+      thread:
+        bot.workThreadId === null
+          ? null
+          : (threadStatus.get(`${listing.environmentId}:${bot.workThreadId}`) ?? null),
+    })),
+  );
   const open = (environmentId: EnvironmentId | undefined, botId: string | undefined) => {
     closeMobile();
     if (environmentId && botId) rememberBot(environmentId, botId);
@@ -233,23 +281,26 @@ function BotsGroup({ listings }: { readonly listings: ReadonlyArray<EnvironmentB
   return (
     <>
       <GroupHeader
-        icon={<BotIcon />}
+        icon={<BotMessageSquareIcon />}
         label="Bots"
         collapsed={collapsed}
-        attention={rows.some(({ bot }) => bot.questions > 0 || bot.unread > 0)}
+        dot={mostPressing(rows.map(({ bot, thread }) => botDot(bot, thread)))}
+        count={rows.length}
         onOpen={() => open(undefined, undefined)}
         onToggle={() => setCollapsed((value) => !value)}
         action={newBot}
       />
       {collapsed
         ? null
-        : rows.map(({ listing, bot }) => {
-            const preview = bot.lastMessage ? plainPreview(bot.lastMessage.text) : "New";
+        : rows.map(({ listing, bot, thread }) => {
+            const preview = bot.lastMessage
+              ? plainPreview(bot.lastMessage.text)
+              : "No messages yet";
             return (
               <GroupRow
                 key={`${listing.environmentId}:${bot.id}`}
                 title={bot.name}
-                status={<BotStatus bot={bot} now={now} />}
+                status={<BotStatus bot={bot} thread={thread} now={now} />}
                 preview={named ? `${listing.label} · ${preview}` : preview}
                 active={
                   pathname === "/bots" &&
@@ -275,9 +326,45 @@ function BotsGroup({ listings }: { readonly listings: ReadonlyArray<EnvironmentB
   );
 }
 
-/** One status, the most pressing: a question, unread posts, work under way, paused, or its age. */
-function BotStatus({ bot, now }: { readonly bot: BotSummary; readonly now: number }) {
+/** Each thread's sidebar status, keyed `environmentId:threadId`. */
+function useThreadStatuses(): ReadonlyMap<string, SidebarThreadStatus> {
+  const shells = useQuietThreadShells();
+  return new Map(
+    shells.map((shell) => [`${shell.environmentId}:${shell.id}`, resolveSidebarRowStatus(shell)]),
+  );
+}
+
+const mostPressing = (dots: ReadonlyArray<GroupDot | null>): GroupDot | null =>
+  DOT_ORDER.find((dot) => dots.includes(dot)) ?? null;
+
+/** The work thread's status counts only when it waits on the user: the row stands for it. */
+const blockedStatus = (thread: SidebarThreadStatus | null) =>
+  thread !== null && NEEDS_YOU_STATUSES.has(thread) ? thread : null;
+
+function botDot(bot: BotSummary, thread: SidebarThreadStatus | null): GroupDot | null {
+  const blocked = blockedStatus(thread);
+  if (bot.questions > 0 || (blocked !== null && blocked !== "failed")) return "attention";
+  if (blocked === "failed") return "failed";
+  if (bot.unread > 0) return "unread";
+  return bot.working ? "working" : null;
+}
+
+/**
+ * One status, the most pressing: a question, its thread waiting on the user, unread posts, work
+ * under way, paused, or its age.
+ */
+function BotStatus({
+  bot,
+  thread,
+  now,
+}: {
+  readonly bot: BotSummary;
+  readonly thread: SidebarThreadStatus | null;
+  readonly now: number;
+}) {
+  const blocked = blockedStatus(thread);
   if (bot.questions > 0) return <StatusLabel {...SIDEBAR_STATUS.input} />;
+  if (blocked !== null && blocked !== "ready") return <StatusLabel {...SIDEBAR_STATUS[blocked]} />;
   if (bot.unread > 0) return <UnreadCount count={bot.unread} />;
   if (bot.working) return <StatusLabel {...SIDEBAR_STATUS.working} />;
   if (bot.paused) {
@@ -327,10 +414,11 @@ function InboxGroup() {
   return (
     <>
       <GroupHeader
-        icon={<InboxIcon />}
+        icon={<MessagesSquareIcon />}
         label="Inbox"
         collapsed={collapsed}
-        attention={items.length > 0}
+        dot={items.length > 0 ? "attention" : null}
+        count={items.length}
         onOpen={() => open(null)}
         onToggle={() => setCollapsed((value) => !value)}
       />
@@ -347,11 +435,25 @@ function InboxGroup() {
                     delegation={item.followUp}
                     onlyNeedsYou
                   />
+                ) : item.conversation.unread ? (
+                  <UnreadCount
+                    count={Math.max(item.conversation.unreadCount ?? 1, 1)}
+                    muted={item.conversation.muted}
+                  />
                 ) : (
                   agoLabel(item.conversation.lastActivityAt, now)
                 )
               }
-              preview={lastMessageLine(item.conversation)}
+              preview={
+                item.conversation.mentioned ? (
+                  <>
+                    <span className="font-medium text-primary">[@you] </span>
+                    {lastMessageLine(item.conversation)}
+                  </>
+                ) : (
+                  lastMessageLine(item.conversation)
+                )
+              }
               onClick={() => open(item)}
             />
           ))}

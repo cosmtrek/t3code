@@ -3,16 +3,17 @@ import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
   BotIcon,
+  CableIcon,
   CircleCheckIcon,
   CopyIcon,
   EllipsisIcon,
   ExternalLinkIcon,
-  InboxIcon,
   ListFilterIcon,
   LocateFixedIcon,
   MessageSquareIcon,
   MessagesSquareIcon,
   Undo2Icon,
+  UnplugIcon,
   XIcon,
 } from "lucide-react";
 import {
@@ -194,7 +195,7 @@ export function InboxPage() {
               <h1 className="truncate px-1 text-sm font-medium">Inbox</h1>
             </PaneHeader>
             <InboxEmpty
-              icon={<MessagesSquareIcon />}
+              icon={<CableIcon />}
               title="No channels"
               description="Enable a channel on a connected environment."
               settingsLink
@@ -390,14 +391,14 @@ function EnvironmentInboxView({
 
   let list: ReactNode;
   if (!channel.access.read) {
-    list = <InboxEmpty icon={<MessagesSquareIcon />} title="Channel unavailable" settingsLink />;
+    list = <InboxEmpty icon={<UnplugIcon />} title="Channel unavailable" settingsLink />;
   } else if (listing.data === null && listing.error) {
     list = <ReadError message={listing.error.message} onRetry={() => void listing.refresh()} />;
   } else if (listing.data === null) {
     list = <p className="px-4 py-6 text-sm text-muted-foreground">Loading…</p>;
   } else if (visibleConversations.length === 0) {
     list = (
-      <InboxEmpty icon={<InboxIcon />} title={emptyListTitle(filter)}>
+      <InboxEmpty icon={<MessagesSquareIcon />} title={emptyListTitle(filter)}>
         {filter === "all" ? null : (
           <Button size="sm" variant="outline" onClick={() => setFilter("all")}>
             Clear filter
