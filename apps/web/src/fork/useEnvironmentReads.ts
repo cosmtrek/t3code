@@ -9,6 +9,9 @@ const REFRESH_DEBOUNCE_MS = 1_000;
 /** A read that failed (still connecting, server restarting) is tried again; no event may follow. */
 const RETRY_MS = [2_000, 5_000, 10_000] as const;
 
+/** Each view's last reads by path, so a view that mounts again starts from them. */
+const lastReads = new WeakMap<object, Map<string, ReadonlyMap<EnvironmentId, unknown>>>();
+
 /**
  * One fork read per connected environment, refreshed on that environment's fork events that
  * `accept` lets through. `toValue` returns null to leave an environment out; a server without
@@ -28,7 +31,11 @@ export function useEnvironmentReads<Body, Value>(
     .filter((environment) => environment.connection.phase === "connected")
     .map((environment) => ({ id: environment.environmentId, label: environment.label }));
   const connectedKey = JSON.stringify(connected);
-  const [values, setValues] = useState<ReadonlyMap<EnvironmentId, Value>>(new Map());
+  const [values, setValuesState] = useState<ReadonlyMap<EnvironmentId, Value>>(
+    () =>
+      (lastReads.get(toValue)?.get(path) as ReadonlyMap<EnvironmentId, Value> | undefined) ??
+      new Map(),
+  );
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads each environment's fork route and refreshes it on that environment's server events
   useEffect(() => {
@@ -37,6 +44,16 @@ export function useEnvironmentReads<Body, Value>(
       readonly label: string;
     }>;
     let cancelled = false;
+    const setValues = (
+      update: (current: ReadonlyMap<EnvironmentId, Value>) => ReadonlyMap<EnvironmentId, Value>,
+    ) =>
+      setValuesState((current) => {
+        const next = update(current);
+        let byPath = lastReads.get(toValue);
+        if (!byPath) lastReads.set(toValue, (byPath = new Map()));
+        byPath.set(path, next);
+        return next;
+      });
     const timers = new Map<EnvironmentId, ReturnType<typeof setTimeout>>();
     // A load asked for mid-read runs once after it, so overlapping reads do not pile up.
     const running = new Map<EnvironmentId, { again: boolean }>();
