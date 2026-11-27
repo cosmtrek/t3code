@@ -418,6 +418,12 @@ export const createBot = Effect.fn("ForkBot.createBot")(function* (input: unknow
   return { botId: id };
 });
 
+/** A rule goes on its own line at the end, as a list item unless it already is one. */
+export function appendRule(role: string, rule: string): string {
+  const line = /^\s*(?:[-*+]|\d+[.)])\s/.test(rule) ? rule.trim() : `- ${rule.trim()}`;
+  return role.trim() === "" ? line : `${role.trimEnd()}\n${line}`;
+}
+
 const RoleInput = Schema.Struct({ botId: Schema.String, role: Schema.String });
 
 export const saveRole = Effect.fn("ForkBot.saveRole")(function* (input: unknown) {
@@ -963,6 +969,52 @@ export const reopenItem = Effect.fn("ForkBot.reopenItem")(function* (input: unkn
       detail: "That item does not exist.",
     });
   }
+  runtime.publish(bot.id);
+  return {};
+});
+
+const MemoryInput = Schema.Struct({ botId: Schema.String, memoryId: Schema.Number });
+
+/** Removes one memory note the user no longer wants the bot to keep. */
+export const forgetMemory = Effect.fn("ForkBot.forgetMemory")(function* (input: unknown) {
+  const runtime = yield* BotRuntime;
+  const decoded = yield* decode(MemoryInput, input);
+  const bot = yield* requireBot(decoded.botId);
+  if (!runtime.store().removeMemory(bot.id, decoded.memoryId)) {
+    return yield* new ForkHttpError({
+      status: 404,
+      code: "not_found",
+      detail: "That memory does not exist.",
+    });
+  }
+  runtime.publish(bot.id);
+  return {};
+});
+
+/** The user moves a note the bot filed as memory into its role, where a rule belongs. */
+export const moveMemoryToRole = Effect.fn("ForkBot.moveMemoryToRole")(function* (input: unknown) {
+  const runtime = yield* BotRuntime;
+  const decoded = yield* decode(MemoryInput, input);
+  const bot = yield* requireBot(decoded.botId);
+  const store = runtime.store();
+  const note = store.listMemory(bot.id).find((entry) => entry.id === decoded.memoryId);
+  if (note === undefined) {
+    return yield* new ForkHttpError({
+      status: 404,
+      code: "not_found",
+      detail: "That memory does not exist.",
+    });
+  }
+  const role = appendRule(yield* readRole(runtime.botsDir, bot.id), note.text);
+  if (role.length > ROLE_CHARS) {
+    return yield* badRequest(`Keep the role under ${ROLE_CHARS} characters.`, "role");
+  }
+  yield* Effect.tryPromise({
+    try: () => NodeFSP.writeFile(rolePath(runtime.botsDir, bot.id), role),
+    catch: internal,
+  });
+  store.removeMemory(bot.id, note.id);
+  store.enqueue(bot.id, `The user moved memory ${note.id} into your role.`, false, nowIso());
   runtime.publish(bot.id);
   return {};
 });

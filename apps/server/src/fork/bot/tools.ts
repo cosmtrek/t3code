@@ -42,6 +42,7 @@ import {
   tokenPath,
   withShown,
   ROLE_CHARS,
+  appendRule,
 } from "./operations.ts";
 import { renderNotebook } from "./packet.ts";
 import { describeSchedule, nextDueAt, parseSchedule } from "./routines.ts";
@@ -72,12 +73,14 @@ const FLAGS: Readonly<Record<string, FlagSpec>> = {
   "thread read": { values: ["limit"] },
 };
 
-const HELP = `t3bot <command> - everything you do goes through these.
+export const HELP = `t3bot <command> - everything you do goes through these.
 
   say <text> | say -             post to your chat with the user (- reads stdin)
   notebook                       print your items, threads, routines, memory
   role                           print your role: who you are, what you own, your rules
-  role edit -                    replace your role with stdin; the user may have to approve
+  role add <rule>                add one rule the user gave you to the end of your role
+  role edit -                    replace your whole role with stdin
+                                 both wait for the user's approval
 
   item add [--note <next step>] <title>
   item edit <id> [--title t] [--status open|waiting|done] [--note t]
@@ -89,7 +92,8 @@ const HELP = `t3bot <command> - everything you do goes through these.
   routine remove <id> | routine list
 
   memory add <text> | memory edit <id> <text> | memory remove <id>
-                                 one fact per note, ${MEMORY_BYTES} bytes in all
+                                 one fact you found per note, ${MEMORY_BYTES} bytes in all;
+                                 how you should act is a rule for your role, not memory
 
   thread start --project <path|name|id> [--item <id>] [--follow now|attention|routine]
                [--worktree] [--provider <instance>] [--model <model>] [--title t] <prompt>
@@ -207,6 +211,20 @@ export interface ToolCall {
  * Null when the call may run now. Otherwise it is refused, or stored as a question whose answer
  * runs this exact call, and the bot is told so.
  */
+/** What a new role adds and drops, so approving it does not mean rereading the whole role. */
+function roleChanges(before: string, after: string): string {
+  const lines = (text: string) => text.split("\n").filter((line) => line.trim() !== "");
+  const was = new Set(lines(before));
+  const now = new Set(lines(after));
+  const added = lines(after).filter((line) => !was.has(line));
+  const removed = lines(before).filter((line) => !now.has(line));
+  if (before.trim() === "") return after;
+  return [
+    ...(added.length > 0 ? ["Adds:", ...added] : []),
+    ...(removed.length > 0 ? [...(added.length > 0 ? [""] : []), "Removes:", ...removed] : []),
+  ].join("\n");
+}
+
 const gate = Effect.fn("ForkBot.gate")(function* (
   call: ToolCall,
   permission: Permission,
@@ -270,17 +288,31 @@ export const runTool = Effect.fn("ForkBot.runTool")(function* (input: ToolCall) 
     case "notebook":
       return renderNotebook(yield* readNotebook(botId));
     case "role": {
-      if (sub === undefined) return (yield* readRole(runtime.botsDir, botId)) || "(no role yet)";
-      if (sub !== "edit") return yield* fail("role | role edit -");
-      const role = textOf(rest, input.stdin);
-      if (role === "" || role.length > ROLE_CHARS) {
-        return yield* fail(`Give the whole role on stdin, under ${ROLE_CHARS} characters.`);
+      const current = yield* readRole(runtime.botsDir, botId);
+      if (sub === undefined) return current || "(no role yet)";
+      if (sub !== "edit" && sub !== "add")
+        return yield* fail("role | role add <rule> | role edit -");
+      const text = textOf(rest, input.stdin);
+      const role = sub === "add" ? appendRule(current, text) : text;
+      if (text === "" || role.length > ROLE_CHARS) {
+        return yield* fail(
+          sub === "add"
+            ? `Give the rule, keeping the role under ${ROLE_CHARS} characters.`
+            : `Give the whole role on stdin, under ${ROLE_CHARS} characters.`,
+        );
       }
+      if (role.trim() === current.trim()) return "Role unchanged.";
       // Its role is the user's word on what it does, so changing it always asks.
-      const asked = yield* gate(input, "ask", false, "replace its role", role);
+      const asked = yield* gate(
+        input,
+        "ask",
+        false,
+        sub === "add" ? "add to its role" : "change its role",
+        sub === "add" ? text : roleChanges(current, role),
+      );
       if (asked !== null) return asked;
       yield* Effect.promise(() => NodeFSP.writeFile(rolePath(runtime.botsDir, botId), role));
-      return touched("Role replaced.");
+      return touched(sub === "add" ? "Rule added to your role." : "Role replaced.");
     }
     case "item": {
       if (sub === "add") {

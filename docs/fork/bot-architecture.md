@@ -272,6 +272,7 @@ t3bot item|routine add|edit|done        notebook
 t3bot item list [--all]                 --all includes set-aside items
 t3bot memory add <text> | edit <id> <text> | remove <id>
                                         one note at a time, 4 KB in total
+t3bot role add <rule>                   one rule appended to the role; gated, see below
 t3bot role edit -                       whole role via stdin; gated, see below
 t3bot thread start --item N --project P --follow now|attention|routine
                    [--worktree] [--provider I] [--model M] -

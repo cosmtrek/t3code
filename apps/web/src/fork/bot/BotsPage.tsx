@@ -9,13 +9,13 @@ import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environ
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import {
   BotMessageSquareIcon,
+  ArrowUpToLineIcon,
   CheckIcon,
   CopyIcon,
   EllipsisIcon,
   ExternalLinkIcon,
   FileTextIcon,
   IdCardIcon,
-  MessageSquareIcon,
   PauseIcon,
   PencilIcon,
   PlayIcon,
@@ -39,6 +39,8 @@ import {
 } from "../../components/chat/runtimeModeConfig";
 import { AssistantSelectionToolbar } from "../../components/chat/AssistantSelectionToolbar";
 import ChatMarkdown from "../../components/ChatMarkdown";
+import { MessageCopyButton } from "../../components/chat/MessageCopyButton";
+import { MESSAGE_HEADING_LEVEL } from "../../components/chat/TimelineRowParts";
 import { HtmlRenderFrame } from "../../components/chat/HtmlRenderFrame";
 import { RightPanelResizeHandle } from "../../components/preview/RightPanelResizeHandle";
 import { Alert, AlertAction, AlertDescription } from "../../components/ui/alert";
@@ -101,8 +103,9 @@ import { EMPTY_SERVER_PROVIDERS, serverEnvironment } from "../../state/server";
 import { ForkApiError, forkRequest } from "../forkApiAccess";
 import { DelegateModelPicker } from "../inbox/DelegateDialog";
 import { IconAction } from "../inbox/IconAction";
+import { requestConfirmDialog } from "../../confirmDialog";
 import { PaneHeader } from "../inbox/PaneHeader";
-import { formatSince } from "../presentation";
+import { formatSince, formatSpan, useFormatTimestamp } from "../presentation";
 import type {
   BotActivity,
   BotChatMessage,
@@ -568,6 +571,7 @@ function BotChat({
                 message={message}
                 environmentId={environmentId}
                 botId={botId}
+                workThreadId={workThreadId}
               />
             ))}
             {data?.questions.map((question) => (
@@ -705,41 +709,48 @@ function WorkingRow({
   );
 }
 
+/** Drawn as a thread's timeline draws its messages, so the two read the same. */
 function ChatLine({
   message,
   environmentId,
   botId,
+  workThreadId,
 }: {
   readonly message: BotChatMessage;
   readonly environmentId: EnvironmentId;
   readonly botId: string;
+  /** Where the bot wrote its replies: images and files they name load through it. */
+  readonly workThreadId: string | null;
 }) {
   if (message.role === "user") {
+    const waiting = message.turnRunId === null;
     return (
-      <div className="flex flex-col items-end gap-1">
-        <div className="max-w-[85%] rounded-2xl bg-secondary px-3.5 py-2">
+      <div className="group flex flex-col items-end gap-1">
+        <div className="max-w-[80%] min-w-0 rounded-2xl bg-message p-3 text-message-foreground">
           {/* As a thread draws a user message, so citations show as their cards. */}
           <ChatMarkdown
             text={message.text}
             cwd={undefined}
             environmentId={environmentId}
-            className="text-sm user-message-markdown"
+            className="text-message-foreground user-message-markdown"
             lineBreaks
             parseRawHtml={false}
             extensions={USER_MESSAGE_MARKDOWN}
           />
         </div>
-        <span className="text-xs text-muted-foreground">
-          {message.turnRunId === null ? "Waiting for the bot" : formatSince(message.createdAt)}
-        </span>
+        {waiting ? (
+          <span className="pe-1 text-xs text-muted-foreground">Waiting for the bot</span>
+        ) : (
+          <MessageMeta text={message.text} createdAt={message.createdAt} />
+        )}
       </div>
     );
   }
   if (message.role === "error") {
-    return <p className="text-sm text-destructive-foreground">{message.text}</p>;
+    return <p className="px-1 text-sm text-destructive-foreground">{message.text}</p>;
   }
   return (
-    <div className="flex flex-col gap-3">
+    <div className="group flex min-w-0 flex-col gap-3 px-1">
       {message.renders?.map((render) => (
         <div key={render.attachmentId} className="html-preview-lane min-w-0">
           <HtmlRenderFrame
@@ -750,19 +761,40 @@ function ChatLine({
         </div>
       ))}
       {message.text === "" ? null : (
-        <div
-          data-assistant-citation-source={message.id}
-          data-assistant-citation-environment={environmentId}
-          data-assistant-citation-thread={botId}
-        >
-          <ChatMarkdown
-            text={message.text}
-            cwd={undefined}
-            environmentId={environmentId}
-            className="text-sm"
-          />
+        <div className="flex flex-col gap-1.5">
+          <div
+            data-assistant-citation-source={message.id}
+            data-assistant-citation-environment={environmentId}
+            data-assistant-citation-thread={botId}
+          >
+            <ChatMarkdown
+              text={message.text}
+              cwd={undefined}
+              environmentId={environmentId}
+              threadRef={
+                workThreadId === null
+                  ? undefined
+                  : scopeThreadRef(environmentId, ThreadId.make(workThreadId))
+              }
+              headingLevelOffset={MESSAGE_HEADING_LEVEL}
+            />
+          </div>
+          <MessageMeta text={message.text} createdAt={message.createdAt} />
         </div>
       )}
+    </div>
+  );
+}
+
+/** Copy and the time, on hover as the timeline shows them; always shown on touch screens. */
+function MessageMeta({ text, createdAt }: { readonly text: string; readonly createdAt: string }) {
+  const formatTimestamp = useFormatTimestamp();
+  return (
+    <div className="flex items-center gap-2 pe-1 opacity-0 transition-opacity duration-200 group-hover:opacity-100 focus-within:opacity-100 pointer-coarse:opacity-100">
+      <MessageCopyButton text={text} variant="ghost" />
+      <span className="text-xs text-muted-foreground tabular-nums">
+        {formatTimestamp(createdAt)}
+      </span>
     </div>
   );
 }
@@ -779,6 +811,9 @@ function scheduleLabel(schedule: BotNotebook["routines"][number]["schedule"]) {
     : `${days.map((day) => DAY_NAMES[day]).join(", ")} ${schedule.time}`;
 }
 
+/** "3h", as the sidebar dates threads. */
+const shortSince = (iso: string) => formatSpan(Date.now() - Date.parse(iso));
+
 /** A clickable profile row; the negative margin keeps its text aligned with plain rows. */
 const PROFILE_ROW =
   "-mx-1.5 min-w-0 cursor-pointer rounded-md px-1.5 py-1 text-left outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset";
@@ -786,11 +821,14 @@ const PROFILE_ROW =
 function NotebookSection({
   title,
   count,
+  hint,
   action,
   children,
 }: {
   readonly title: string;
   readonly count?: number;
+  /** Who writes this part, shown beside its title. */
+  readonly hint?: string;
   readonly action?: ReactNode;
   readonly children?: ReactNode;
 }) {
@@ -802,6 +840,7 @@ function NotebookSection({
           {count !== undefined ? (
             <span className="font-normal text-muted-foreground tabular-nums">{count}</span>
           ) : null}
+          {hint ? <span className="font-normal text-muted-foreground">{hint}</span> : null}
         </h3>
         {action}
       </div>
@@ -810,30 +849,28 @@ function NotebookSection({
   );
 }
 
-const CLAMP = { 3: "line-clamp-3", 4: "line-clamp-4" } as const;
+/** A narrow panel: headings stay below the section titles and paragraphs close; `!` beats the unlayered chat-markdown rules. */
+const PROFILE_MARKDOWN =
+  "text-sm [&_:is(h1,h2,h3,h4,h5,h6)]:mt-3! [&_:is(h1,h2,h3,h4,h5,h6)]:mb-1! [&_:is(h1,h2,h3,h4,h5,h6)]:text-sm! [&_:is(p,ul,ol)]:my-1.5! [&>:first-child]:mt-0!";
 
-/** Long text shows its first lines; "more" appears only when something is cut. */
-function ClampedText({
-  text,
-  lines,
-  className,
-}: {
-  readonly text: string;
-  readonly lines: keyof typeof CLAMP;
-  readonly className?: string;
-}) {
+/** Long content shows its start under a fade; "Show more" appears only when something is cut. */
+function Collapsed({ children }: { readonly children: ReactNode }) {
   const [expanded, setExpanded] = useState(false);
   const [cut, setCut] = useState(false);
   return (
-    <div className="flex flex-col items-start gap-0.5">
-      <p
+    <div className="flex flex-col items-start gap-1">
+      <div
         ref={(node) => {
           if (node && !expanded) setCut(node.scrollHeight > node.clientHeight + 1);
         }}
-        className={cn("whitespace-pre-wrap wrap-anywhere", !expanded && CLAMP[lines], className)}
+        className={cn(
+          "w-full min-w-0",
+          !expanded && "max-h-44 overflow-hidden",
+          !expanded && cut && "mask-b-from-50%",
+        )}
       >
-        {text}
-      </p>
+        {children}
+      </div>
       {cut || expanded ? (
         <button
           type="button"
@@ -844,6 +881,101 @@ function ClampedText({
         </button>
       ) : null}
     </div>
+  );
+}
+
+/** Memory past this many notes waits behind "Show all"; the bot keeps it short by design. */
+const MEMORY_SHOWN = 5;
+
+function MemoryList({
+  memory,
+  busy,
+  onForget,
+  onMoveToRole,
+}: {
+  readonly memory: BotNotebook["memory"];
+  readonly busy: boolean;
+  readonly onForget: (id: number) => void;
+  readonly onMoveToRole: (id: number) => void;
+}) {
+  const [all, setAll] = useState(false);
+  const shown = all ? memory : memory.slice(0, MEMORY_SHOWN);
+  return (
+    <>
+      <ul className="-mx-1.5 flex flex-col">
+        {shown.map((note) => (
+          <MemoryRow
+            key={note.id}
+            text={note.text}
+            busy={busy}
+            onForget={() => onForget(note.id)}
+            onMoveToRole={() => onMoveToRole(note.id)}
+          />
+        ))}
+      </ul>
+      {memory.length > MEMORY_SHOWN ? (
+        <button
+          type="button"
+          onClick={() => setAll(!all)}
+          className="self-start text-xs text-muted-foreground hover:text-foreground"
+        >
+          {all ? "Show fewer" : `Show all ${memory.length}`}
+        </button>
+      ) : null}
+    </>
+  );
+}
+
+/** Text past two lines opens on a click; nothing changes when it already fits. */
+function ClampedLines({ text, className }: { readonly text: string; readonly className?: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const [cut, setCut] = useState(false);
+  return (
+    <p
+      ref={(node) => {
+        if (node && !expanded) setCut(node.scrollHeight > node.clientHeight + 1);
+      }}
+      onClick={cut || expanded ? () => setExpanded(!expanded) : undefined}
+      className={cn(
+        "min-w-0 whitespace-pre-wrap wrap-anywhere",
+        !expanded && "line-clamp-2",
+        (cut || expanded) && "cursor-pointer",
+        className,
+      )}
+    >
+      {text}
+    </p>
+  );
+}
+
+/** One remembered fact, with a way to forget it or move a rule filed here into the role. */
+function MemoryRow({
+  text,
+  busy,
+  onForget,
+  onMoveToRole,
+}: {
+  readonly text: string;
+  readonly busy: boolean;
+  readonly onForget: () => void;
+  readonly onMoveToRole: () => void;
+}) {
+  return (
+    <li className="group/memory flex min-w-0 items-start gap-1 rounded-md py-1 ps-1.5 pe-0.5 hover:bg-accent">
+      <span
+        aria-hidden
+        className="mt-[calc(0.5lh-2px)] size-1 shrink-0 rounded-full bg-muted-foreground/50"
+      />
+      <ClampedLines text={text} className="flex-1 ps-1 text-xs leading-relaxed" />
+      <span className="-my-0.5 flex opacity-0 group-hover/memory:opacity-100 focus-within:opacity-100 pointer-coarse:opacity-100">
+        <IconAction label="Move to role: it is a rule" disabled={busy} onClick={onMoveToRole}>
+          <ArrowUpToLineIcon />
+        </IconAction>
+        <IconAction label="Forget" disabled={busy} onClick={onForget}>
+          <Trash2Icon />
+        </IconAction>
+      </span>
+    </li>
   );
 }
 
@@ -907,14 +1039,26 @@ function NotebookPanel({
     });
   const runNow = (routineId: number) =>
     void post(`routine:${routineId}`, "/bots/routine/run", { routineId });
+  const forget = async (memoryId: number) => {
+    const message = "Forget this memory? The bot will no longer know it.";
+    const confirmed =
+      (await requestConfirmDialog(message, { variant: "destructive" })) ?? window.confirm(message);
+    if (confirmed) await post(`memory:${memoryId}`, "/bots/memory/forget", { memoryId });
+  };
   const open = notebook.items.filter((item) => item.status !== "done" && !item.setAside);
   const setAside = notebook.items.filter((item) => item.status !== "done" && item.setAside);
-  const unlinked = notebook.threads.filter((thread) => thread.itemId === null);
+  // Threads outside an item never leave the notebook, so a finished one folds away.
+  const unlinked = notebook.threads.filter(
+    (thread) => thread.itemId === null && (ACTIVE_RUN.has(thread.status) || thread.takenOver),
+  );
+  const finished = notebook.threads.filter(
+    (thread) => thread.itemId === null && !ACTIVE_RUN.has(thread.status) && !thread.takenOver,
+  );
   const connectors = detail.connectors.filter(
     (instance) => detail.bot.settings.connectors[instance.id]?.enabled === true,
   );
   const empty = [
-    open.length === 0 && unlinked.length === 0 && "No work",
+    open.length === 0 && unlinked.length === 0 && finished.length === 0 && "No work",
     notebook.routines.length === 0 && "No routines",
     notebook.memory.length === 0 && "No memory",
     detail.notes.length === 0 && "No notes",
@@ -940,23 +1084,23 @@ function NotebookPanel({
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
         {error ? <p className="px-3 pt-2 text-xs text-destructive-foreground">{error}</p> : null}
         <RoleEditor key={botId} environmentId={environmentId} botId={botId} role={role} />
-        {open.length > 0 || unlinked.length > 0 ? (
-          <NotebookSection title="Work" count={open.length}>
+        {open.length > 0 || unlinked.length > 0 || finished.length > 0 ? (
+          <NotebookSection title="Work" count={open.length + unlinked.length}>
             {open.map((item) => (
-              <div key={item.id} className="flex flex-col gap-0.5">
-                <div className="flex min-w-0 items-center gap-1.5 text-sm">
-                  <span className="w-4.5 shrink-0 text-xs text-muted-foreground tabular-nums">
-                    #{item.id}
-                  </span>
+              <div key={item.id} className="flex flex-col gap-1 pb-1">
+                <div className="flex min-w-0 items-center gap-2 text-sm">
                   <span className="min-w-0 flex-1 truncate">{item.title}</span>
                   {item.status === "waiting" ? (
                     <Badge size="sm" variant="warning">
                       Waiting
                     </Badge>
                   ) : null}
+                  <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
+                    {shortSince(item.updatedAt)}
+                  </span>
                 </div>
                 {item.note ? (
-                  <p className="ps-6 text-xs text-muted-foreground wrap-anywhere">{item.note}</p>
+                  <ClampedLines text={item.note} className="text-xs text-muted-foreground" />
                 ) : null}
                 {notebook.threads
                   .filter((thread) => thread.itemId === item.id)
@@ -980,15 +1124,24 @@ function NotebookPanel({
                 busy={pending !== null}
               />
             ))}
+            {finished.length > 0 ? (
+              <FinishedThreads
+                threads={finished}
+                onOpen={openThread}
+                onHandBack={handBack}
+                busy={pending !== null}
+              />
+            ) : null}
           </NotebookSection>
         ) : null}
         {setAside.length > 0 ? (
           <NotebookSection title="Set aside" count={setAside.length}>
             {setAside.map((item) => (
-              <div key={item.id} className="flex min-w-0 items-center gap-1.5 text-sm">
-                <span className="w-4.5 shrink-0 text-xs text-muted-foreground tabular-nums">
-                  #{item.id}
-                </span>
+              <div
+                key={item.id}
+
+                className="flex min-w-0 items-center gap-1.5 text-sm"
+              >
                 <span className="min-w-0 flex-1 truncate text-muted-foreground">{item.title}</span>
                 <Button
                   size="xs"
@@ -1029,14 +1182,15 @@ function NotebookPanel({
           </NotebookSection>
         ) : null}
         {notebook.memory.length > 0 ? (
-          <NotebookSection title="Memory" count={notebook.memory.length}>
-            <ul className="flex flex-col gap-2">
-              {notebook.memory.map((note) => (
-                <li key={note.id} className="border-l-2 ps-2">
-                  <ClampedText text={note.text} lines={3} className="text-xs leading-relaxed" />
-                </li>
-              ))}
-            </ul>
+          <NotebookSection title="Memory" count={notebook.memory.length} hint="· facts it found">
+            <MemoryList
+              memory={notebook.memory}
+              busy={pending !== null}
+              onForget={forget}
+              onMoveToRole={(memoryId) =>
+                void post(`memory:${memoryId}`, "/bots/memory/to-role", { memoryId })
+              }
+            />
           </NotebookSection>
         ) : null}
         {detail.notes.length > 0 ? (
@@ -1770,6 +1924,39 @@ const FOLLOW_LABELS = {
   routine: "only at its routines",
 } as const;
 
+const ACTIVE_RUN = new Set(["preparing", "queued", "starting", "running", "waiting"]);
+const STOPPED_RUN = new Set(["failed", "interrupted", "cancelled"]);
+
+/** Finished threads outside an item, newest first, behind one line until asked for. */
+function FinishedThreads({
+  threads,
+  ...rest
+}: {
+  readonly threads: BotNotebook["threads"];
+  readonly onOpen: (threadId: string) => void;
+  readonly onHandBack: (threadId: string) => void;
+  readonly busy: boolean;
+}) {
+  const [shown, setShown] = useState(false);
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setShown(!shown)}
+        className="self-start text-xs text-muted-foreground hover:text-foreground"
+      >
+        {shown ? "Hide finished threads" : `${threads.length} finished threads`}
+      </button>
+      {shown
+        ? threads
+            .toReversed()
+            .map((thread) => <ThreadLink key={thread.threadId} thread={thread} {...rest} />)
+        : null}
+    </>
+  );
+}
+
+/** A thread under its item: whether it still runs, and when it started. */
 function ThreadLink({
   thread,
   onOpen,
@@ -1781,19 +1968,30 @@ function ThreadLink({
   readonly onHandBack: (threadId: string) => void;
   readonly busy: boolean;
 }) {
+  const active = ACTIVE_RUN.has(thread.status);
+  const stopped = STOPPED_RUN.has(thread.status);
   return (
-    <div className="flex min-w-0 items-center gap-1.5 ps-6 text-xs text-muted-foreground">
+    <div className="flex min-w-0 items-center gap-2 text-xs">
       <Tooltip>
         <TooltipTrigger
           render={
             <button
               type="button"
               onClick={() => onOpen(thread.threadId)}
-              className="flex min-w-0 flex-1 items-center gap-1.5 text-left hover:text-foreground"
+              className={cn(
+                "flex min-w-0 flex-1 items-center gap-2 text-left hover:text-foreground",
+                active ? "text-foreground" : "text-muted-foreground",
+              )}
             />
           }
         >
-          <MessageSquareIcon className="size-3 shrink-0" />
+          <span
+            aria-hidden
+            className={cn(
+              "size-1.5 shrink-0 rounded-full",
+              active ? "bg-info" : stopped ? "bg-destructive" : "bg-muted-foreground/40",
+            )}
+          />
           <span className="min-w-0 flex-1 truncate">{thread.title ?? "Untitled thread"}</span>
         </TooltipTrigger>
         <TooltipPopup side="top">Wakes the bot {FOLLOW_LABELS[thread.follow]}</TooltipPopup>
@@ -1807,7 +2005,15 @@ function ThreadLink({
         >
           Hand back
         </Button>
-      ) : null}
+      ) : active ? (
+        <span className="shrink-0 text-info-foreground">Working</span>
+      ) : stopped ? (
+        <span className="shrink-0 text-destructive-foreground">Stopped</span>
+      ) : (
+        <span className="shrink-0 text-muted-foreground tabular-nums">
+          {shortSince(thread.createdAt)}
+        </span>
+      )}
     </div>
   );
 }
@@ -1849,6 +2055,7 @@ function RoleEditor({
     return (
       <NotebookSection
         title="Role"
+        hint="· set by you"
         action={
           <IconAction label="Edit role" onClick={() => setDraft(role)}>
             <PencilIcon />
@@ -1860,14 +2067,21 @@ function RoleEditor({
             Not set. Say what this bot is responsible for and its rules.
           </p>
         ) : (
-          <ClampedText text={role} lines={4} className="text-sm" />
+          <Collapsed>
+            <ChatMarkdown
+              text={role}
+              cwd={undefined}
+              headingLevelOffset={3}
+              className={PROFILE_MARKDOWN}
+            />
+          </Collapsed>
         )}
       </NotebookSection>
     );
   }
 
   return (
-    <NotebookSection title="Role">
+    <NotebookSection title="Role" hint="· set by you">
       <Textarea
         autoFocus
         value={value}
@@ -1875,6 +2089,10 @@ function RoleEditor({
         onChange={(event) => setDraft(event.target.value)}
         onKeyDown={(event) => {
           if (event.key === "Escape") cancel();
+          if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && draft !== role) {
+            event.preventDefault();
+            void save();
+          }
         }}
         className="min-h-32"
       />

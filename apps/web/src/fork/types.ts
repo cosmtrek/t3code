@@ -438,6 +438,9 @@ export interface BotNotebook {
     readonly itemId: number | null;
     readonly follow: "now" | "attention" | "routine";
     readonly title: string | null;
+    readonly createdAt: string;
+    /** Its latest run's status, as the bot last saw it. */
+    readonly status: string;
     /** The user typed in it; it is theirs until they hand it back. */
     readonly takenOver: boolean;
   }>;

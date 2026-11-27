@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off - node:sqlite is synchronous; a separate small file keeps fork data out of the main database.
+// @effect-diagnostics nodeBuiltinImport:off globalDate:off - node:sqlite is synchronous and a separate small file keeps fork data out of the main database; times are stored as ISO text.
 /**
  * What bots keep that T3 does not: the bots themselves, each one's chat with the user, and the
  * turn it is running. Its own file, like the inbox's, so the main database carries no fork tables.

@@ -59,16 +59,23 @@ edit every part of it on the Bots page.
 
 | Part     | Holds                                                                                               |
 | -------- | --------------------------------------------------------------------------------------------------- |
-| Role     | Who it is, what it is responsible for, and how to behave, in the user's terms, including its rules  |
+| Role     | What the user wants from it: its job, scope, and rules for how to act. The user owns it             |
 | Scope    | Projects it may work in and read                                                                    |
 | Routines | Its own scheduled tasks ("09:00 daily: open PRs and CI"), which it creates and edits itself         |
 | Items    | Concrete pieces of work, one line each with status, next step, linked threads, and what it waits on |
-| Memory   | Lasting notes, one fact per line, at most 4 KB: preferences, project conventions, past mistakes     |
+| Memory   | Facts the bot found, one per line, at most 4 KB: paths, ids, who owns what, how things are set up   |
 | Notes    | Longer Markdown files in the bot's own folder, read when needed; memory lines can point to them     |
 | Skills   | How-tos the bot writes for itself as `SKILL.md` folders, its own or shared with every bot           |
 
-Role, routines, and items are written by the bot from the conversation and corrected by the user
-either by telling the bot or by editing the file. An item that waits on someone outside the bot is
+The line between role and memory is who decides. A rule the user states ("always", "never", "ask me
+before") goes in the role, which the bot changes only with the user's approval: `role add` appends
+one rule, so approving it means reading one line. What the bot learns about the world goes in
+memory, which it keeps up itself. Steps for how to do a task go in a skill, even when the user gave
+them. A rule the bot filed as memory has **Move to role** on the Bots page. The
+[bot-notebook eval](../../evals/bot-notebook/) checks this split.
+
+Routines and items are written by the bot from the conversation and corrected by the user either by
+telling the bot or by editing them. An item that waits on someone outside the bot is
 a line in it (`waiting: product confirms the copy`), not a separate state.
 
 Each routine has **Run now** on the Bots page, to try a new routine or rerun one without waiting

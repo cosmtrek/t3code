@@ -9,6 +9,7 @@ import {
   emptyListTitle,
   lastMessageLine,
   looksLikeMarkdown,
+  plainPreview,
   mentionablePeople,
   mentionParts,
   mentionSuggestions,
@@ -400,5 +401,16 @@ describe("looksLikeMarkdown", () => {
     expect(looksLikeMarkdown("ok, ship it #123")).toBe(false);
     expect(looksLikeMarkdown("@Zhang San 看下 https://example.com/x?a=1")).toBe(false);
     expect(looksLikeMarkdown("3*4 = 12, a_b_c")).toBe(false);
+  });
+});
+
+describe("plainPreview", () => {
+  it("drops Markdown marks but keeps underscores inside names", () => {
+    expect(plainPreview("### 1. **`plugin_gw` 真实调用**\n> _note_ TRUSTED_CALLERS")).toBe(
+      "1. plugin_gw 真实调用\nnote TRUSTED_CALLERS",
+    );
+    expect(
+      plainPreview("结构图：![Bot 结构图](/home/user/a.png) 见 [文档](https://example.com)"),
+    ).toBe("结构图：Bot 结构图 见 文档");
   });
 });

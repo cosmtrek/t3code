@@ -22,7 +22,7 @@ import { useQuietThreadShells } from "../../state/entities";
 import { CreateBotDialog, rememberBot } from "../bot/BotsPage";
 import { FollowUpStatus } from "../inbox/InboxList";
 import { NEEDS_YOU_STATUSES, SIDEBAR_STATUS, StatusLabel } from "../inbox/DelegationPane";
-import { agoLabel, lastMessageLine, minuteToMs } from "../inbox/inboxView";
+import { agoLabel, lastMessageLine, minuteToMs, plainPreview } from "../inbox/inboxView";
 import { useInboxOverviews } from "../inbox/useInboxOverviews";
 import { UnreadCount } from "../presentation";
 import type { BotSummary } from "../types";
@@ -219,8 +219,6 @@ function GroupRow({
     </li>
   );
 }
-
-const plainPreview = (text: string) => text.replace(/[`*_#>]/g, "").trim();
 
 function BotsGroup({ listings }: { readonly listings: ReadonlyArray<EnvironmentBots> }) {
   const navigate = useNavigate();

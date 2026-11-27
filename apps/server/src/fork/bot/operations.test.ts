@@ -1352,3 +1352,87 @@ describe("activityLine", () => {
     ).toBeNull();
   });
 });
+
+describe("bot role", () => {
+  it.effect("adds one rule the user approves, and shows only what an edit changes", () =>
+    withHarness((h) =>
+      Effect.gen(function* () {
+        const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+        const store = h.runtime.store();
+        const roleOf = () => NodeFSP.readFile(Bots.rolePath(h.runtime.botsDir, botId), "utf8");
+        const approveLast = () => {
+          const question = store.openQuestions(botId).at(-1)!;
+          return answerQuestion({ botId, questionId: question.id, approve: true }).pipe(
+            Effect.as(question.text),
+          );
+        };
+
+        yield* Bots.saveRole({ botId, role: "Watch CI.\n\n## Rules\n- Ask before main." });
+        yield* runTool({
+          bot: botId,
+          argv: ["role", "add", "Never run bare t3 update."],
+          stdin: "",
+        });
+        expect(yield* approveLast()).toBe("add to its role\n\nNever run bare t3 update.");
+        expect(yield* Effect.promise(roleOf)).toBe(
+          "Watch CI.\n\n## Rules\n- Ask before main.\n- Never run bare t3 update.",
+        );
+
+        yield* runTool({
+          bot: botId,
+          argv: ["role", "edit", "-"],
+          stdin:
+            "Watch CI and releases.\n\n## Rules\n- Ask before main.\n- Never run bare t3 update.",
+        });
+        expect(yield* approveLast()).toBe(
+          "change its role\n\nAdds:\nWatch CI and releases.\n\nRemoves:\nWatch CI.",
+        );
+        expect(
+          yield* runTool({
+            bot: botId,
+            argv: ["role", "edit", "-"],
+            stdin: yield* Effect.promise(roleOf),
+          }),
+        ).toBe("Role unchanged.");
+      }),
+    ),
+  );
+});
+
+describe("bot memory", () => {
+  it.effect("forgets a note the user removes, and only that bot's", () =>
+    withHarness((h) =>
+      Effect.gen(function* () {
+        const { botId } = yield* Bots.createBot({ name: "Release Watcher", modelSelection: MODEL });
+        const store = h.runtime.store();
+        const kept = store.addMemory(botId, "Releases ship from r/main.");
+        const dropped = store.addMemory(botId, "Old host is gone.");
+
+        yield* Bots.forgetMemory({ botId, memoryId: dropped });
+        expect(store.listMemory(botId)).toEqual([{ id: kept, text: "Releases ship from r/main." }]);
+
+        const missing = yield* Bots.forgetMemory({ botId, memoryId: dropped }).pipe(Effect.flip);
+        expect(missing.status).toBe(404);
+      }),
+    ),
+  );
+
+  it.effect("moves a rule filed as memory into the role", () =>
+    withHarness((h) =>
+      Effect.gen(function* () {
+        const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+        const store = h.runtime.store();
+        yield* Bots.saveRole({ botId, role: "Watch CI." });
+        const rule = store.addMemory(botId, "Never run bare t3 update.");
+
+        yield* Bots.moveMemoryToRole({ botId, memoryId: rule });
+        expect(store.listMemory(botId)).toEqual([]);
+        expect(
+          yield* Effect.promise(() =>
+            NodeFSP.readFile(Bots.rolePath(h.runtime.botsDir, botId), "utf8"),
+          ),
+        ).toBe("Watch CI.\n- Never run bare t3 update.");
+      }),
+    ),
+  );
+});
