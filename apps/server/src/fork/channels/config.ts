@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off globalDate:off globalTimers:off globalFetch:off extendsNativeError:off - Runs outside the Effect runtime: adapter sockets, timers, and plain callbacks.
+// @effect-diagnostics nodeBuiltinImport:off globalDate:off extendsNativeError:off - Runs outside the Effect runtime: adapter sockets, timers, and plain callbacks.
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";

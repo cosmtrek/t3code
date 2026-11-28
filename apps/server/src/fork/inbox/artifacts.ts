@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off globalDate:off - Context folders are plain files an agent writes; the inbox reads and writes them outside Effect.
+// @effect-diagnostics nodeBuiltinImport:off - Context folders are plain files an agent writes; the inbox reads and writes them outside Effect.
 /**
  * Files a delegated thread reports back through. Each thread gets its own folder under the item,
  * `items/<itemId>/<thread>/`, so a newer delegation never shows, and an older thread never

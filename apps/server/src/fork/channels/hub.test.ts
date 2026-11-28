@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off globalDate:off - Exercises the plain-TypeScript hub with temporary files.
+// @effect-diagnostics nodeBuiltinImport:off - Exercises the plain-TypeScript hub with temporary files.
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";

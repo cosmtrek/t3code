@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off globalDate:off globalTimers:off globalFetch:off extendsNativeError:off - Runs outside the Effect runtime: adapter sockets, timers, and plain callbacks.
+// @effect-diagnostics globalDate:off globalTimers:off - Runs outside the Effect runtime: adapter sockets, timers, and plain callbacks.
 /**
  * The built-in example channel: protocol v2 served in process from made-up data, for
  * development, tests, screenshots, and trying the inbox without a real adapter.
