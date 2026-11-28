@@ -33,6 +33,17 @@ git push --force-with-lease origin r/main
 
 Then run `git rebase r/main` on any personal branch that has not landed yet.
 
+Before pushing, hold the fork's code to upstream's current rules. Run typecheck, lint and knip
+on the result, then list every rule opt-out the fork adds:
+
+```bash
+git diff v0.1.9 r/main -U0 | grep -E '^\+\+\+|^\+.*(@effect-diagnostics|oxlint-disable|@ts-expect-error|as any)'
+```
+
+Rewrite code to follow the rule wherever it can. Keep an opt-out only when the code cannot follow
+the rule (a script serialized to run without Effect, say), and say why in the comment, as upstream
+does.
+
 Every sync ends with a release on all three surfaces: the server CLI and macOS desktop
 (`X.Y.Z-r.1`, see Releases) and the Android app (next mobile version, see Android builds).
 
