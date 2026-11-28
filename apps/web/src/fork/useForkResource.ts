@@ -1,17 +1,11 @@
 import type { EnvironmentId } from "@t3tools/contracts";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 
-import { ForkApiError, forkRequest, subscribeForkEvents } from "./forkApiAccess";
+import { ForkApiError } from "@t3tools/fork-client/http";
+import type { ForkEvent } from "@t3tools/fork-client/sse";
+import { forkRequest, subscribeForkEvents } from "./forkApiAccess";
 
-export interface ForkEvent {
-  readonly type: string;
-  readonly channelId?: string;
-  readonly botId?: string;
-  /** A `bot-activity` event's line, its tool call if it is one, and the thread it came from. */
-  readonly text?: string;
-  readonly step?: unknown;
-  readonly threadId?: string;
-}
+export type { ForkEvent } from "@t3tools/fork-client/sse";
 
 type Listener = (event: ForkEvent) => void;
 

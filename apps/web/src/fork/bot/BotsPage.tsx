@@ -101,7 +101,8 @@ import { cn } from "../../lib/utils";
 import { providerInstanceEntriesFor } from "../../providerInstances";
 import { useEnvironments } from "../../state/environments";
 import { EMPTY_SERVER_PROVIDERS, serverEnvironment } from "../../state/server";
-import { ForkApiError, forkRequest } from "../forkApiAccess";
+import { ForkApiError } from "@t3tools/fork-client/http";
+import { forkRequest } from "../forkApiAccess";
 import { DelegateModelPicker } from "../inbox/DelegateDialog";
 import { IconAction } from "../inbox/IconAction";
 import { requestConfirmDialog } from "../../confirmDialog";
@@ -118,7 +119,7 @@ import type {
   BotQuestion,
   BotSettings,
   BotSummary,
-} from "../types";
+} from "@t3tools/fork-client/bots";
 import { useProject, useQuietThreadShell } from "../../state/entities";
 import { botStep } from "./botStep";
 import { subscribeToForkEvents, useForkResource, type ForkEvent } from "../useForkResource";

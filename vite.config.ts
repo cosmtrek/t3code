@@ -606,8 +606,9 @@ export default defineConfig({
           "**/{test-fixtures,*TestFixtures}.ts",
           "apps/mobile/src/features/development/**",
           "packages/client-runtime/src/rpc/**",
-          // Fork-only inbox UI, not translated yet.
+          // Fork-only inbox and bot UI, not translated yet.
           "apps/web/src/fork/**",
+          "apps/mobile/src/fork/**",
         ],
         rules: { "t3code/no-untranslated-copy": "error" },
       },
@@ -680,6 +681,8 @@ export default defineConfig({
           "apps/mobile/src/features/threads/ThreadQueueControl.tsx",
           "apps/mobile/src/features/review/ReviewCommentCard.tsx",
           "apps/mobile/src/features/threads/thread-list-v2-items.tsx",
+          // The bot rows take the thread rows' appearance, which reads the theme.
+          "apps/mobile/src/fork/bots/ForkBotsGroup.tsx",
           "apps/mobile/src/components/ui/SecretTextInput.android.tsx",
           "apps/mobile/src/lib/useMobileNavigationTheme.ts",
           "apps/mobile/src/native/T3ComposerEditor.ios.tsx",

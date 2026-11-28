@@ -41,7 +41,8 @@ import { providerInstanceEntriesFor } from "../../providerInstances";
 import { useEnvironmentQuery } from "../../state/query";
 import { EMPTY_SERVER_PROVIDERS, serverEnvironment } from "../../state/server";
 import { vcsEnvironment } from "../../state/vcs";
-import { ForkApiError, forkRequest } from "../forkApiAccess";
+import { ForkApiError } from "@t3tools/fork-client/http";
+import { forkRequest } from "../forkApiAccess";
 import type {
   ConversationKind,
   DelegateOptions,

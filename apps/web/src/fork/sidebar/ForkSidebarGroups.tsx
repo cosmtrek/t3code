@@ -1,5 +1,13 @@
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
 import type { EnvironmentId } from "@t3tools/contracts";
+import {
+  botAttention,
+  botRowStatus,
+  botWorkThreadKeys,
+  type BotRowStatus,
+  type BotSummary,
+} from "@t3tools/fork-client/bots";
+import { plainPreview } from "@t3tools/fork-client/text";
 import { useLocation, useNavigate, useSearch } from "@tanstack/react-router";
 import * as Schema from "effect/Schema";
 import {
@@ -22,10 +30,9 @@ import { useQuietThreadShells } from "../../state/entities";
 import { CreateBotDialog, rememberBot } from "../bot/BotsPage";
 import { FollowUpStatus } from "../inbox/InboxList";
 import { NEEDS_YOU_STATUSES, SIDEBAR_STATUS, StatusLabel } from "../inbox/DelegationPane";
-import { agoLabel, lastMessageLine, minuteToMs, plainPreview } from "../inbox/inboxView";
+import { agoLabel, lastMessageLine, minuteToMs } from "../inbox/inboxView";
 import { useInboxOverviews } from "../inbox/useInboxOverviews";
 import { UnreadCount } from "../presentation";
-import type { BotSummary } from "../types";
 import { useEnvironmentReads } from "../useEnvironmentReads";
 import type { ForkEvent } from "../useForkResource";
 import { attentionItems, SIDEBAR_INBOX_ROWS, type AttentionItem } from "./sidebarAttention";
@@ -51,13 +58,7 @@ export function useBotSidebar(threads: ReadonlyArray<EnvironmentThreadShell>): {
   readonly threads: ReadonlyArray<EnvironmentThreadShell>;
 } {
   const botListings = useEnvironmentReads("/bots", toBots, isBotEvent);
-  const hidden = botListings
-    .flatMap((listing) =>
-      listing.bots.flatMap((bot) =>
-        bot.workThreadId === null ? [] : [`${listing.environmentId}:${bot.workThreadId}`],
-      ),
-    )
-    .join("\n");
+  const hidden = botWorkThreadKeys(botListings).join("\n");
   return { botListings, threads: withoutThreads(threads, hidden) };
 }
 
@@ -234,10 +235,14 @@ function BotsGroup({ listings }: { readonly listings: ReadonlyArray<EnvironmentB
     listing.bots.map((bot) => ({
       listing,
       bot,
-      thread:
-        bot.workThreadId === null
-          ? null
-          : (threadStatus.get(`${listing.environmentId}:${bot.workThreadId}`) ?? null),
+      status: botRowStatus(
+        bot,
+        blockedStatus(
+          bot.workThreadId === null
+            ? null
+            : (threadStatus.get(`${listing.environmentId}:${bot.workThreadId}`) ?? null),
+        ),
+      ),
     })),
   );
   const open = (environmentId: EnvironmentId | undefined, botId: string | undefined) => {
@@ -282,7 +287,7 @@ function BotsGroup({ listings }: { readonly listings: ReadonlyArray<EnvironmentB
         icon={<BotMessageSquareIcon />}
         label="Bots"
         collapsed={collapsed}
-        dot={mostPressing(rows.map(({ bot, thread }) => botDot(bot, thread)))}
+        dot={mostPressing(rows.map(({ status }) => botAttention(status)))}
         count={rows.length}
         onOpen={() => open(undefined, undefined)}
         onToggle={() => setCollapsed((value) => !value)}
@@ -290,7 +295,7 @@ function BotsGroup({ listings }: { readonly listings: ReadonlyArray<EnvironmentB
       />
       {collapsed
         ? null
-        : rows.map(({ listing, bot, thread }) => {
+        : rows.map(({ listing, bot, status }) => {
             const preview = bot.lastMessage
               ? plainPreview(bot.lastMessage.text)
               : "No messages yet";
@@ -298,7 +303,7 @@ function BotsGroup({ listings }: { readonly listings: ReadonlyArray<EnvironmentB
               <GroupRow
                 key={`${listing.environmentId}:${bot.id}`}
                 title={bot.name}
-                status={<BotStatus bot={bot} thread={thread} now={now} />}
+                status={<BotStatus status={status} now={now} />}
                 preview={named ? `${listing.label} · ${preview}` : preview}
                 active={
                   pathname === "/bots" &&
@@ -337,38 +342,31 @@ const mostPressing = (dots: ReadonlyArray<GroupDot | null>): GroupDot | null =>
 
 /** The work thread's status counts only when it waits on the user: the row stands for it. */
 const blockedStatus = (thread: SidebarThreadStatus | null) =>
-  thread !== null && NEEDS_YOU_STATUSES.has(thread) ? thread : null;
+  thread !== null && thread !== "ready" && NEEDS_YOU_STATUSES.has(thread) ? thread : null;
 
-function botDot(bot: BotSummary, thread: SidebarThreadStatus | null): GroupDot | null {
-  const blocked = blockedStatus(thread);
-  if (bot.questions > 0 || (blocked !== null && blocked !== "failed")) return "attention";
-  if (blocked === "failed") return "failed";
-  if (bot.unread > 0) return "unread";
-  return bot.working ? "working" : null;
-}
-
-/**
- * One status, the most pressing: a question, its thread waiting on the user, unread posts, work
- * under way, paused, or its age.
- */
 function BotStatus({
-  bot,
-  thread,
+  status,
   now,
 }: {
-  readonly bot: BotSummary;
-  readonly thread: SidebarThreadStatus | null;
+  readonly status: BotRowStatus<Exclude<SidebarThreadStatus, "ready">>;
   readonly now: number;
 }) {
-  const blocked = blockedStatus(thread);
-  if (bot.questions > 0) return <StatusLabel {...SIDEBAR_STATUS.input} />;
-  if (blocked !== null && blocked !== "ready") return <StatusLabel {...SIDEBAR_STATUS[blocked]} />;
-  if (bot.unread > 0) return <UnreadCount count={bot.unread} />;
-  if (bot.working) return <StatusLabel {...SIDEBAR_STATUS.working} />;
-  if (bot.paused) {
-    return <StatusLabel icon={PauseIcon} label="Paused" className="text-muted-foreground" />;
+  switch (status.kind) {
+    case "question":
+      return <StatusLabel {...SIDEBAR_STATUS.input} />;
+    case "blocked":
+      return <StatusLabel {...SIDEBAR_STATUS[status.status]} />;
+    case "unread":
+      return <UnreadCount count={status.count} />;
+    case "working":
+      return <StatusLabel {...SIDEBAR_STATUS.working} />;
+    case "paused":
+      return <StatusLabel icon={PauseIcon} label="Paused" className="text-muted-foreground" />;
+    case "age":
+      return <span>{agoLabel(status.at, now)}</span>;
+    case "none":
+      return null;
   }
-  return bot.lastMessage ? <span>{agoLabel(bot.lastMessage.createdAt, now)}</span> : null;
 }
 
 /** Each environment's threads waiting on the user, for follow-ups whose thread is blocked. */

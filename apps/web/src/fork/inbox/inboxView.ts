@@ -347,14 +347,6 @@ export function channelBanner(
 const MARKDOWN_SYNTAX =
   /^(?:#{1,6}\s+\S|\s*```|\s*(?:[-*+]|\d+[.)])\s+\S|>\s|\|.*\|\s*$)|`[^`\n]+`|\*\*[^*\n]+\*\*|\[[^\]\n]+\]\(https?:\/\//mu;
 
-/** One line of Markdown as plain text; `_` inside a word, as in `plugin_gw`, is not emphasis. */
-export const plainPreview = (text: string) =>
-  text
-    .replace(/!?\[([^\]\n]*)\]\([^)\n]*\)/g, "$1")
-    .replace(/^\s{0,3}(?:#{1,6}|>)\s+/gm, "")
-    .replace(/[`*]|(?<![\p{L}\p{N}])_+|_+(?![\p{L}\p{N}])/gu, "")
-    .trim();
-
 /** Plain text a person wrote in Markdown, which the chat app sends as text. */
 export const looksLikeMarkdown = (text: string) => MARKDOWN_SYNTAX.test(text);
 

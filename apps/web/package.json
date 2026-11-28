@@ -38,6 +38,7 @@
     "@pierre/words": "file:deps/pierre-words-0.2.2-t3.4-7c04b7f1.tgz",
     "@t3tools/client-runtime": "workspace:*",
     "@t3tools/contracts": "workspace:*",
+    "@t3tools/fork-client": "workspace:*",
     "@t3tools/provider-core": "workspace:*",
     "@t3tools/secret-provider-definitions": "workspace:*",
     "@t3tools/secret-provider-onepassword": "workspace:*",

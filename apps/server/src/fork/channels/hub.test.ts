@@ -6,6 +6,7 @@ import * as NodePath from "node:path";
 import { describe, expect, it } from "@effect/vitest";
 import * as Schema from "effect/Schema";
 import { vi } from "vite-plus/test";
+import { createSseParser } from "@t3tools/fork-client/sse";
 
 import {
   ChannelConfigError,
@@ -32,7 +33,6 @@ import {
   SendErrorCode,
   SendResult,
   Upload,
-  createSseParser,
   parseChannelEvent,
   type ChannelEvent,
 } from "./protocol.ts";

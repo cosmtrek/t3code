@@ -42,7 +42,8 @@ import { Switch } from "../../components/ui/switch";
 import { namedClipboardTarget, useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { cn } from "../../lib/utils";
 import { useEnvironments } from "../../state/environments";
-import { ForkApiError, forkRequest } from "../forkApiAccess";
+import { ForkApiError } from "@t3tools/fork-client/http";
+import { forkRequest } from "../forkApiAccess";
 import {
   CHANNEL_STATUS_LABELS,
   ChannelStatusDot,

@@ -2,7 +2,8 @@ import type { EnvironmentId } from "@t3tools/contracts";
 import { useEffect, useState } from "react";
 
 import { useEnvironments } from "../state/environments";
-import { ForkApiError, forkRequest } from "./forkApiAccess";
+import { ForkApiError } from "@t3tools/fork-client/http";
+import { forkRequest } from "./forkApiAccess";
 import { subscribeToForkEvents, type ForkEvent } from "./useForkResource";
 
 const REFRESH_DEBOUNCE_MS = 1_000;

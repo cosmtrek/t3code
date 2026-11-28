@@ -257,6 +257,8 @@ environment. Everything lives in fork-only directories:
 - Web: `apps/web/src/fork/`, plus the thin routes `_chat.inbox.tsx` and
   `_chat.settings.channels.tsx`. `forkApiAccess.ts` mints the per-environment media ticket, so
   remote environments work.
+- Shared client code: `packages/fork-client` holds the bot types and row status rules used by web
+  and mobile.
 - State: `<stateDir>/channels/` only (`channels.json`, `inbox.sqlite`, `items/<delegationId>/`). No
   contracts, `settings.json`, or main-database changes.
 

@@ -14,7 +14,8 @@ type RootParams = ReactNavigation.RootParamList;
 export type WorkspaceDetail =
   | { readonly name: "Thread"; readonly params: RootParams["Thread"] }
   | { readonly name: "PullRequest"; readonly params: RootParams["PullRequest"] }
-  | { readonly name: "Issue"; readonly params: RootParams["Issue"] };
+  | { readonly name: "Issue"; readonly params: RootParams["Issue"] }
+  | { readonly name: "Bot"; readonly params: RootParams["Bot"] };
 
 /** Android opens the reviewers sheet over the pull request in the same step. */
 export type WorkspaceDetailSheet = {
@@ -44,6 +45,7 @@ const IDENTITY = {
   Thread: ["environmentId", "threadId"],
   PullRequest: ["environmentId", "projectId", "repository", "number", "host"],
   Issue: ["environmentId", "projectId", "tracker", "host", "scope", "issueKey"],
+  Bot: ["environmentId", "botId"],
 } as const;
 
 type RouteLike = { readonly name: string; readonly key?: string; readonly params?: object };
@@ -104,14 +106,19 @@ export function workspaceDetailRouter<Action extends NavigationAction>(
   };
 }
 
-/** A link to a single thread, pull request or issue selects it, like its list row would. */
+/** A link to a single thread, pull request, issue or bot selects it, like its list row would. */
 export function workspaceDetailLinkAction(
   state: PartialState<NavigationState> | NavigationState,
 ): SelectWorkspaceDetailAction | undefined {
   const pages = state.routes.filter((route) => route.name !== "Home");
   const [page] = pages;
   if (pages.length !== 1 || !page || page.state) return undefined;
-  if (page.name !== "Thread" && page.name !== "PullRequest" && page.name !== "Issue")
+  if (
+    page.name !== "Thread" &&
+    page.name !== "PullRequest" &&
+    page.name !== "Issue" &&
+    page.name !== "Bot"
+  )
     return undefined;
   return selectWorkspaceDetail({ name: page.name, params: page.params } as WorkspaceDetail);
 }

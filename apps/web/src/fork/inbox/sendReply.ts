@@ -1,7 +1,8 @@
 import type { EnvironmentId } from "@t3tools/contracts";
 
 import { toastManager } from "../../components/ui/toast";
-import { ForkApiError, forkRequest } from "../forkApiAccess";
+import { ForkApiError } from "@t3tools/fork-client/http";
+import { forkRequest } from "../forkApiAccess";
 import type { ConversationResponse, InboxConversation, Mention, SendResult } from "../types";
 import { mentionablePeople, mentionsIn } from "./inboxView";
 
