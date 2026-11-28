@@ -372,9 +372,9 @@ nothing is tracked.
 - **Inbox bridge** (planned, not built): a bot as a follow-up's handler; see
   [Planned: bots](./inbox-design.md#planned-bots).
 - **Settings**: the bot (name, its model and effort, and the model its threads start on, its own
-  until set); permissions (permission mode; start and run threads, allow or ask; turns a day;
-  threads at once); one group per connector instance, such as each chat channel (use it, off for
-  a new bot; send messages ask or allow; signature; wake on my @-mentions); and Delete. Role edits
+  until set), permission mode and budgets (turns a day and threads at once), one group per
+  connector instance, such as each chat channel (use it, off for a new bot; send messages ask or
+  allow; signature; wake on my @-mentions), and Delete. Role edits
   always ask and have no row. Ids, not names, key its folder, token, and rows, so a rename moves
   nothing; its work thread is retitled and the bot is told. A move of its own model to another
   provider starts a fresh session, since every packet carries what a turn needs.

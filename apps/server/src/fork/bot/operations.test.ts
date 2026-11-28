@@ -338,6 +338,65 @@ const withChat = <E>(
     }),
   );
 
+describe("bot creation", () => {
+  it.effect("starts a turn with the brief as its first chat message", () =>
+    withHarness((h) =>
+      Effect.gen(function* () {
+        const brief = "Watch for new releases.\nAsk me before merging.";
+        const { botId } = yield* Bots.createBot({
+          name: "Release Watcher",
+          modelSelection: MODEL,
+          brief: `  ${brief}\n`,
+        });
+
+        expect(chatOf(h, botId)).toEqual([["user", brief]]);
+        expect(h.runs).toHaveLength(1);
+        expect(h.packets[0]).toContain(brief);
+
+        yield* endRun(h, botId, 0, "I'll watch for new releases.");
+
+        expect(h.runs).toHaveLength(1);
+        expect(chatOf(h, botId)).toEqual([
+          ["user", brief],
+          ["bot", "I'll watch for new releases."],
+        ]);
+      }),
+    ),
+  );
+
+  it.effect("creates an idle bot when the brief is omitted, null, or blank", () =>
+    withHarness((h) =>
+      Effect.gen(function* () {
+        for (const optional of [{}, { brief: null }, { brief: " \n\t " }]) {
+          const { botId } = yield* Bots.createBot({
+            name: "Bot",
+            modelSelection: MODEL,
+            ...optional,
+          });
+          expect(chatOf(h, botId)).toEqual([]);
+        }
+        expect(h.runs).toEqual([]);
+      }),
+    ),
+  );
+
+  it.effect("rejects an overlong brief before creating a bot or its files", () =>
+    withHarness((h) =>
+      Effect.gen(function* () {
+        const error = yield* Effect.flip(
+          Bots.createBot({ name: "Bot", modelSelection: MODEL, brief: "x".repeat(20_001) }),
+        );
+
+        expect(error).toMatchObject({ status: 400, code: "bad_request", field: "brief" });
+        expect(h.runtime.store().listBots()).toEqual([]);
+        expect(yield* Effect.promise(() => NodeFSP.readdir(h.runtime.botsDir))).toEqual([]);
+        expect(h.runtime.active.isOpen()).toBe(false);
+        expect(h.runs).toEqual([]);
+      }),
+    ),
+  );
+});
+
 describe("bot turns", () => {
   it.effect("answers each message in one turn at a time, in its one work thread", () =>
     withHarness((h) =>
@@ -633,6 +692,8 @@ describe("bot turns", () => {
     withHarness((h) =>
       Effect.gen(function* () {
         const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+        const read = () => Bots.readBot(new URLSearchParams({ botId }));
+        expect((yield* read()).bot.settings.turnsPerDay).toBe(200);
         yield* Bots.setPaused({ botId, paused: true });
         yield* Bots.sendMessage({ botId, text: "Hi" });
         expect(h.runs).toHaveLength(0);
@@ -653,7 +714,6 @@ describe("bot turns", () => {
             "Bot used its 1 turns for today. What happens meanwhile waits for tomorrow, or raise its budget.",
           ],
         ]);
-        const read = () => Bots.readBot(new URLSearchParams({ botId }));
         expect((yield* read()).bot.turnsToday).toBe(1);
 
         // One more turn a day lets the held messages run now.
@@ -859,34 +919,37 @@ describe("bot turns", () => {
             }),
           );
           expect(unknown.detail).toBe('No connector "lark" here.');
-
-          // A setting from before the threads switch: a denied action now asks, never allows.
-          store.setSettings(first.botId, {
-            permissions: { "thread.start": "deny", "thread.send": "allow" },
-          } as never);
-          expect(store.getBot(first.botId)!.settings.threads).toBe("ask");
         }),
       ),
   );
 
-  it("moves chat settings from before connectors onto each channel", () => {
+  it("keeps legacy chat settings and drops obsolete thread permissions", () => {
     const store = new BotStore(":memory:");
     store.createBot(
       { id: "bot_1", name: "Old", modelSelection: MODEL as never, createdAt: "2026-11-01" },
       "auto",
     );
     store.setSettings("bot_1", {
+      threads: "ask",
       channelsEnabled: true,
       signature: "-- {bot}",
       channels: { lark: { send: "allow", mentions: true, mentionsSince: "2026-11-02" } },
     } as never);
-    expect(store.getBot("bot_1")!.settings.connectors).toEqual({
+    const settings = store.getBot("bot_1")!.settings;
+    expect(settings).not.toHaveProperty("threads");
+    expect(settings.turnsPerDay).toBe(200);
+    expect(settings.connectors).toEqual({
       lark: {
         enabled: true,
         permissions: { send: "allow" },
         config: { signature: "-- {bot}", mentions: true, mentionsSince: "2026-11-02" },
       },
     });
+    store.setSettings("bot_1", {
+      permissions: { "thread.start": "deny", "thread.send": "allow" },
+    } as never);
+    expect(store.getBot("bot_1")!.settings).not.toHaveProperty("threads");
+    store.close();
   });
 
   it.effect("offers no chat where the environment has no chat channel", () =>
@@ -989,6 +1052,9 @@ describe("bot turns", () => {
       Effect.gen(function* () {
         const ownModel = { ...MODEL, options: [{ id: "effort", value: "medium" }] };
         const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: ownModel });
+        const store = h.runtime.store();
+        const legacySettings = { ...store.getBot(botId)!.settings, threads: "ask" };
+        store.setSettings(botId, legacySettings);
         h.projects.push({ id: "p1", title: "Repo", workspaceRoot: "/repo" });
         const start = (prompt: string) =>
           runTool({
@@ -998,7 +1064,7 @@ describe("bot turns", () => {
           });
         expect(yield* start("Fix --flaky tests")).toContain("started in Repo");
         expect(h.ownedAtLaunch).toEqual([true]);
-        const [owned] = h.runtime.store().listThreads(botId);
+        const [owned] = store.listThreads(botId);
         expect(owned?.follow).toBe("now");
         expect(h.packets.at(-1)).toBe("Fix --flaky tests");
         // Its own model, so its own effort rather than the provider's default.
@@ -1006,8 +1072,18 @@ describe("bot turns", () => {
 
         const failed = yield* Effect.flip(start("fail"));
         expect(failed.detail).toContain("did not start");
-        expect(h.runtime.store().listThreads(botId)).toHaveLength(1);
+        expect(store.listThreads(botId)).toHaveLength(1);
         expect(h.runtime.ownedThreads.size).toBe(1);
+
+        yield* Bots.saveSettings({
+          botId,
+          settings: { turnsPerDay: 200, maxThreads: 1, threads: "retired value" },
+        });
+        expect(yield* start("Another task")).toContain("the user must approve this");
+        expect(store.openQuestions(botId).map((question) => question.text)).toEqual([
+          "start a thread in Repo (1 of its 1 threads already run)\n\nAnother task",
+        ]);
+        expect(store.listThreads(botId)).toHaveLength(1);
       }),
     ),
   );
@@ -1016,7 +1092,10 @@ describe("bot turns", () => {
     withHarness((h) =>
       Effect.gen(function* () {
         const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
-        h.runtime.store().addThread({
+        const store = h.runtime.store();
+        const legacySettings = { ...store.getBot(botId)!.settings, threads: "ask" };
+        store.setSettings(botId, legacySettings);
+        store.addThread({
           threadId: "t1",
           botId,
           projectId: "p",

@@ -49,8 +49,9 @@ Nothing is shared between bots except skills a bot writes to the shared folder (
 
 ## Creating a bot
 
-Creating a bot asks only for a name and a model. Everything else comes from talking to it: the bot
-turns what the user says into its notebook, and the user can read and edit that notebook directly.
+Name the bot and tell it what to do in the creation dialog or later in its chat. A job description
+entered during creation is sent as the first chat message and starts the bot's first turn. The bot
+can propose role rules for your approval and keep track of details in its notebook.
 
 ## The notebook
 
@@ -213,9 +214,8 @@ from the thread's runtime mode and branch protection on the forge.
 Every bot has a pause switch and a budget (turns per day, concurrent threads, retries per step).
 A paused bot keeps its events and runs nothing until resumed.
 
-The settings show only what a user decides: the permission mode, whether it may start and run
-threads (allow or ask), the two limits, and its chat channels (below). Editing its role always asks and is not a setting. There is no deny: to stop
-a bot, pause it.
+Settings let you choose the permission mode, set the daily turn and concurrent thread limits, and
+configure chat channels. Editing its role always asks. To stop a bot, pause it.
 
 ## Ownership
 

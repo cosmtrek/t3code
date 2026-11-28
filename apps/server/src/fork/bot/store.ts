@@ -43,8 +43,6 @@ export interface ConnectorSettings {
 const CONNECTOR_OFF: ConnectorSettings = { enabled: false, permissions: {}, config: {} };
 
 export interface BotSettings {
-  /** Starting threads and messaging its own; editing its role always asks. */
-  readonly threads: Permission;
   readonly turnsPerDay: number;
   /** Threads it started that may run at once; starting one more asks. */
   readonly maxThreads: number;
@@ -57,8 +55,7 @@ export interface BotSettings {
 }
 
 const DEFAULT_SETTINGS: BotSettings = {
-  threads: "allow",
-  turnsPerDay: 100,
+  turnsPerDay: 200,
   maxThreads: 3,
   runtimeMode: "auto",
   threadModel: null,
@@ -71,25 +68,13 @@ interface LegacyChannelSettings {
   readonly mentionsSince?: string | null;
 }
 
-/**
- * Earlier builds stored allow, ask or deny per action (deny now asks, never allows), and chat
- * channels apart from connectors: one switch and signature for all, then per-channel settings.
- */
+/** Earlier builds stored one switch and signature for chat, then per-channel settings. */
 const toSettings = (value: string): BotSettings => {
   const parsed = JSON.parse(value) as Partial<BotSettings> & {
-    readonly permissions?: Readonly<Record<string, string>>;
     readonly channelsEnabled?: boolean;
     readonly signature?: string;
     readonly channels?: Readonly<Record<string, LegacyChannelSettings>>;
   };
-  const legacy = parsed.permissions;
-  const threads =
-    parsed.threads ??
-    (legacy === undefined
-      ? DEFAULT_SETTINGS.threads
-      : legacy["thread.start"] === "allow" && legacy["thread.send"] !== "ask"
-        ? "allow"
-        : "ask");
   const connectors =
     parsed.connectors ??
     Object.fromEntries(
@@ -111,7 +96,6 @@ const toSettings = (value: string): BotSettings => {
       }),
     );
   return {
-    threads,
     turnsPerDay: parsed.turnsPerDay ?? DEFAULT_SETTINGS.turnsPerDay,
     maxThreads: parsed.maxThreads ?? DEFAULT_SETTINGS.maxThreads,
     runtimeMode: parsed.runtimeMode ?? DEFAULT_SETTINGS.runtimeMode,
@@ -503,18 +487,24 @@ export class BotStore {
   createBot(
     bot: Pick<Bot, "id" | "name" | "modelSelection" | "createdAt">,
     runtimeMode: RuntimeMode,
+    firstMessage?: Pick<ChatMessage, "id" | "text">,
   ) {
-    this.db
-      .prepare(
-        "INSERT INTO bots (id, name, model_selection, created_at, settings) VALUES (?, ?, ?, ?, ?)",
-      )
-      .run(
-        bot.id,
-        bot.name,
-        JSON.stringify(bot.modelSelection),
-        bot.createdAt,
-        JSON.stringify({ runtimeMode }),
-      );
+    this.transaction(() => {
+      this.db
+        .prepare(
+          "INSERT INTO bots (id, name, model_selection, created_at, settings) VALUES (?, ?, ?, ?, ?)",
+        )
+        .run(
+          bot.id,
+          bot.name,
+          JSON.stringify(bot.modelSelection),
+          bot.createdAt,
+          JSON.stringify({ runtimeMode }),
+        );
+      if (firstMessage !== undefined) {
+        this.addChat({ ...firstMessage, botId: bot.id, role: "user", createdAt: bot.createdAt });
+      }
+    });
   }
 
   deleteBot(id: string) {

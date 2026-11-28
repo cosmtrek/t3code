@@ -26,6 +26,7 @@ import {
 import {
   useEffect,
   useEffectEvent,
+  useId,
   useRef,
   useState,
   type CSSProperties,
@@ -298,7 +299,9 @@ export function CreateBotDialog({
   readonly onClose: () => void;
   readonly onCreated: (botId: string) => void;
 }) {
+  const briefHintId = useId();
   const [name, setName] = useState("");
+  const [brief, setBrief] = useState("");
   const [model, setModel] = useState<ModelSelection | null>(null);
   const [pickedMode, setPickedMode] = useState<RuntimeMode | null>(null);
   const modes = useRuntimeModes(environmentId, model?.instanceId ?? null);
@@ -311,9 +314,15 @@ export function CreateBotDialog({
     setSubmitting(true);
     setError(null);
     try {
+      const trimmedBrief = brief.trim();
       const result = await forkRequest<{ botId: string }>(environmentId, "/bots/create", {
         method: "POST",
-        body: { name, modelSelection: model, runtimeMode },
+        body: {
+          name,
+          modelSelection: model,
+          runtimeMode,
+          ...(trimmedBrief === "" ? {} : { brief: trimmedBrief }),
+        },
       });
       onCreated(result.botId);
     } catch (cause) {
@@ -339,7 +348,7 @@ export function CreateBotDialog({
         >
           <DialogHeader>
             <DialogTitle>New bot</DialogTitle>
-            <DialogDescription>Tell it its job in the chat once it is created.</DialogDescription>
+            <DialogDescription>Describe its job now or later in the chat.</DialogDescription>
           </DialogHeader>
           <DialogPanel>
             <div className="space-y-3">
@@ -353,6 +362,27 @@ export function CreateBotDialog({
                   onChange={(event) => setName(event.target.value)}
                 />
               </label>
+              <div>
+                <label className="block">
+                  <span className="mb-1.5 flex items-baseline justify-between gap-2 text-xs">
+                    <span className="font-medium text-foreground">What should it do?</span>
+                    <span className="text-muted-foreground" aria-hidden>
+                      Optional
+                    </span>
+                  </span>
+                  <Textarea
+                    aria-describedby={briefHintId}
+                    rows={3}
+                    value={brief}
+                    placeholder="Watch for new releases, open a thread to run the upgrade checklist, and ask me before merging."
+                    onChange={(event) => setBrief(event.target.value)}
+                  />
+                </label>
+                <p id={briefHintId} className="mt-1 text-2xs text-muted-foreground">
+                  Sent as the first message. The bot can propose role rules for your approval and
+                  save details to memory.
+                </p>
+              </div>
               <div className="grid gap-3 sm:grid-cols-2">
                 <div>
                   <span className="mb-1.5 block text-xs font-medium text-foreground">Model</span>
@@ -1593,7 +1623,6 @@ function SettingsDialog({
           ...(name === undefined ? {} : { name }),
           ...(modelSelection === undefined ? {} : { modelSelection }),
           settings: {
-            threads: next.settings.threads,
             turnsPerDay: next.settings.turnsPerDay,
             maxThreads: next.settings.maxThreads,
             runtimeMode: next.settings.runtimeMode,
@@ -1704,17 +1733,6 @@ function SettingsDialog({
                     modes={modes}
                     value={runtimeModeWithin(settings.runtimeMode, modes)}
                     onChange={(runtimeMode) => void save({ runtimeMode })}
-                  />
-                }
-              />
-              <SettingsRow
-                title="Start and run threads"
-                description="Changing its role always asks you."
-                control={
-                  <PermissionSelect
-                    label="Start and run threads"
-                    value={settings.threads}
-                    onChange={(threads) => void save({ threads })}
                   />
                 }
               />

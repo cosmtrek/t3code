@@ -370,6 +370,7 @@ const CreateInput = Schema.Struct({
   name: Schema.String,
   modelSelection: Schema.optional(Schema.NullOr(Schema.Unknown)),
   runtimeMode: Schema.optional(RuntimeMode),
+  brief: Schema.optional(Schema.NullOr(Schema.String)),
 });
 
 export const createBot = Effect.fn("ForkBot.createBot")(function* (input: unknown) {
@@ -378,6 +379,10 @@ export const createBot = Effect.fn("ForkBot.createBot")(function* (input: unknow
   const name = decoded.name.trim();
   if (name === "" || name.length > NAME_CHARS) {
     return yield* badRequest(`Name the bot in 1 to ${NAME_CHARS} characters.`, "name");
+  }
+  const brief = decoded.brief?.trim() ?? "";
+  if (brief.length > MESSAGE_CHARS) {
+    return yield* badRequest(`Write 1 to ${MESSAGE_CHARS} characters.`, "brief");
   }
   // No pick means the model the picker shows first: the first ready provider's default.
   const picked =
@@ -412,9 +417,11 @@ export const createBot = Effect.fn("ForkBot.createBot")(function* (input: unknow
     .createBot(
       { id, name, modelSelection, createdAt: nowIso() },
       decoded.runtimeMode ?? (yield* runtimeModeFor(modelSelection, "auto")),
+      brief === "" ? undefined : { id: newId("msg"), text: brief },
     );
   yield* runtime.active.open;
   runtime.publish(id);
+  if (brief !== "") yield* wake(id);
   return { botId: id };
 });
 
@@ -1073,7 +1080,6 @@ const SettingsInput = Schema.Struct({
   name: Schema.optional(Schema.String),
   modelSelection: Schema.optional(Schema.Unknown),
   settings: Schema.Struct({
-    threads: Schema.optional(Permission),
     turnsPerDay: Schema.Number,
     maxThreads: Schema.Number,
     runtimeMode: Schema.optional(RuntimeMode),
@@ -1154,7 +1160,6 @@ export const saveSettings = Effect.fn("ForkBot.saveSettings")(function* (input: 
     saved.push(entry);
   }
   const settings: BotSettings = {
-    threads: decoded.settings.threads ?? bot.settings.threads,
     turnsPerDay,
     maxThreads,
     runtimeMode,

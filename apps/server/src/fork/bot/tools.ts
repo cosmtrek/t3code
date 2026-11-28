@@ -638,7 +638,7 @@ const threadCommand = Effect.fn("ForkBot.threadCommand")(function* (
         const overBudget = running >= bot.settings.maxThreads;
         const asked = yield* gate(
           call,
-          bot.settings.threads,
+          "allow",
           overBudget,
           `start a thread in ${project.title}${overBudget ? ` (${running} of its ${bot.settings.maxThreads} threads already run)` : ""}`,
           prompt,
@@ -700,17 +700,6 @@ const threadCommand = Effect.fn("ForkBot.threadCommand")(function* (
     const text = textOf(rest.slice(1), stdin);
     if (text === "") return yield* fail("Write the message.");
     const fresh = flags.has("fresh");
-    const title = (yield* readNotebook(botId)).threads.find(
-      (thread) => thread.threadId === threadId,
-    )?.title;
-    const asked = yield* gate(
-      call,
-      bot.settings.threads,
-      false,
-      `message its thread "${title ?? threadId}"`,
-      text,
-    );
-    if (asked !== null) return asked;
     const sent = yield* threads
       .sendToThread({
         projectId: ProjectId.make(owned.projectId),
