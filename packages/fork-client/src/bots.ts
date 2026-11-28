@@ -215,3 +215,24 @@ export function botWorkThreadKeys(
     ),
   );
 }
+
+/** Posts made together, such as a reply and the pages it showed, read as one. */
+const SAME_POST_MS = 5_000;
+const LONG_GAP_MS = 10 * 60_000;
+
+/**
+ * Whether the chat marks the time above `message`: when the bot posts again without the user
+ * writing in between (a follow-up, a report, a routine), after a long gap, or on a new day.
+ */
+export function startsChatBreak(
+  previous: Pick<BotChatMessage, "role" | "createdAt"> | undefined,
+  message: Pick<BotChatMessage, "role" | "createdAt">,
+): boolean {
+  if (previous === undefined) return false;
+  const before = new Date(previous.createdAt);
+  const at = new Date(message.createdAt);
+  const gap = at.getTime() - before.getTime();
+  if (Number.isNaN(gap)) return false;
+  if (gap >= LONG_GAP_MS || at.toDateString() !== before.toDateString()) return true;
+  return previous.role !== "user" && message.role !== "user" && gap >= SAME_POST_MS;
+}

@@ -23,6 +23,7 @@ import {
   Trash2Icon,
 } from "lucide-react";
 import {
+  Fragment,
   useEffect,
   useEffectEvent,
   useId,
@@ -117,6 +118,8 @@ import type {
   BotSettings,
   BotSummary,
 } from "@t3tools/fork-client/bots";
+import { startsChatBreak } from "@t3tools/fork-client/bots";
+import { TimelineSystemDivider } from "../../components/chat/TimelineSystemDivider";
 import { useProject, useQuietThreadShell } from "../../state/entities";
 import { botStep } from "./botStep";
 import { subscribeToForkEvents, useForkResource, type ForkEvent } from "../useForkResource";
@@ -427,6 +430,7 @@ function BotChat({
   readonly botId: string;
 }) {
   const navigate = useNavigate();
+  const formatTimestamp = useFormatTimestamp();
   const detail = useForkResource<BotDetail>(
     environmentId,
     `/bots/bot?botId=${encodeURIComponent(botId)}`,
@@ -608,16 +612,20 @@ function BotChat({
                 Tell {data.bot.name} what it is responsible for.
               </p>
             ) : null}
-            {data?.chat.map((message) => (
-              <ChatLine
-                key={message.id}
-                message={message}
-                environmentId={environmentId}
-                botId={botId}
-                workThreadId={workThreadId}
-                cwd={cwd}
-                onOpenFileInPanel={openFileInPanel}
-              />
+            {data?.chat.map((message, index) => (
+              <Fragment key={message.id}>
+                {startsChatBreak(data.chat[index - 1], message) ? (
+                  <TimelineSystemDivider label={formatTimestamp(message.createdAt)} />
+                ) : null}
+                <ChatLine
+                  message={message}
+                  environmentId={environmentId}
+                  botId={botId}
+                  workThreadId={workThreadId}
+                  cwd={cwd}
+                  onOpenFileInPanel={openFileInPanel}
+                />
+              </Fragment>
             ))}
             {data?.questions.map((question) => (
               <QuestionCard

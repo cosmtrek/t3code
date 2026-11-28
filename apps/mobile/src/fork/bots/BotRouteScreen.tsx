@@ -8,11 +8,12 @@ import type {
   BotDetail,
   BotQuestion,
 } from "@t3tools/fork-client/bots";
+import { startsChatBreak } from "@t3tools/fork-client/bots";
 import type { ForkEvent } from "@t3tools/fork-client/sse";
 import { parseThreadLinkHref } from "@t3tools/shared/threadLinks";
 import { useIsFocused, useNavigation, type StaticScreenProps } from "@react-navigation/native";
 import type * as React from "react";
-import { useEffect, useEffectEvent, useRef, useState } from "react";
+import { Fragment, useEffect, useEffectEvent, useRef, useState } from "react";
 import { AppState, Platform, Pressable, ScrollView, View } from "react-native";
 import { KeyboardStickyView } from "react-native-keyboard-controller";
 
@@ -247,13 +248,17 @@ function BotRoute(props: { readonly environmentId: EnvironmentId; readonly botId
                 variant="plain"
               />
             ) : (
-              data.chat.map((message) => (
-                <ChatLine
-                  key={message.id}
-                  message={message}
-                  textStyle={markdown.nativeTextStyle}
-                  onLinkPress={onLinkPress}
-                />
+              data.chat.map((message, index) => (
+                <Fragment key={message.id}>
+                  {startsChatBreak(data.chat[index - 1], message) ? (
+                    <ChatTimeDivider createdAt={message.createdAt} />
+                  ) : null}
+                  <ChatLine
+                    message={message}
+                    textStyle={markdown.nativeTextStyle}
+                    onLinkPress={onLinkPress}
+                  />
+                </Fragment>
               ))
             )}
             {data && data.workingSince !== null ? (
@@ -442,6 +447,35 @@ function ChatLine(props: {
       onLinkPress={props.onLinkPress}
     />
   );
+}
+
+/** As a thread marks a new session, with the time the next message came. */
+function ChatTimeDivider(props: { readonly createdAt: string }) {
+  return (
+    <View className="flex-row items-center gap-3 px-1">
+      <View className="h-px min-w-4 flex-1 bg-separator" />
+      <Text className="font-t3-medium text-xs text-foreground-muted tabular-nums">
+        {chatTime(props.createdAt)}
+      </Text>
+      <View className="h-px min-w-4 flex-1 bg-separator" />
+    </View>
+  );
+}
+
+/** "14:49", "Yesterday 09:10" or "Nov 26 18:05". */
+function chatTime(iso: string) {
+  const date = new Date(iso);
+  const time = date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const today = new Date();
+  if (date.toDateString() === today.toDateString()) return time;
+  const yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
+  if (date.toDateString() === yesterday.toDateString()) return `Yesterday ${time}`;
+  const day = date.toLocaleDateString([], {
+    month: "short",
+    day: "numeric",
+    ...(date.getFullYear() === today.getFullYear() ? {} : { year: "numeric" }),
+  });
+  return `${day} ${time}`;
 }
 
 function WorkingRow(props: {
