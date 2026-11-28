@@ -5,6 +5,11 @@ import * as NodePath from "node:path";
 import * as NodeSqlite from "node:sqlite";
 
 import { describe, expect, it } from "@effect/vitest";
+import { vi } from "vite-plus/test";
+
+vi.mock("node:fs/promises", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:fs/promises")>()),
+}));
 
 import { applyFallback, discardDraft, readArtifacts, readSent, recordSent } from "./artifacts.ts";
 import {
@@ -560,6 +565,24 @@ describe("tagged-reply fallback", () => {
     });
     expect(await read(owned, "draft.md")).toBe("thread wrote\n");
     expect((await NodeFSP.readdir(owned)).filter((file) => file.includes(".aside"))).toEqual([]);
+  });
+
+  it("restores the original draft when replacement fails after moving it aside", async () => {
+    const dir = await folder();
+    await applyFallback(dir, "run-1", "original reply");
+    const writeFile = NodeFSP.writeFile;
+    let failed = false;
+    using _write = vi.spyOn(NodeFSP, "writeFile").mockImplementation(async (...args) => {
+      if (args[0] === NodePath.join(dir, "draft.md") && !failed) {
+        failed = true;
+        throw Object.assign(new Error("injected write failure"), { code: "EIO" });
+      }
+      return writeFile(...args);
+    });
+    await expect(applyFallback(dir, "run-2", "replacement")).rejects.toMatchObject({ code: "EIO" });
+    expect(failed).toBe(true);
+    expect(await read(dir, "draft.md")).toBe("original reply\n");
+    expect((await NodeFSP.readdir(dir)).filter((name) => name.endsWith(".aside"))).toEqual([]);
   });
 
   it("applies one run once when two reads race, and the next run still updates", async () => {

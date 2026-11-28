@@ -86,6 +86,7 @@ async function replaceOwned(target: string, ownedHash: string, content: string):
   } catch {
     return createExclusive(target, content);
   }
+  let removeAside = true;
   try {
     const moved = (await readText(aside)) ?? "";
     if (hash(moved) !== ownedHash) {
@@ -93,8 +94,17 @@ async function replaceOwned(target: string, ownedHash: string, content: string):
       return false;
     }
     return await createExclusive(target, content);
+  } catch (error) {
+    removeAside = false;
+    try {
+      const moved = await NodeFSP.readFile(aside, "utf8");
+      removeAside = await createExclusive(target, moved);
+    } catch {
+      // Keep the recovery copy if restoring also fails.
+    }
+    throw error;
   } finally {
-    await NodeFSP.rm(aside, { force: true });
+    if (removeAside) await NodeFSP.rm(aside, { force: true });
   }
 }
 
