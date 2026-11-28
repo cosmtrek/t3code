@@ -15,6 +15,7 @@ import { useIsFocused, useNavigation, type StaticScreenProps } from "@react-navi
 import type * as React from "react";
 import { Fragment, useEffect, useEffectEvent, useRef, useState } from "react";
 import { AppState, Platform, Pressable, ScrollView, View } from "react-native";
+import { useMessages } from "gt-react-native";
 import { KeyboardStickyView } from "react-native-keyboard-controller";
 
 import { useComposerBottomInset } from "../../components/ComposerSurface";
@@ -42,6 +43,7 @@ import { SelectableMarkdownText } from "../../native/SelectableMarkdownText";
 import { asForkError, forkRequest, subscribeToForkEvents } from "../forkApi";
 import { useForkResource } from "../useForkResource";
 import { botFileLink } from "./botFileLink";
+import { botStepLabel } from "./botStep";
 
 export type BotParams = {
   readonly environmentId: string;
@@ -357,7 +359,11 @@ function usePushedActivity(
           event.text !== undefined &&
           event.threadId !== undefined
         ) {
-          onActivity({ text: event.text, threadId: event.threadId });
+          onActivity({
+            text: event.text,
+            threadId: event.threadId,
+            ...(event.step === undefined ? {} : { step: event.step }),
+          });
         }
       }),
     [environmentId, botId],
@@ -483,6 +489,8 @@ function WorkingRow(props: {
   readonly onOpen: (threadId: string) => void;
 }) {
   const { activity } = props;
+  const messages = useMessages();
+  const text = activity === null ? null : (botStepLabel(activity.step, messages) ?? activity.text);
   const line = (
     <View className="flex-row items-center gap-2 px-1">
       <SymbolView
@@ -493,7 +501,7 @@ function WorkingRow(props: {
         weight="semibold"
       />
       <Text className="flex-1 text-sm text-foreground-muted" numberOfLines={1}>
-        {activity?.text ?? "Working"}
+        {text ?? "Working"}
       </Text>
       {activity ? (
         <SymbolView name="chevron.right" size={11} tintColorClassName="accent-icon-muted" />
@@ -504,7 +512,7 @@ function WorkingRow(props: {
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={`${activity.text}, open thread`}
+      accessibilityLabel={`${text}, open thread`}
       onPress={() => props.onOpen(activity.threadId)}
       style={({ pressed }) => ({ opacity: pressed ? 0.6 : 1 })}
     >
