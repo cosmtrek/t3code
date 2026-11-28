@@ -180,7 +180,7 @@ function BotRow(props: {
 
   const content = (
     <View className="flex-row items-center gap-3">
-      <View className="size-9 items-center justify-center rounded-full bg-subtle">
+      <View className="size-9 items-center justify-center rounded-full bg-gray-500/15">
         <Text className={cn("text-sm font-t3-bold", muted)}>
           {bot.name.slice(0, 1).toUpperCase()}
         </Text>
