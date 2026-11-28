@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Release the fork and switch this machine's t3 service to a fork release. See FORK.md, Releases.
 
-  t3fork release [--android [patch|minor|X.Y.Z]] [--no-desktop] [--version X.Y.Z-r.N] [--dry-run] [--watch]
+  t3fork release [--android [patch|minor|X.Y.Z]] [--no-desktop | --no-cli] [--version X.Y.Z-r.N] [--dry-run] [--watch]
   t3fork upgrade [X.Y.Z-r.N]   # default: latest fork release; runs detached, the service restart cuts this agent turn
   t3fork status
 """
@@ -100,7 +100,9 @@ def cmd_release(a):
     head = check_pushed()
     version, last = (a.version, latest_release()) if a.version else next_version()
     apk = None
-    plan = [("fork-cli-release.yml", {"version": version, "desktop": str(not a.no_desktop).lower()})]
+    plan = [] if a.no_cli else [("fork-cli-release.yml", {"version": version, "desktop": str(not a.no_desktop).lower()})]
+    if a.no_cli and a.android is None:
+        sys.exit("t3fork: --no-cli needs --android")
     if a.android is not None:
         prev = last_android()
         if re.fullmatch(r"\d+\.\d+\.\d+", a.android):
@@ -132,10 +134,10 @@ def cmd_release(a):
                              "--interval", "30"], stdout=subprocess.DEVNULL).returncode
         print(f"{wf}: {'success' if rc == 0 else 'FAILED'} {r['url']}")
         failed |= rc != 0
-    if not failed:
+    if not failed and not a.no_cli:
         print(f"release: https://github.com/{REPO}/releases/tag/v{version}")
-        if apk:
-            print(f"android apk (open on the phone to install): {apk}")
+    if not failed and apk:
+        print(f"android apk (open on the phone to install): {apk}")
     sys.exit(1 if failed else 0)
 
 
@@ -184,6 +186,7 @@ s = p.add_subparsers(dest="cmd", required=True)
 r = s.add_parser("release")
 r.add_argument("--android", nargs="?", const="patch", help="also build Android production: patch (default), minor or X.Y.Z")
 r.add_argument("--no-desktop", action="store_true")
+r.add_argument("--no-cli", action="store_true", help="Android only: no server/desktop release")
 r.add_argument("--version", help="override X.Y.Z-r.N")
 r.add_argument("--dry-run", action="store_true")
 r.add_argument("--watch", action="store_true", help="block until all runs finish (run in background)")
