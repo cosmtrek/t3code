@@ -739,32 +739,30 @@ function WorkingRow({
         <span ref={tickTextContent(() => formatWorkingTimerNow(since, environmentId), true)} />
       </span>
       {activity ? (
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <button
-                type="button"
-                disabled={onOpen === null}
-                onClick={onOpen ?? undefined}
-                className="group flex min-w-0 items-center gap-2 text-left text-xs enabled:hover:text-foreground"
-              />
-            }
+        <button
+          type="button"
+          disabled={onOpen === null}
+          onClick={onOpen ?? undefined}
+          className="group flex w-fit max-w-full min-w-0 items-center gap-2 text-left text-xs enabled:hover:text-foreground"
+        >
+          <WorkEntryIcon
+            name={step?.icon ?? "message-circle"}
+            className="size-3.5 shrink-0 opacity-70"
+          />
+          <span
+            // The full step only when the label is cut off, and only over the text itself.
+            onPointerEnter={(event) => {
+              const label = event.currentTarget;
+              label.title = label.scrollWidth > label.clientWidth ? (label.textContent ?? "") : "";
+            }}
+            className="min-w-0 truncate text-foreground/75 group-enabled:group-hover:text-foreground"
           >
-            <WorkEntryIcon
-              name={step?.icon ?? "message-circle"}
-              className="size-3.5 shrink-0 opacity-70"
-            />
-            <span className="min-w-0 truncate text-foreground/75 group-enabled:group-hover:text-foreground">
-              {step?.label ?? activity.text}
-            </span>
-            <span className="ml-auto hidden shrink-0 pl-2 group-enabled:group-hover:inline">
-              Open thread
-            </span>
-          </TooltipTrigger>
-          <TooltipPopup side="top" className="max-w-md">
             {step?.label ?? activity.text}
-          </TooltipPopup>
-        </Tooltip>
+          </span>
+          <span className="hidden shrink-0 text-muted-foreground group-enabled:group-hover:inline">
+            Open thread
+          </span>
+        </button>
       ) : null}
     </div>
   );
