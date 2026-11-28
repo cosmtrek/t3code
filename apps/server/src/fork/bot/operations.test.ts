@@ -38,18 +38,40 @@ import * as InboxStore from "../inbox/store.ts";
 import { BotRuntime } from "./BotRuntime.ts";
 import { followThreads, reconcileThreads } from "./events.ts";
 import * as Bots from "./operations.ts";
-import { answerQuestion, authenticateTool, MEMORY_BYTES, parseArgs, runTool } from "./tools.ts";
+import { MEMORY_BYTES, parseArgs } from "./tools.ts";
+import { BotRejection, BotOperationError } from "./errors.ts";
+import { botErrorResponse } from "../http.ts";
+import * as HttpServerResponse from "effect/http/HttpServerResponse";
 import * as BotStore from "./store.ts";
 
-const isHttpError = Schema.is(Inbox.ForkHttpError);
+const isBotRejection = Schema.is(BotRejection);
+const isBotOperationError = Schema.is(BotOperationError);
 
 const httpFailure = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   Effect.flip(effect).pipe(
-    Effect.map((error) => {
-      expect(error).toBeInstanceOf(Inbox.ForkHttpError);
-      if (isHttpError(error)) return error;
-      throw error;
-    }),
+    Effect.flatMap((error) =>
+      Effect.gen(function* () {
+        if (!isBotRejection(error) && !isBotOperationError(error)) throw error;
+        expect(error).toBeInstanceOf(
+          error._tag === "BotRejection" ? BotRejection : BotOperationError,
+        );
+        const response = HttpServerResponse.toWeb(botErrorResponse(error));
+        const body = yield* Effect.promise(
+          async () =>
+            (await response.json()) as {
+              readonly message: string;
+              readonly code: string;
+              readonly field?: string;
+            },
+        );
+        return {
+          status: response.status,
+          code: body.code,
+          detail: body.message,
+          field: body.field,
+        };
+      }),
+    ),
   );
 
 const MODEL = { instanceId: "claudeAgent", model: "claude-haiku-5-5" };
@@ -57,6 +79,7 @@ const SCRATCH = ProjectId.make("scratch");
 
 interface Harness {
   readonly runtime: BotRuntime["Service"];
+  readonly bot: Bots.BotOperations["Service"];
   /** Every packet the bot was sent, launch or send, in order. */
   readonly packets: string[];
   /** Thread id and run id of each turn, in order. */
@@ -102,6 +125,7 @@ interface UserMessage {
 }
 
 type HarnessServices =
+  | Bots.BotOperations
   | Inbox.InboxOperations
   | Artifacts.Artifacts
   | BotRuntime
@@ -165,7 +189,11 @@ const harness = (providedStore?: BotStore.BotStore["Service"]) =>
       runStatus.set(runId, "running");
       return runId;
     };
+    const bot = yield* Bots.BotOperations.pipe(
+      Effect.provide(Bots.layer.pipe(Layer.provide(Layer.succeed(BotRuntime, runtime)))),
+    );
     const layer = Layer.mergeAll(
+      Layer.succeed(Bots.BotOperations, bot),
       Layer.mock(Inbox.InboxOperations)({}),
       Artifacts.layer.pipe(Layer.provide(NodeServices.layer)),
       Layer.succeed(BotRuntime, runtime),
@@ -281,6 +309,7 @@ const harness = (providedStore?: BotStore.BotStore["Service"]) =>
       FileSystem.layerNoop({}),
     );
     const h: Harness = {
+      bot,
       runtime,
       packets,
       runs,
@@ -315,7 +344,7 @@ const endRun = (h: Harness, botId: string, index: number, reply: string | null) 
   const { runId } = h.runs[index]!;
   h.runStatus.set(runId, "completed");
   if (reply !== null) h.replies.set(runId, reply);
-  return Bots.finishRun(botId, runId, "completed");
+  return h.bot.finishRun(botId, runId, "completed");
 };
 
 const withHarness = <E>(
@@ -385,7 +414,7 @@ describe("bot creation", () => {
     withHarness((h) =>
       Effect.gen(function* () {
         const brief = "Watch for new releases.\nAsk me before merging.";
-        const { botId } = yield* Bots.createBot({
+        const { botId } = yield* h.bot.createBot({
           name: "Release Watcher",
           modelSelection: MODEL,
           brief: `  ${brief}\n`,
@@ -410,7 +439,7 @@ describe("bot creation", () => {
     withHarness((h) =>
       Effect.gen(function* () {
         for (const optional of [{}, { brief: null }, { brief: " \n\t " }]) {
-          const { botId } = yield* Bots.createBot({
+          const { botId } = yield* h.bot.createBot({
             name: "Bot",
             modelSelection: MODEL,
             ...optional,
@@ -426,7 +455,7 @@ describe("bot creation", () => {
     withHarness((h) =>
       Effect.gen(function* () {
         const error = yield* httpFailure(
-          Bots.createBot({ name: "Bot", modelSelection: MODEL, brief: "x".repeat(20_001) }),
+          h.bot.createBot({ name: "Bot", modelSelection: MODEL, brief: "x".repeat(20_001) }),
         );
 
         expect(error).toMatchObject({ status: 400, code: "bad_request", field: "brief" });
@@ -443,12 +472,15 @@ describe("bot turns", () => {
   it.effect("answers each message in one turn at a time, in its one work thread", () =>
     withHarness((h) =>
       Effect.gen(function* () {
-        const { botId } = yield* Bots.createBot({ name: "Release Watcher", modelSelection: MODEL });
-        yield* Bots.saveRole({ botId, role: "Keep fork releases healthy." });
+        const { botId } = yield* h.bot.createBot({
+          name: "Release Watcher",
+          modelSelection: MODEL,
+        });
+        yield* h.bot.saveRole({ botId, role: "Keep fork releases healthy." });
 
-        yield* Bots.sendMessage({ botId, text: "What do you do?" });
+        yield* h.bot.sendMessage({ botId, text: "What do you do?" });
         // A second message while the turn runs waits for it.
-        yield* Bots.sendMessage({ botId, text: "And how often?" });
+        yield* h.bot.sendMessage({ botId, text: "And how often?" });
         expect(h.runs).toHaveLength(1);
         expect(h.packets[0]).toContain("Keep fork releases healthy.");
         expect(h.packets[0]).toContain("What do you do?");
@@ -470,15 +502,15 @@ describe("bot turns", () => {
         ]);
         expect(yield* h.runtime.existingStore()!.getTurn(botId)).toBeNull();
         // Its posts count as unread on the Bots entry until the user sees its chat.
-        const unread = () => Bots.listBots().pipe(Effect.map(({ bots }) => bots[0]!.unread));
+        const unread = () => h.bot.listBots().pipe(Effect.map(({ bots }) => bots[0]!.unread));
         expect(yield* unread()).toBe(2);
-        yield* Bots.markSeen({ botId });
+        yield* h.bot.markSeen({ botId });
         expect(yield* unread()).toBe(0);
 
         // A failed turn may have lost what it was sent, so the one after resends it all.
-        yield* Bots.sendMessage({ botId, text: "Still there?" });
-        yield* Bots.finishRun(botId, h.runs[2]!.runId, "failed");
-        yield* Bots.sendMessage({ botId, text: "Hello?" });
+        yield* h.bot.sendMessage({ botId, text: "Still there?" });
+        yield* h.bot.finishRun(botId, h.runs[2]!.runId, "failed");
+        yield* h.bot.sendMessage({ botId, text: "Hello?" });
         expect(h.packets[3]).toContain("Keep fork releases healthy.");
       }),
     ),
@@ -489,7 +521,7 @@ describe("bot turns", () => {
     () =>
       withHarness((h) =>
         Effect.gen(function* () {
-          const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+          const { botId } = yield* h.bot.createBot({ name: "Bot", modelSelection: MODEL });
           const prepare = NodeSqlite.DatabaseSync.prototype.prepare;
           using _prepare = vi
             .spyOn(NodeSqlite.DatabaseSync.prototype, "prepare")
@@ -498,7 +530,7 @@ describe("bot turns", () => {
                 throw new Error("write failed");
               return prepare.call(this, sql);
             });
-          const exit = yield* Effect.exit(Bots.sendMessage({ botId, text: "Start." }));
+          const exit = yield* Effect.exit(h.bot.sendMessage({ botId, text: "Start." }));
           expect(Exit.isFailure(exit)).toBe(true);
           if (Exit.isFailure(exit)) expect(Cause.hasDies(exit.cause)).toBe(true);
           expect(yield* chatOf(h, botId)).toEqual([["user", "Start."]]);
@@ -526,9 +558,9 @@ describe("bot turns", () => {
           Effect.gen(function* () {
             h.runStatus.set("run-down", "completed");
             h.replies.set("run-down", "Hello.");
-            yield* Bots.reconcile();
+            yield* h.bot.reconcile();
             // The event for the same run, arriving late, posts nothing more.
-            yield* Bots.finishRun("bot_1", "run-down", "completed");
+            yield* h.bot.finishRun("bot_1", "run-down", "completed");
             expect(yield* chatOf(h, "bot_1")).toEqual([
               ["user", "Hi"],
               ["bot", "Hello."],
@@ -545,7 +577,7 @@ describe("bot turns", () => {
     () =>
       withHarness((h) =>
         Effect.gen(function* () {
-          const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+          const { botId } = yield* h.bot.createBot({ name: "Bot", modelSelection: MODEL });
           const store = h.runtime.existingStore()!;
           const id = yield* store.addRoutine(botId, {
             title: "PR check",
@@ -554,7 +586,7 @@ describe("bot turns", () => {
             // Missed on three mornings while the server was down.
             nextDueAt: new Date(2026, 10, 20, 9, 0).toISOString(),
           });
-          yield* Bots.fireDueRoutines(DateTime.makeZonedUnsafe(new Date(2026, 10, 23, 11, 40)));
+          yield* h.bot.fireDueRoutines(DateTime.makeZonedUnsafe(new Date(2026, 10, 23, 11, 40)));
           expect(h.runs).toHaveLength(1);
           expect(h.packets[0]).toContain(
             'Routine 1 "PR check" is due. It was due at 09:00 and starts late, at 11:40.',
@@ -572,7 +604,7 @@ describe("bot turns", () => {
   it.effect("queues a thread's end for the bot and wakes it only as its follow-up says", () =>
     withHarness((h) =>
       Effect.gen(function* () {
-        const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+        const { botId } = yield* h.bot.createBot({ name: "Bot", modelSelection: MODEL });
         const store = h.runtime.existingStore()!;
         for (const [threadId, follow] of [
           ["t-attention", "attention"],
@@ -613,14 +645,22 @@ describe("bot turns", () => {
   it.effect("posts what the bot says instead of its last message, and caps memory", () =>
     withHarness((h) =>
       Effect.gen(function* () {
-        const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
-        yield* Bots.sendMessage({ botId, text: "Remember my timezone." });
-        yield* runTool({ bot: botId, argv: ["memory", "add", "The user is in UTC+8."], stdin: "" });
+        const { botId } = yield* h.bot.createBot({ name: "Bot", modelSelection: MODEL });
+        yield* h.bot.sendMessage({ botId, text: "Remember my timezone." });
+        yield* h.bot.runTool({
+          bot: botId,
+          argv: ["memory", "add", "The user is in UTC+8."],
+          stdin: "",
+        });
         const full = yield* httpFailure(
-          runTool({ bot: botId, argv: ["memory", "add", "x".repeat(MEMORY_BYTES)], stdin: "" }),
+          h.bot.runTool({
+            bot: botId,
+            argv: ["memory", "add", "x".repeat(MEMORY_BYTES)],
+            stdin: "",
+          }),
         );
         expect(full.detail).toContain("Merge or remove notes first");
-        yield* runTool({ bot: botId, argv: ["say", "Noted: UTC+8."], stdin: "" });
+        yield* h.bot.runTool({ bot: botId, argv: ["say", "Noted: UTC+8."], stdin: "" });
         yield* endRun(h, botId, 0, "I saved it with memory add and replied.");
         expect(yield* chatOf(h, botId)).toEqual([
           ["user", "Remember my timezone."],
@@ -636,7 +676,7 @@ describe("bot turns", () => {
   it.effect("posts the pages its work thread showed with its reply, each once", () =>
     withHarness((h) =>
       Effect.gen(function* () {
-        const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+        const { botId } = yield* h.bot.createBot({ name: "Bot", modelSelection: MODEL });
         const page = (id: string) => ({ attachmentId: id, title: `Map ${id}`, height: 400 });
         const rendersOf = Effect.fn("Test.rendersOf")(function* () {
           return (yield* h.runtime.existingStore()!.recentChat(botId, 100)).map(
@@ -644,13 +684,13 @@ describe("bot turns", () => {
           );
         });
 
-        yield* Bots.sendMessage({ botId, text: "Draw the map." });
+        yield* h.bot.sendMessage({ botId, text: "Draw the map." });
         h.pages.set(h.runs[0]!.runId, [page("a")]);
-        yield* runTool({ bot: botId, argv: ["say", "Here it is."], stdin: "" });
+        yield* h.bot.runTool({ bot: botId, argv: ["say", "Here it is."], stdin: "" });
         h.pages.set(h.runs[0]!.runId, [page("a"), page("b")]);
         yield* endRun(h, botId, 0, null);
 
-        yield* Bots.sendMessage({ botId, text: "Again, plainly." });
+        yield* h.bot.sendMessage({ botId, text: "Again, plainly." });
         h.pages.set(h.runs[1]!.runId, [page("c")]);
         yield* endRun(h, botId, 1, "Redrawn.");
 
@@ -669,11 +709,11 @@ describe("bot turns", () => {
   it.effect("posts what the work thread sent the user, a page with the text after it", () =>
     withHarness((h) =>
       Effect.gen(function* () {
-        const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+        const { botId } = yield* h.bot.createBot({ name: "Bot", modelSelection: MODEL });
         const page = { attachmentId: "p", title: "Plan", height: 400 };
-        yield* Bots.sendMessage({ botId, text: "Show me, then wait." });
+        yield* h.bot.sendMessage({ botId, text: "Show me, then wait." });
         h.pages.set(h.runs[0]!.runId, [page, "Here is the plan.", "Reply when ready."]);
-        yield* runTool({ bot: botId, argv: ["say", "Waiting."], stdin: "" });
+        yield* h.bot.runTool({ bot: botId, argv: ["say", "Waiting."], stdin: "" });
         yield* endRun(h, botId, 0, null);
 
         const chat = yield* h.runtime.existingStore()!.recentChat(botId, 100);
@@ -691,8 +731,8 @@ describe("bot turns", () => {
   it.effect("counts a sent message as the reply a user message is owed", () =>
     withHarness((h) =>
       Effect.gen(function* () {
-        const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
-        yield* Bots.sendMessage({ botId, text: "Ping." });
+        const { botId } = yield* h.bot.createBot({ name: "Bot", modelSelection: MODEL });
+        yield* h.bot.sendMessage({ botId, text: "Ping." });
         h.pages.set(h.runs[0]!.runId, ["Pong."]);
         yield* endRun(h, botId, 0, null);
         expect(yield* chatOf(h, botId)).toEqual([
@@ -708,12 +748,12 @@ describe("bot turns", () => {
     () =>
       withHarness((h) =>
         Effect.gen(function* () {
-          const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+          const { botId } = yield* h.bot.createBot({ name: "Bot", modelSelection: MODEL });
           const store = h.runtime.existingStore()!;
           const roleOf = () =>
             NodeFSP.readFile(NodePath.join(h.runtime.botsDir, botId, "role.md"), "utf8");
           const edit = (role: string) =>
-            runTool({ bot: botId, argv: ["role", "edit", "-"], stdin: role });
+            h.bot.runTool({ bot: botId, argv: ["role", "edit", "-"], stdin: role });
 
           // Editing its role asks by default: nothing changes until the user approves.
           expect(yield* edit("Watch CI.")).toContain("the user must approve");
@@ -726,14 +766,14 @@ describe("bot turns", () => {
           expect(yield* Effect.promise(() => roleOf().catch(() => ""))).toBe("");
           // The sidebar shows a waiting question apart from unread posts.
           const counts = () =>
-            Bots.listBots().pipe(
+            h.bot.listBots().pipe(
               Effect.map(({ bots }) => ({
                 questions: bots[0]!.questions,
                 unread: bots[0]!.unread,
               })),
             );
           expect(yield* counts()).toEqual({ questions: 1, unread: 0 });
-          yield* answerQuestion({ botId, questionId: question!.id, approve: true });
+          yield* h.bot.answerQuestion({ botId, questionId: question!.id, approve: true });
           expect((yield* counts()).questions).toBe(0);
           expect(yield* Effect.promise(roleOf)).toBe("Watch CI.");
           // The answer wakes the bot.
@@ -742,17 +782,17 @@ describe("bot turns", () => {
           );
           // A question is answered once.
           const again = yield* httpFailure(
-            answerQuestion({ botId, questionId: question!.id, approve: true }),
+            h.bot.answerQuestion({ botId, questionId: question!.id, approve: true }),
           );
           expect(again.code).toBe("question_closed");
 
           // Unanswered, it lapses after a day and its action never runs.
           yield* edit("Watch nothing.");
           yield* TestClock.adjust(86_400_000 - 1);
-          yield* Bots.fireDueRoutines();
+          yield* h.bot.fireDueRoutines();
           expect(yield* store.openQuestions(botId)).toHaveLength(1);
           yield* TestClock.adjust(1);
-          yield* Bots.fireDueRoutines();
+          yield* h.bot.fireDueRoutines();
           expect(yield* store.openQuestions(botId)).toEqual([]);
           expect((yield* store.queued(botId)).at(-1)?.text).toContain("lapsed unanswered");
           expect(yield* Effect.promise(roleOf)).toBe("Watch CI.");
@@ -763,8 +803,8 @@ describe("bot turns", () => {
   it.effect("returns the workspace before a bot has a work thread", () =>
     withHarness((h) =>
       Effect.gen(function* () {
-        const { botId } = yield* Bots.createBot({ name: "Files", modelSelection: MODEL });
-        const detail = yield* Bots.readBot(new URLSearchParams({ botId }));
+        const { botId } = yield* h.bot.createBot({ name: "Files", modelSelection: MODEL });
+        const detail = yield* h.bot.readBot(new URLSearchParams({ botId }));
         expect(detail.bot.workThreadId).toBeNull();
         expect(detail.workspacePath).toBe(NodePath.join(h.runtime.botsDir, botId, "workspace"));
         expect(detail.notesPath).toBe(NodePath.join(detail.workspacePath, "notes"));
@@ -775,22 +815,22 @@ describe("bot turns", () => {
   it.effect("holds turns while paused and past the day's budget, saying so once", () =>
     withHarness((h) =>
       Effect.gen(function* () {
-        const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
-        const read = () => Bots.readBot(new URLSearchParams({ botId }));
+        const { botId } = yield* h.bot.createBot({ name: "Bot", modelSelection: MODEL });
+        const read = () => h.bot.readBot(new URLSearchParams({ botId }));
         expect((yield* read()).bot.settings.turnsPerDay).toBe(200);
-        yield* Bots.setPaused({ botId, paused: true });
-        yield* Bots.sendMessage({ botId, text: "Hi" });
+        yield* h.bot.setPaused({ botId, paused: true });
+        yield* h.bot.sendMessage({ botId, text: "Hi" });
         expect(h.runs).toHaveLength(0);
-        yield* Bots.setPaused({ botId, paused: false });
+        yield* h.bot.setPaused({ botId, paused: false });
         expect(h.runs).toHaveLength(1);
 
-        yield* Bots.saveSettings({
+        yield* h.bot.saveSettings({
           botId,
           settings: { turnsPerDay: 1, maxThreads: 3 },
         });
         yield* endRun(h, botId, 0, "Hello.");
-        yield* Bots.sendMessage({ botId, text: "Still there?" });
-        yield* Bots.sendMessage({ botId, text: "Hello?" });
+        yield* h.bot.sendMessage({ botId, text: "Still there?" });
+        yield* h.bot.sendMessage({ botId, text: "Hello?" });
         expect(h.runs).toHaveLength(1);
         expect((yield* chatOf(h, botId)).filter(([role]) => role === "error")).toEqual([
           [
@@ -801,7 +841,7 @@ describe("bot turns", () => {
         expect((yield* read()).bot.turnsToday).toBe(1);
 
         // One more turn a day lets the held messages run now.
-        yield* Bots.saveSettings({
+        yield* h.bot.saveSettings({
           botId,
           settings: { turnsPerDay: 2, maxThreads: 3 },
         });
@@ -811,7 +851,7 @@ describe("bot turns", () => {
         yield* endRun(h, botId, 1, "Done for today.");
         yield* TestClock.adjust("24 hours");
         expect((yield* read()).bot.turnsToday).toBe(0);
-        yield* Bots.sendMessage({ botId, text: "A new day" });
+        yield* h.bot.sendMessage({ botId, text: "A new day" });
         expect(h.runs).toHaveLength(3);
         expect((yield* read()).bot.turnsToday).toBe(1);
 
@@ -825,13 +865,13 @@ describe("bot turns", () => {
   it.effect("shows the latest line of its work thread while a turn runs", () =>
     withHarness((h) =>
       Effect.gen(function* () {
-        const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
-        yield* Bots.sendMessage({ botId, text: "Clean up" });
+        const { botId } = yield* h.bot.createBot({ name: "Bot", modelSelection: MODEL });
+        yield* h.bot.sendMessage({ botId, text: "Clean up" });
         const threadId = (yield* h.runtime.existingStore()!.getBot(botId))!.workThreadId!;
         const runId = h.runs[0]!.runId;
         const item = (fields: Record<string, unknown>) =>
           ({ type: "turn-item.updated", threadId, payload: { runId, ...fields } }) as never;
-        const read = () => Bots.readBot(new URLSearchParams({ botId }));
+        const read = () => h.bot.readBot(new URLSearchParams({ botId }));
 
         // Streamed text and NO_REPLY leave the line alone.
         yield* followThreads(
@@ -870,10 +910,10 @@ describe("bot turns", () => {
   it.effect("stays working from the ask to the answer while a thread it follows now runs", () =>
     withHarness((h) =>
       Effect.gen(function* () {
-        const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+        const { botId } = yield* h.bot.createBot({ name: "Bot", modelSelection: MODEL });
         const store = h.runtime.existingStore()!;
-        const read = () => Bots.readBot(new URLSearchParams({ botId }));
-        yield* Bots.sendMessage({ botId, text: "Find old backups" });
+        const read = () => h.bot.readBot(new URLSearchParams({ botId }));
+        yield* h.bot.sendMessage({ botId, text: "Find old backups" });
         const since = (yield* read()).workingSince;
         expect(since).not.toBeNull();
 
@@ -895,7 +935,7 @@ describe("bot turns", () => {
         yield* endRun(h, botId, 0, "NO_REPLY");
         expect((yield* chatOf(h, botId)).filter(([role]) => role !== "user")).toEqual([]);
         expect((yield* read()).workingSince).toBe(since);
-        expect((yield* Bots.listBots()).bots[0]!.working).toBe(true);
+        expect((yield* h.bot.listBots()).bots[0]!.working).toBe(true);
 
         // Its progress is the chat's line; a thread followed only on attention gives none.
         const said = (threadId: string, text: string) =>
@@ -936,17 +976,17 @@ describe("bot turns", () => {
     withHarness((h) =>
       Effect.gen(function* () {
         // No pick: the broadest the provider offers up to auto, which it lacks.
-        const unpicked = yield* Bots.createBot({ name: "Default", modelSelection: MODEL });
+        const unpicked = yield* h.bot.createBot({ name: "Default", modelSelection: MODEL });
         expect(
           (yield* h.runtime.existingStore()!.getBot(unpicked.botId))?.settings.runtimeMode,
         ).toBe("auto-accept-edits");
-        const { botId } = yield* Bots.createBot({
+        const { botId } = yield* h.bot.createBot({
           name: "Ops",
           modelSelection: MODEL,
           runtimeMode: "full-access",
         });
-        yield* Bots.sendMessage({ botId, text: "Hi" });
-        yield* Bots.saveSettings({
+        yield* h.bot.sendMessage({ botId, text: "Hi" });
+        yield* h.bot.saveSettings({
           botId,
           settings: { turnsPerDay: 100, maxThreads: 3, runtimeMode: "auto" },
         });
@@ -959,7 +999,7 @@ describe("bot turns", () => {
         const threadId = (yield* h.runtime.existingStore()!.getBot(botId))!.workThreadId!;
         h.threadModes.set(threadId, "full-access");
         yield* endRun(h, botId, h.runs.length - 1, "Hello");
-        yield* Bots.sendMessage({ botId, text: "Again" });
+        yield* h.bot.sendMessage({ botId, text: "Again" });
         expect(h.threadModes.get(threadId)).toBe("auto-accept-edits");
       }),
     ),
@@ -968,8 +1008,8 @@ describe("bot turns", () => {
   it.effect("delays mention wakes by 30 seconds on the Effect clock", () =>
     withChat((h) =>
       Effect.gen(function* () {
-        const { botId } = yield* Bots.createBot({ name: "Mentions", modelSelection: MODEL });
-        yield* Bots.saveSettings({
+        const { botId } = yield* h.bot.createBot({ name: "Mentions", modelSelection: MODEL });
+        yield* h.bot.saveSettings({
           botId,
           settings: {
             turnsPerDay: 100,
@@ -1006,10 +1046,10 @@ describe("bot turns", () => {
       withChat((h) =>
         Effect.gen(function* () {
           const store = h.runtime.existingStore()!;
-          const first = yield* Bots.createBot({ name: "Inbox", modelSelection: MODEL });
-          const second = yield* Bots.createBot({ name: "Other", modelSelection: MODEL });
+          const first = yield* h.bot.createBot({ name: "Inbox", modelSelection: MODEL });
+          const second = yield* h.bot.createBot({ name: "Other", modelSelection: MODEL });
           const save = (botId: string, enabled: boolean, mentions: boolean) =>
-            Bots.saveSettings({
+            h.bot.saveSettings({
               botId,
               settings: {
                 turnsPerDay: 100,
@@ -1039,7 +1079,7 @@ describe("bot turns", () => {
           expect((yield* example(second.botId))?.config.mentions).toBe(false);
 
           const unknown = yield* httpFailure(
-            Bots.saveSettings({
+            h.bot.saveSettings({
               botId: first.botId,
               settings: {
                 turnsPerDay: 100,
@@ -1085,20 +1125,20 @@ describe("bot turns", () => {
   );
 
   it.effect("offers no chat where the environment has no chat channel", () =>
-    withHarness(() =>
+    withHarness((h) =>
       Effect.gen(function* () {
-        const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
-        expect(yield* runTool({ bot: botId, argv: ["help"], stdin: "" })).not.toContain(
+        const { botId } = yield* h.bot.createBot({ name: "Bot", modelSelection: MODEL });
+        expect(yield* h.bot.runTool({ bot: botId, argv: ["help"], stdin: "" })).not.toContain(
           "send <conversation>",
         );
         const refused = yield* httpFailure(
-          runTool({ bot: botId, argv: ["chat", "unread"], stdin: "" }),
+          h.bot.runTool({ bot: botId, argv: ["chat", "unread"], stdin: "" }),
         );
         expect(refused.detail).toBe(
           "No chat channel is on for you; the user can turn one on in your settings.",
         );
         const unknown = yield* httpFailure(
-          runTool({ bot: botId, argv: ["example", "unread"], stdin: "" }),
+          h.bot.runTool({ bot: botId, argv: ["example", "unread"], stdin: "" }),
         );
         expect(unknown.detail).toBe('Unknown command "example". Run help.');
       }),
@@ -1109,10 +1149,10 @@ describe("bot turns", () => {
     withChat((h) =>
       Effect.gen(function* () {
         const store = h.runtime.existingStore()!;
-        const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
-        const tool = (...argv: string[]) => runTool({ bot: botId, argv, stdin: "" });
+        const { botId } = yield* h.bot.createBot({ name: "Bot", modelSelection: MODEL });
+        const tool = (...argv: string[]) => h.bot.runTool({ bot: botId, argv, stdin: "" });
         const save = (enabled: boolean, send: "allow" | "ask", signature = "") =>
-          Bots.saveSettings({
+          h.bot.saveSettings({
             botId,
             settings: {
               turnsPerDay: 100,
@@ -1138,7 +1178,11 @@ describe("bot turns", () => {
         const [question] = yield* store.openQuestions(botId);
         expect(question?.text).toBe('Example: send as you to "Jordan Lee"\n\nOn it\n\n-- Bot');
         expect(yield* tool("example", "read", "c-dm-jordan")).not.toContain("On it");
-        const approved = yield* answerQuestion({ botId, questionId: question!.id, approve: true });
+        const approved = yield* h.bot.answerQuestion({
+          botId,
+          questionId: question!.id,
+          approve: true,
+        });
         expect(approved.ok).toBe(true);
         expect(yield* tool("example", "read", "c-dm-jordan")).toContain("On it");
 
@@ -1146,7 +1190,7 @@ describe("bot turns", () => {
         yield* tool("example", "send", "c-dm-jordan", "Later");
         const [later] = yield* store.openQuestions(botId);
         yield* save(false, "ask");
-        const lapsed = yield* answerQuestion({ botId, questionId: later!.id, approve: true });
+        const lapsed = yield* h.bot.answerQuestion({ botId, questionId: later!.id, approve: true });
         expect(lapsed).toEqual({
           ok: false,
           output: "Example is off for you; the user can turn it on in your settings.",
@@ -1163,10 +1207,10 @@ describe("bot turns", () => {
   it.effect("joins a message to the running turn when T3 steers it in", () =>
     withHarness((h) =>
       Effect.gen(function* () {
-        const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
-        yield* Bots.sendMessage({ botId, text: "Start." });
+        const { botId } = yield* h.bot.createBot({ name: "Bot", modelSelection: MODEL });
+        yield* h.bot.sendMessage({ botId, text: "Start." });
         h.steerDelivery = "steered";
-        const { messageId } = yield* Bots.sendMessage({ botId, text: "Also this." });
+        const { messageId } = yield* h.bot.sendMessage({ botId, text: "Also this." });
         const steered = (yield* h.runtime.existingStore()!.recentChat(botId, 10)).find(
           (message) => message.id === messageId,
         );
@@ -1182,13 +1226,13 @@ describe("bot turns", () => {
     withHarness((h) =>
       Effect.gen(function* () {
         const ownModel = { ...MODEL, options: [{ id: "effort", value: "medium" }] };
-        const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: ownModel });
+        const { botId } = yield* h.bot.createBot({ name: "Bot", modelSelection: ownModel });
         const store = h.runtime.existingStore()!;
         const legacySettings = { ...(yield* store.getBot(botId))!.settings, threads: "ask" };
         yield* store.setSettings(botId, legacySettings);
         h.projects.push({ id: "p1", title: "Repo", workspaceRoot: "/repo" });
         const start = (prompt: string) =>
-          runTool({
+          h.bot.runTool({
             bot: botId,
             argv: ["thread", "start", "--project=Repo", "--follow", "now", prompt],
             stdin: "",
@@ -1206,7 +1250,7 @@ describe("bot turns", () => {
         expect(yield* store.listThreads(botId)).toHaveLength(1);
         expect(h.runtime.ownedThreads.size).toBe(1);
 
-        yield* Bots.saveSettings({
+        yield* h.bot.saveSettings({
           botId,
           settings: { turnsPerDay: 200, maxThreads: 1, threads: "retired value" },
         });
@@ -1222,7 +1266,7 @@ describe("bot turns", () => {
   it.effect("tells the bot when a thread's context fills, and sends fresh on --fresh", () =>
     withHarness((h) =>
       Effect.gen(function* () {
-        const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+        const { botId } = yield* h.bot.createBot({ name: "Bot", modelSelection: MODEL });
         const store = h.runtime.existingStore()!;
         const legacySettings = { ...(yield* store.getBot(botId))!.settings, threads: "ask" };
         yield* store.setSettings(botId, legacySettings);
@@ -1235,7 +1279,7 @@ describe("bot turns", () => {
           createdAt: "t0",
         });
         h.shells.set("t1", { latestRunId: "r", status: "idle" });
-        const tool = (...argv: string[]) => runTool({ bot: botId, argv, stdin: "" });
+        const tool = (...argv: string[]) => h.bot.runTool({ bot: botId, argv, stdin: "" });
 
         expect(yield* tool("thread", "read", "t1")).toContain("does not report context size");
         h.usage.set("t1", { usedTokens: 50_000, maxTokens: 200_000 });
@@ -1261,10 +1305,10 @@ describe("bot turns", () => {
   it.effect("renames the bot and moves it and its threads to the models the user picks", () =>
     withHarness((h) =>
       Effect.gen(function* () {
-        const { botId } = yield* Bots.createBot({ name: "Ops", modelSelection: MODEL });
+        const { botId } = yield* h.bot.createBot({ name: "Ops", modelSelection: MODEL });
         const store = h.runtime.existingStore()!;
         h.projects.push({ id: "p1", title: "Repo", workspaceRoot: "/repo" });
-        yield* Bots.sendMessage({ botId, text: "Hi" });
+        yield* h.bot.sendMessage({ botId, text: "Hi" });
         yield* endRun(h, botId, 0, "Hello.");
         const workThreadId = (yield* store.getBot(botId))!.workThreadId!;
         const limits = { turnsPerDay: 100, maxThreads: 3 };
@@ -1274,20 +1318,20 @@ describe("bot turns", () => {
           options: [{ id: "effort", value: "high" }],
         };
 
-        yield* Bots.saveSettings({ botId, name: " DevOps ", settings: limits });
+        yield* h.bot.saveSettings({ botId, name: " DevOps ", settings: limits });
         expect((yield* store.getBot(botId))?.name).toBe("DevOps");
         expect(h.titles).toEqual([{ threadId: workThreadId, title: "DevOps (bot)" }]);
         expect((yield* store.queued(botId)).map((event) => event.text)).toEqual([
           "The user renamed you from Ops to DevOps.",
         ]);
         expect(
-          (yield* httpFailure(Bots.saveSettings({ botId, name: " ", settings: limits }))).detail,
+          (yield* httpFailure(h.bot.saveSettings({ botId, name: " ", settings: limits }))).detail,
         ).toContain("Name the bot");
 
         // Its threads run on the model set for them, effort included, unless it names another.
-        yield* Bots.saveSettings({ botId, settings: { ...limits, threadModel: codex } });
+        yield* h.bot.saveSettings({ botId, settings: { ...limits, threadModel: codex } });
         const start = (...flags: string[]) =>
-          runTool({
+          h.bot.runTool({
             bot: botId,
             argv: ["thread", "start", "--project=Repo", ...flags, "Go"],
             stdin: "",
@@ -1296,17 +1340,17 @@ describe("bot turns", () => {
         expect(h.models.at(-1)).toEqual(codex);
         yield* start("--provider", MODEL.instanceId, "--model", MODEL.model);
         expect(h.models.at(-1)).toEqual({ instanceId: MODEL.instanceId, model: MODEL.model });
-        expect(yield* runTool({ bot: botId, argv: ["help"], stdin: "" })).toContain(
+        expect(yield* h.bot.runTool({ bot: botId, argv: ["help"], stdin: "" })).toContain(
           "runs on --provider codex --model gpt-5.5",
         );
-        yield* Bots.saveSettings({ botId, settings: { ...limits, threadModel: null } });
+        yield* h.bot.saveSettings({ botId, settings: { ...limits, threadModel: null } });
         yield* start();
         expect(h.models.at(-1)).toEqual(MODEL);
 
         // Its own turns move to another provider on a fresh session, not a handed-over one.
-        yield* Bots.saveSettings({ botId, modelSelection: codex, settings: limits });
+        yield* h.bot.saveSettings({ botId, modelSelection: codex, settings: limits });
         expect((yield* store.getBot(botId))?.modelSelection).toEqual(codex);
-        yield* Bots.sendMessage({ botId, text: "Still there?" });
+        yield* h.bot.sendMessage({ botId, text: "Still there?" });
         expect(h.sends.at(-1)).toEqual({ mode: "queue", freshContext: true });
       }),
     ),
@@ -1315,12 +1359,12 @@ describe("bot turns", () => {
   it.effect("accepts a tool call only with the token of a bot that exists", () =>
     withHarness((h) =>
       Effect.gen(function* () {
-        const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+        const { botId } = yield* h.bot.createBot({ name: "Bot", modelSelection: MODEL });
         const token = yield* Effect.promise(() =>
           NodeFSP.readFile(NodePath.join(h.runtime.botsDir, botId, "token"), "utf8"),
         );
         const call = (bot: string, given: string) =>
-          authenticateTool(`Bearer ${given}`, { bot, argv: ["help"], stdin: "" });
+          h.bot.authenticateTool(`Bearer ${given}`, { bot, argv: ["help"], stdin: "" });
         expect((yield* call(botId, token)).bot).toBe(botId);
         expect((yield* httpFailure(call(botId, "wrong"))).status).toBe(401);
         // A token file outside any stored bot is never read.
@@ -1335,7 +1379,7 @@ describe("bot turns", () => {
   it.effect("shows only notes inside the bot's folder, not where a link points", () =>
     withHarness((h) =>
       Effect.gen(function* () {
-        const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+        const { botId } = yield* h.bot.createBot({ name: "Bot", modelSelection: MODEL });
         const notes = NodePath.join(h.runtime.botsDir, botId, "workspace", "notes");
         const outside = NodePath.join(h.runtime.botsDir, "secret.txt");
         yield* Effect.promise(async () => {
@@ -1343,7 +1387,7 @@ describe("bot turns", () => {
           await NodeFSP.writeFile(outside, "secret");
           await NodeFSP.symlink(outside, NodePath.join(notes, "link.md"));
         });
-        const read = (name: string) => Bots.readNote(new URLSearchParams({ botId, name }));
+        const read = (name: string) => h.bot.readNote(new URLSearchParams({ botId, name }));
         expect((yield* read("plan.md")).text).toBe("Plan");
         expect((yield* httpFailure(read("link.md"))).status).toBe(404);
       }),
@@ -1355,7 +1399,7 @@ describe("bot turns", () => {
     () =>
       withHarness((h) =>
         Effect.gen(function* () {
-          const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+          const { botId } = yield* h.bot.createBot({ name: "Bot", modelSelection: MODEL });
           const store = h.runtime.existingStore()!;
           for (const threadId of ["t-down", "t-taken"]) {
             yield* store.addThread({
@@ -1384,11 +1428,15 @@ describe("bot turns", () => {
             expect.stringContaining("The user took over thread t-taken"),
           ]);
           const refused = yield* httpFailure(
-            runTool({ bot: botId, argv: ["thread", "send", "t-taken", "Carry on"], stdin: "" }),
+            h.bot.runTool({
+              bot: botId,
+              argv: ["thread", "send", "t-taken", "Carry on"],
+              stdin: "",
+            }),
           );
           expect(refused.detail).toContain("took this thread over");
 
-          yield* Bots.handBack({ botId, threadId: "t-taken" });
+          yield* h.bot.handBack({ botId, threadId: "t-taken" });
           expect((yield* store.getThread("t-taken"))?.takenOver).toBe(false);
           expect((yield* store.queued(botId)).at(-1)).toMatchObject({ wakes: true });
           expect((yield* store.queued(botId)).at(-1)?.text).toContain("handed thread t-taken back");
@@ -1401,7 +1449,7 @@ describe("bot turns", () => {
     () =>
       withHarness((h) =>
         Effect.gen(function* () {
-          const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+          const { botId } = yield* h.bot.createBot({ name: "Bot", modelSelection: MODEL });
           const store = h.runtime.existingStore()!;
           for (const [threadId, message] of [
             // The user typed here while the server was down; only the end of their run is seen.
@@ -1441,7 +1489,7 @@ describe("bot turns", () => {
   it.effect("lists the skills a bot wrote and the shared ones, its own winning a name", () =>
     withHarness((h) =>
       Effect.gen(function* () {
-        const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+        const { botId } = yield* h.bot.createBot({ name: "Bot", modelSelection: MODEL });
         const write = (dir: string, body: string) =>
           Effect.promise(async () => {
             await NodeFSP.mkdir(dir, { recursive: true });
@@ -1458,7 +1506,7 @@ describe("bot turns", () => {
           "---\nname: ci-check\ndescription: older shared copy\n---\n",
         );
         yield* write(NodePath.join(shared, "release"), "No frontmatter here.");
-        yield* Bots.sendMessage({ botId, text: "Hi" });
+        yield* h.bot.sendMessage({ botId, text: "Hi" });
         const skills = h.packets[0]!.split("Skills:\n")[1]!.split("\n").slice(0, 3);
         expect(skills).toEqual([
           `  ci-check: Use when CI on r/* is red. - ${NodePath.join(own, "ci", "SKILL.md")}`,
@@ -1567,19 +1615,19 @@ describe("bot role", () => {
   it.effect("adds one rule the user approves, and shows only what an edit changes", () =>
     withHarness((h) =>
       Effect.gen(function* () {
-        const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+        const { botId } = yield* h.bot.createBot({ name: "Bot", modelSelection: MODEL });
         const store = h.runtime.existingStore()!;
         const roleOf = () =>
           NodeFSP.readFile(NodePath.join(h.runtime.botsDir, botId, "role.md"), "utf8");
         const approveLast = Effect.fn("Test.approveLast")(function* () {
           const question = (yield* store.openQuestions(botId)).at(-1)!;
-          return yield* answerQuestion({ botId, questionId: question.id, approve: true }).pipe(
-            Effect.as(question.text),
-          );
+          return yield* h.bot
+            .answerQuestion({ botId, questionId: question.id, approve: true })
+            .pipe(Effect.as(question.text));
         });
 
-        yield* Bots.saveRole({ botId, role: "Watch CI.\n\n## Rules\n- Ask before main." });
-        yield* runTool({
+        yield* h.bot.saveRole({ botId, role: "Watch CI.\n\n## Rules\n- Ask before main." });
+        yield* h.bot.runTool({
           bot: botId,
           argv: ["role", "add", "Never run bare t3 update."],
           stdin: "",
@@ -1589,7 +1637,7 @@ describe("bot role", () => {
           "Watch CI.\n\n## Rules\n- Ask before main.\n- Never run bare t3 update.",
         );
 
-        yield* runTool({
+        yield* h.bot.runTool({
           bot: botId,
           argv: ["role", "edit", "-"],
           stdin:
@@ -1599,7 +1647,7 @@ describe("bot role", () => {
           "change its role\n\nAdds:\nWatch CI and releases.\n\nRemoves:\nWatch CI.",
         );
         expect(
-          yield* runTool({
+          yield* h.bot.runTool({
             bot: botId,
             argv: ["role", "edit", "-"],
             stdin: yield* Effect.promise(roleOf),
@@ -1614,17 +1662,20 @@ describe("bot memory", () => {
   it.effect("forgets a note the user removes, and only that bot's", () =>
     withHarness((h) =>
       Effect.gen(function* () {
-        const { botId } = yield* Bots.createBot({ name: "Release Watcher", modelSelection: MODEL });
+        const { botId } = yield* h.bot.createBot({
+          name: "Release Watcher",
+          modelSelection: MODEL,
+        });
         const store = h.runtime.existingStore()!;
         const kept = yield* store.addMemory(botId, "Releases ship from r/main.");
         const dropped = yield* store.addMemory(botId, "Old host is gone.");
 
-        yield* Bots.forgetMemory({ botId, memoryId: dropped });
+        yield* h.bot.forgetMemory({ botId, memoryId: dropped });
         expect(yield* store.listMemory(botId)).toEqual([
           { id: kept, text: "Releases ship from r/main." },
         ]);
 
-        const missing = yield* httpFailure(Bots.forgetMemory({ botId, memoryId: dropped }));
+        const missing = yield* httpFailure(h.bot.forgetMemory({ botId, memoryId: dropped }));
         expect(missing.status).toBe(404);
       }),
     ),
@@ -1633,12 +1684,12 @@ describe("bot memory", () => {
   it.effect("moves a rule filed as memory into the role", () =>
     withHarness((h) =>
       Effect.gen(function* () {
-        const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+        const { botId } = yield* h.bot.createBot({ name: "Bot", modelSelection: MODEL });
         const store = h.runtime.existingStore()!;
-        yield* Bots.saveRole({ botId, role: "Watch CI." });
+        yield* h.bot.saveRole({ botId, role: "Watch CI." });
         const rule = yield* store.addMemory(botId, "Never run bare t3 update.");
 
-        yield* Bots.moveMemoryToRole({ botId, memoryId: rule });
+        yield* h.bot.moveMemoryToRole({ botId, memoryId: rule });
         expect(yield* store.listMemory(botId)).toEqual([]);
         expect(
           yield* Effect.promise(() =>

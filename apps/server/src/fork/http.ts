@@ -28,7 +28,7 @@ import { ThreadLaunchBaseRefError } from "../orchestration-v2/ThreadLaunchServic
 import { requestUrl } from "../requestUrl.ts";
 import { BotRuntime, type BotEvent, type BotRuntimeError } from "./bot/BotRuntime.ts";
 import * as Bots from "./bot/operations.ts";
-import { answerQuestion, authenticateTool, runTool } from "./bot/tools.ts";
+import { BotOperationError, BotRejection, describeBotError } from "./bot/errors.ts";
 import { isChannelConfigError } from "./channels/config.ts";
 import { isAdapterRequestError, isChannelUnavailableError, type HubEvent } from "./channels/hub.ts";
 import { InboxRuntime, type InboxRuntimeShape } from "./inbox/InboxRuntime.ts";
@@ -44,7 +44,16 @@ const BOTS = `${FORK_ROUTE_PREFIX}/bots`;
 
 const NO_STORE = { "cache-control": "no-store" };
 const JSON_MAX_BODY_BYTES = 256 * 1024;
-const TOO_LARGE = new Inbox.ForkHttpError({
+class ForkRequestError extends Schema.TaggedError<
+  ForkRequestError,
+  { readonly brand: unique symbol }
+>()("ForkRequestError", {
+  status: Schema.Number,
+  code: Schema.String,
+  detail: Schema.String,
+}) {}
+
+const TOO_LARGE = new ForkRequestError({
   status: 413,
   code: "too_large",
   detail: "The file is larger than 100 MB.",
@@ -101,8 +110,42 @@ export const inboxErrorResponse = (error: Inbox.InboxOperationError | Inbox.Inbo
   return errorResponse({ status: 500, code: "internal", detail });
 };
 
+const botRejectionStatus = {
+  bad_request: 400,
+  not_found: 404,
+  scratch_unavailable: 409,
+  work_thread_no_run: 500,
+  unauthorized: 401,
+  tool_error: 400,
+  question_closed: 409,
+} satisfies Record<BotRejection["code"], number>;
+
+export const botErrorResponse = (error: BotRejection | BotOperationError) => {
+  const detail = describeBotError(error);
+  if (error._tag === "BotRejection") {
+    return errorResponse({
+      status: botRejectionStatus[error.code],
+      code: error.code === "work_thread_no_run" ? "internal" : error.code,
+      field: error.field,
+      detail,
+    });
+  }
+  switch (error.stage) {
+    case "set-runtime-mode":
+      return errorResponse({ status: 400, code: "bad_request", field: "runtimeMode", detail });
+    case "launch-owned-thread":
+    case "send-to-owned-thread":
+    case "read-owned-thread":
+      return errorResponse({ status: 400, code: "tool_error", detail });
+    default:
+      return errorResponse({ status: 500, code: "internal", detail });
+  }
+};
+
 const forkErrorHandlers = {
-  ForkHttpError: (error: Inbox.ForkHttpError) => Effect.succeed(errorResponse(error)),
+  ForkRequestError: (error: ForkRequestError) => Effect.succeed(errorResponse(error)),
+  BotRejection: (error: BotRejection) => Effect.succeed(botErrorResponse(error)),
+  BotOperationError: (error: BotOperationError) => Effect.succeed(botErrorResponse(error)),
   InboxOperationError: (error: Inbox.InboxOperationError) =>
     Effect.succeed(inboxErrorResponse(error)),
   InboxRejection: (error: Inbox.InboxRejection) => Effect.succeed(inboxErrorResponse(error)),
@@ -144,7 +187,7 @@ const body = Effect.gen(function* () {
   return yield* request.json.pipe(
     Effect.provideService(HttpIncomingMessage.MaxBodySize, ByteSize.bytes(JSON_MAX_BODY_BYTES)),
     Effect.mapError(
-      () => new Inbox.ForkHttpError({ status: 400, code: "bad_request", detail: "Send JSON." }),
+      () => new ForkRequestError({ status: 400, code: "bad_request", detail: "Send JSON." }),
     ),
   );
 });
@@ -177,7 +220,9 @@ export const makeRoute =
     scope: AuthEnvironmentScope,
     handle: Effect.Effect<
       A,
-      | Inbox.ForkHttpError
+      | ForkRequestError
+      | BotRejection
+      | BotOperationError
       | Inbox.InboxContextError
       | Inbox.InboxOperationError
       | Inbox.InboxRejection
@@ -214,7 +259,7 @@ const channelIdOf = (input: unknown) =>
   typeof input === "object" && input !== null && typeof Reflect.get(input, "channelId") === "string"
     ? Effect.succeed(Reflect.get(input, "channelId") as string)
     : Effect.fail(
-        new Inbox.ForkHttpError({ status: 400, code: "bad_request", detail: "Name a channel." }),
+        new ForkRequestError({ status: 400, code: "bad_request", detail: "Name a channel." }),
       );
 
 /** One stream for every fork view: inbox and channel changes, and which bot changed. */
@@ -251,6 +296,7 @@ const eventsRoute = (runtime: InboxRuntimeShape, bots: BotRuntime["Service"]) =>
 
 /** The `t3bot` CLI in a bot's work thread: no session, the bot's own token instead. */
 const toolRoute = (
+  bot: Bots.BotOperations["Service"],
   inbox: Inbox.InboxOperations["Service"],
   runtime: InboxRuntimeShape,
   bots: BotRuntime["Service"],
@@ -262,8 +308,8 @@ const toolRoute = (
     Effect.gen(function* () {
       const request = yield* HttpServerRequest.HttpServerRequest;
       const input = yield* body;
-      const tool = yield* authenticateTool(request.headers["authorization"], input);
-      return ok({ output: yield* runTool(tool) });
+      const tool = yield* bot.authenticateTool(request.headers["authorization"], input);
+      return ok({ output: yield* bot.runTool(tool) });
     }).pipe(
       Effect.provideService(BotRuntime, bots),
       Effect.provideService(Artifacts.Artifacts, contextFiles),
@@ -300,6 +346,7 @@ const mediaRoute = (route: ReturnType<typeof makeRoute>, inbox: Inbox.InboxOpera
   );
 
 const routes = (
+  bot: Bots.BotOperations["Service"],
   inbox: Inbox.InboxOperations["Service"],
   runtime: InboxRuntimeShape,
   bots: BotRuntime["Service"],
@@ -422,101 +469,101 @@ const routes = (
       ),
     ),
     mediaRoute(route, inbox),
-    route("GET", BOTS, AuthOrchestrationReadScope, Bots.listBots()),
+    route("GET", BOTS, AuthOrchestrationReadScope, bot.listBots()),
     route(
       "GET",
       `${BOTS}/bot`,
       AuthOrchestrationReadScope,
-      query.pipe(Effect.flatMap(Bots.readBot)),
+      query.pipe(Effect.flatMap(bot.readBot)),
     ),
     route(
       "POST",
       `${BOTS}/create`,
       AuthOrchestrationOperateScope,
-      body.pipe(Effect.flatMap(Bots.createBot)),
+      body.pipe(Effect.flatMap(bot.createBot)),
     ),
     route(
       "POST",
       `${BOTS}/role`,
       AuthOrchestrationOperateScope,
-      body.pipe(Effect.flatMap(Bots.saveRole)),
+      body.pipe(Effect.flatMap(bot.saveRole)),
     ),
     route(
       "POST",
       `${BOTS}/delete`,
       AuthOrchestrationOperateScope,
-      body.pipe(Effect.flatMap(Bots.deleteBot)),
+      body.pipe(Effect.flatMap(bot.deleteBot)),
     ),
     route(
       "POST",
       `${BOTS}/send`,
       AuthOrchestrationOperateScope,
-      body.pipe(Effect.flatMap(Bots.sendMessage)),
+      body.pipe(Effect.flatMap(bot.sendMessage)),
     ),
     route(
       "POST",
       `${BOTS}/routine/run`,
       AuthOrchestrationOperateScope,
-      body.pipe(Effect.flatMap(Bots.runRoutineNow)),
+      body.pipe(Effect.flatMap(bot.runRoutineNow)),
     ),
     route(
       "POST",
       `${BOTS}/item/reopen`,
       AuthOrchestrationOperateScope,
-      body.pipe(Effect.flatMap(Bots.reopenItem)),
+      body.pipe(Effect.flatMap(bot.reopenItem)),
     ),
     route(
       "POST",
       `${BOTS}/memory/forget`,
       AuthOrchestrationOperateScope,
-      body.pipe(Effect.flatMap(Bots.forgetMemory)),
+      body.pipe(Effect.flatMap(bot.forgetMemory)),
     ),
     route(
       "POST",
       `${BOTS}/memory/to-role`,
       AuthOrchestrationOperateScope,
-      body.pipe(Effect.flatMap(Bots.moveMemoryToRole)),
+      body.pipe(Effect.flatMap(bot.moveMemoryToRole)),
     ),
     route(
       "GET",
       `${BOTS}/note`,
       AuthOrchestrationReadScope,
-      query.pipe(Effect.flatMap(Bots.readNote)),
+      query.pipe(Effect.flatMap(bot.readNote)),
     ),
     route(
       "POST",
       `${BOTS}/seen`,
       AuthOrchestrationOperateScope,
-      body.pipe(Effect.flatMap(Bots.markSeen)),
+      body.pipe(Effect.flatMap(bot.markSeen)),
     ),
     route(
       "POST",
       `${BOTS}/pause`,
       AuthOrchestrationOperateScope,
-      body.pipe(Effect.flatMap(Bots.setPaused)),
+      body.pipe(Effect.flatMap(bot.setPaused)),
     ),
     route(
       "POST",
       `${BOTS}/settings`,
       AuthOrchestrationOperateScope,
-      body.pipe(Effect.flatMap(Bots.saveSettings)),
+      body.pipe(Effect.flatMap(bot.saveSettings)),
     ),
     route(
       "POST",
       `${BOTS}/thread/handback`,
       AuthOrchestrationOperateScope,
-      body.pipe(Effect.flatMap(Bots.handBack)),
+      body.pipe(Effect.flatMap(bot.handBack)),
     ),
     route(
       "POST",
       `${BOTS}/question/answer`,
       AuthOrchestrationOperateScope,
       body.pipe(
-        Effect.flatMap(answerQuestion),
+        Effect.flatMap(bot.answerQuestion),
         Effect.provideService(Inbox.InboxOperations, inbox),
       ),
     ),
-    toolRoute(inbox, runtime, bots, contextFiles),
+    toolRoute(bot, inbox, runtime, bots, contextFiles),
     eventsRoute(runtime, bots),
   );
 };
@@ -524,10 +571,11 @@ const routes = (
 export const routesLayer = Layer.unwrap(
   Effect.gen(function* () {
     return routes(
+      yield* Bots.BotOperations,
       yield* Inbox.InboxOperations,
       yield* InboxRuntime,
       yield* BotRuntime,
       yield* Artifacts.Artifacts,
     );
   }),
-).pipe(Layer.provide(Inbox.layer));
+).pipe(Layer.provide(Layer.merge(Inbox.layer, Bots.layer)));

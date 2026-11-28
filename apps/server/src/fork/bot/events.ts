@@ -9,18 +9,9 @@ import * as Stream from "effect/Stream";
 
 import * as ThreadManagement from "../../orchestration-v2/ThreadManagementService.ts";
 import { BotRuntime } from "./BotRuntime.ts";
-import {
-  activityLine,
-  type ActivityLine,
-  finishRun,
-  isTerminalRunStatus,
-  notify,
-  nowIso,
-  postError,
-  replyOf,
-} from "./operations.ts";
+import { activityLine, type ActivityLine, isTerminalRunStatus, nowIso } from "./operations.ts";
 import type { OwnedThread } from "./store.ts";
-import { takenOverByUser } from "./tools.ts";
+import * as Bots from "./operations.ts";
 
 /** What a bot's thread did: a run moved, or it asks for an answer or approval. */
 export type ThreadChange =
@@ -51,6 +42,7 @@ const observeThread = Effect.fn("ForkBot.observeThread")(function* (
   change: ThreadChange,
 ) {
   const runtime = yield* BotRuntime;
+  const bots = yield* Bots.BotOperations;
   const store = yield* runtime.store;
   const botId = owned.botId;
   const touch = Effect.gen(function* () {
@@ -63,7 +55,7 @@ const observeThread = Effect.fn("ForkBot.observeThread")(function* (
     yield* touch;
     const what = change.kind === "user_input" ? "a question answered" : "an approval";
     // Blocked until someone answers, so it always wakes the bot.
-    yield* notify(
+    yield* bots.notify(
       botId,
       `${describe(owned)} waits for ${what}. Only the user can answer it in the thread: tell them.`,
       true,
@@ -77,10 +69,10 @@ const observeThread = Effect.fn("ForkBot.observeThread")(function* (
   const takenNow =
     !owned.takenOver &&
     !seenRun &&
-    (yield* takenOverByUser(owned.projectId, owned.threadId, owned.handedBackAt));
+    (yield* bots.takenOverByUser(owned.projectId, owned.threadId, owned.handedBackAt));
   if (takenNow) {
     yield* store.updateThread(owned.threadId, { takenOver: true }, yield* nowIso);
-    yield* notify(
+    yield* bots.notify(
       botId,
       `The user took over ${describe(owned).toLowerCase()}. Leave it to them until they hand it back.`,
       false,
@@ -118,11 +110,11 @@ const observeThread = Effect.fn("ForkBot.observeThread")(function* (
   const failed = change.status !== "completed";
   const wakes = owned.follow === "now" || (owned.follow === "attention" && failed);
   // Its last word saves the bot a `thread read` and a model step on most wakes.
-  const reply = yield* replyOf(owned.projectId, owned.threadId, change.runId).pipe(
-    Effect.orElseSucceed(() => null),
-  );
+  const reply = yield* bots
+    .replyOf(owned.projectId, owned.threadId, change.runId)
+    .pipe(Effect.orElseSucceed(() => null));
   // The status is recorded once the bot woke, so a bot taking up the answer stays working.
-  yield* notify(botId, stoppedEvent(describe(owned), change.status, reply), wakes).pipe(
+  yield* bots.notify(botId, stoppedEvent(describe(owned), change.status, reply), wakes).pipe(
     Effect.ensuring(
       Effect.gen(function* () {
         yield* store.updateThread(owned.threadId, { status: change.status }, yield* nowIso);
@@ -135,6 +127,7 @@ export const followThreads = Effect.fn("ForkBot.followThreads")(function* <E, R>
   events: Stream.Stream<OrchestrationV2DomainEvent, E, R>,
 ) {
   const runtime = yield* BotRuntime;
+  const bots = yield* Bots.BotOperations;
   // Work-thread requests already posted; a request is updated more than once while pending.
   const posted = new Set<string>();
   const showActivity = Effect.fn("ForkBot.showActivity")(function* (
@@ -157,7 +150,7 @@ export const followThreads = Effect.fn("ForkBot.followThreads")(function* <E, R>
         yield* showActivity(workBot, event.threadId, activityLine(event.payload, shown));
       }
       if (event.type === "run.updated" && isTerminalRunStatus(event.payload.status)) {
-        yield* finishRun(workBot, event.payload.id, event.payload.status);
+        yield* bots.finishRun(workBot, event.payload.id, event.payload.status);
       }
       // The turn cannot go on until someone answers in the work thread, and only the user can.
       if (
@@ -166,7 +159,7 @@ export const followThreads = Effect.fn("ForkBot.followThreads")(function* <E, R>
         !posted.has(event.payload.id)
       ) {
         posted.add(event.payload.id);
-        yield* postError(
+        yield* bots.postError(
           workBot,
           `The bot's turn waits for ${event.payload.kind === "user_input" ? "an answer" : "an approval"} in its work thread. Open the work thread to answer it.`,
         );

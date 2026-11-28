@@ -11,7 +11,7 @@ import * as BotFiles from "./bot/BotFiles.ts";
 import * as BotRuntime from "./bot/BotRuntime.ts";
 import { startConnectors } from "./bot/connectors/registry.ts";
 import { followThreads, reconcileThreads } from "./bot/events.ts";
-import { fireDueRoutines, reconcile } from "./bot/operations.ts";
+import * as Bots from "./bot/operations.ts";
 import * as ChannelHub from "./channels/hub.ts";
 import { routesLayer } from "./http.ts";
 import * as Artifacts from "./inbox/artifacts.ts";
@@ -36,6 +36,7 @@ const botsLayer = Layer.effectDiscard(
   Effect.gen(function* () {
     const threads = yield* ThreadManagementService;
     const runtime = yield* BotRuntime.BotRuntime;
+    const bots = yield* Bots.BotOperations;
     // Nothing runs until a bot exists.
     yield* runtime.active.await.pipe(
       Effect.andThen(
@@ -44,7 +45,7 @@ const botsLayer = Layer.effectDiscard(
           [
             followThreads(threads.streamDomainEvents),
             Effect.yieldNow.pipe(
-              Effect.andThen(reconcile()),
+              Effect.andThen(bots.reconcile()),
               Effect.andThen(reconcileThreads()),
               // Catching up is best effort; it must not stop the following beside it.
               Effect.catchCause((cause) =>
@@ -52,7 +53,7 @@ const botsLayer = Layer.effectDiscard(
               ),
             ),
             // Routines are checked twice a minute against their stored due times.
-            Effect.suspend(() => fireDueRoutines()).pipe(
+            Effect.suspend(() => bots.fireDueRoutines()).pipe(
               Effect.catchCause((cause) =>
                 Effect.logWarning("Bot routines failed to fire.", { cause }),
               ),
@@ -75,7 +76,7 @@ const botsLayer = Layer.effectDiscard(
 export const layer = Layer.mergeAll(
   routesLayer,
   linkedThreadsLayer,
-  botsLayer.pipe(Layer.provide(Inbox.layer)),
+  botsLayer.pipe(Layer.provide(Layer.merge(Inbox.layer, Bots.layer))),
 ).pipe(
   Layer.provide(Artifacts.layer),
   Layer.provide(

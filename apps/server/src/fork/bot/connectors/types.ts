@@ -8,24 +8,23 @@ import type * as Scope from "effect/Scope";
 
 import type * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
 import {
-  ForkHttpError,
   type InboxOperations,
   type InboxOperationError,
   type InboxRejection,
 } from "../../inbox/operations.ts";
 import type { Artifacts } from "../../inbox/artifacts.ts";
-import type { BotRuntime } from "../BotRuntime.ts";
-import type { notify } from "../operations.ts";
+import type { BotRuntime, BotRuntimeError } from "../BotRuntime.ts";
+import type { BotCore, BotOperations } from "../operations.ts";
+import { BotRejection } from "../errors.ts";
 import type { InboxStoreError } from "../../inbox/store.ts";
 import type { Bot, BotStoreError, ConnectorSettings } from "../store.ts";
 
 /** What a connector may use: the bot's own services, its threads, and waking bots. */
-export type BotServices =
+type BotServices =
   | Artifacts
   | InboxOperations
   | BotRuntime
-  | ThreadManagement.ThreadManagementService
-  | Effect.Services<ReturnType<typeof notify>>;
+  | ThreadManagement.ThreadManagementService;
 
 export type InstanceStatus = "ok" | "degraded" | "down";
 
@@ -63,11 +62,12 @@ export interface ConnectorCall {
 
 type Run = Effect.Effect<
   string,
-  | ForkHttpError
+  | BotRejection
+  | BotRuntimeError
+  | BotStoreError
   | InboxOperationError
   | InboxRejection
-  | InboxStoreError
-  | Effect.Error<ReturnType<typeof notify>>,
+  | InboxStoreError,
   BotServices
 >;
 
@@ -97,11 +97,7 @@ export interface Connector {
     call: ConnectorCall,
   ) => Effect.Effect<
     Action,
-    | ForkHttpError
-    | InboxOperationError
-    | InboxRejection
-    | InboxStoreError
-    | Effect.Error<ReturnType<typeof notify>>,
+    BotRejection | InboxOperationError | InboxRejection | InboxStoreError,
     BotServices
   >;
   /** The kind's own settings from what the user saved. */
@@ -112,7 +108,7 @@ export interface Connector {
       readonly enabled: boolean;
       readonly now: string;
     },
-  ) => Effect.Effect<Readonly<Record<string, unknown>>, ForkHttpError>;
+  ) => Effect.Effect<Readonly<Record<string, unknown>>, BotRejection>;
   /** Facts the settings dialog shows for an instance, beside the bot's own settings. */
   readonly info?: (
     instanceId: string,
@@ -127,11 +123,15 @@ export interface Connector {
     BotRuntime
   >;
   /** Runs while any bot exists; wakes bots with `notify`. */
-  readonly start?: Effect.Effect<void, never, BotServices | Scope.Scope>;
+  readonly start?: Effect.Effect<
+    void,
+    never,
+    BotServices | BotOperations | Effect.Services<ReturnType<BotCore["notify"]>> | Scope.Scope
+  >;
 }
 
 export const toolError = (detail: string) =>
-  new ForkHttpError({ status: 400, code: "tool_error", detail });
+  new BotRejection({ code: "tool_error", message: detail });
 
 /** The words after the operation, or stdin for `-`. */
 export const textOf = (words: ReadonlyArray<string>, stdin: string) =>

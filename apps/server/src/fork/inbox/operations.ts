@@ -80,17 +80,6 @@ import {
 import { InboxRuntime } from "./InboxRuntime.ts";
 import type { Delegation, DelegationScope, Link, InboxStoreError } from "./store.ts";
 
-export class ForkHttpError extends Schema.TaggedError<ForkHttpError>()("ForkHttpError", {
-  status: Schema.Number,
-  code: Schema.String,
-  detail: Schema.String,
-  field: Schema.optional(Schema.String),
-}) {
-  override get message(): string {
-    return this.detail;
-  }
-}
-
 export class InboxRejection extends Schema.TaggedError<
   InboxRejection,
   { readonly brand: unique symbol }

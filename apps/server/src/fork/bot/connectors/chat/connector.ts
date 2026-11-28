@@ -10,7 +10,7 @@ import * as Schema from "effect/Schema";
 
 import { channelAccess, type ChannelStatus, type ChannelView } from "../../../channels/hub.ts";
 import { InboxRuntime } from "../../../inbox/InboxRuntime.ts";
-import { ForkHttpError } from "../../../inbox/operations.ts";
+import { BotRejection } from "../../errors.ts";
 import { BotRuntime } from "../../BotRuntime.ts";
 import { decode } from "../../operations.ts";
 import { connectorSettings } from "../../store.ts";
@@ -181,10 +181,9 @@ const config: Connector["config"] = Effect.fn("ForkBot.chat.config")(function* (
   const previous = chatConfig(before);
   const signature = decoded.signature ?? previous.signature;
   if (signature.length > SIGNATURE_CHARS) {
-    return yield* new ForkHttpError({
-      status: 400,
+    return yield* new BotRejection({
       code: "bad_request",
-      detail: `Keep the signature under ${SIGNATURE_CHARS} characters.`,
+      message: `Keep the signature under ${SIGNATURE_CHARS} characters.`,
       field: "signature",
     });
   }

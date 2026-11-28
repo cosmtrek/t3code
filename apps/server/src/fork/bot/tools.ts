@@ -22,7 +22,8 @@ import * as Schema from "effect/Schema";
 import * as ThreadManagement from "../../orchestration-v2/ThreadManagementService.ts";
 import * as ThreadMessageIntake from "../../orchestration-v2/ThreadMessageIntake.ts";
 import * as Project from "../../project/ProjectService.ts";
-import { describeInboxError, ForkHttpError } from "../inbox/operations.ts";
+import { describeInboxError } from "../inbox/operations.ts";
+import { BotOperationError, BotRejection, describeBotError } from "./errors.ts";
 import { BotRuntime } from "./BotRuntime.ts";
 import { enabledFor, helpFor, listInstances, RESERVED_COMMANDS } from "./connectors/registry.ts";
 import { textOf, toolError, type FlagSpec } from "./connectors/types.ts";
@@ -31,15 +32,11 @@ import {
   decode,
   isTerminalRunStatus,
   newId,
-  notify,
   nowIso,
-  readNotebook,
-  runtimeModeFor,
   modelFlags,
-  threadModelFor,
-  withShown,
   ROLE_CHARS,
   appendRule,
+  type BotCore,
 } from "./operations.ts";
 import { renderNotebook } from "./packet.ts";
 import { describeSchedule, nextDueAt, parseSchedule } from "./routines.ts";
@@ -163,7 +160,7 @@ const ToolRequest = Schema.Struct({
 });
 
 /** Checks the caller's token against the bot it names. */
-export const authenticateTool = Effect.fn("ForkBot.authenticateTool")(function* (
+const authenticateTool = Effect.fn("ForkBot.authenticateTool")(function* (
   authorization: string | undefined,
   input: unknown,
 ) {
@@ -178,10 +175,9 @@ export const authenticateTool = Effect.fn("ForkBot.authenticateTool")(function* 
     given.length === expected.length &&
     NodeCrypto.timingSafeEqual(Buffer.from(given), Buffer.from(expected));
   if (!ok) {
-    return yield* new ForkHttpError({
-      status: 401,
+    return yield* new BotRejection({
       code: "unauthorized",
-      detail: "This bot's token was not accepted.",
+      message: "This bot's token was not accepted.",
     });
   }
   return request;
@@ -237,154 +233,6 @@ const gate = Effect.fn("ForkBot.gate")(function* (
   });
   runtime.publish(call.bot);
   return `Not done yet: the user must approve this (question ${id}). Approving runs exactly this command; you hear the answer on a later turn, and the question lapses after 24 hours. Say why you need it in your reply, then end your turn.`;
-});
-
-export const runTool = Effect.fn("ForkBot.runTool")(function* (input: ToolCall) {
-  if (input.argv[0] !== undefined && !RESERVED_COMMANDS.has(input.argv[0])) {
-    return yield* connectorCommand(input);
-  }
-  const { positional, flags } = parseArgs(input.argv);
-  const [command, sub, ...rest] = positional;
-  const botId = input.bot;
-  const runtime = yield* BotRuntime;
-  const store = yield* runtime.store;
-  const at = yield* nowIso;
-  const touched = (output: string) => {
-    runtime.publish(botId);
-    return output;
-  };
-
-  switch (command) {
-    case undefined:
-    case "help": {
-      const bot = (yield* store.getBot(botId))!;
-      return HELP.replace("{connectors}", yield* helpFor(bot)).replace(
-        "{threadModel}",
-        modelFlags(yield* threadModelFor(bot)),
-      );
-    }
-    case "say": {
-      const text = textOf([sub ?? "", ...rest].filter(Boolean), input.stdin);
-      if (text === "" || text.length > SAY_CHARS)
-        return yield* fail(`Say 1 to ${SAY_CHARS} characters.`);
-      const said = { id: newId("msg"), botId, role: "bot" as const, text, createdAt: at };
-      const bot = yield* store.getBot(botId);
-      const turn = yield* store.getTurn(botId);
-      const posts = bot === null || turn === null ? [said] : yield* withShown(bot, turn, said);
-      for (const post of posts) yield* store.addChat(post);
-      yield* store.markSaid(botId);
-      return touched("Posted.");
-    }
-    case "notebook":
-      return renderNotebook(yield* readNotebook(botId));
-    case "role": {
-      const current = yield* runtime.files.readRole(runtime.botsDir, botId);
-      if (sub === undefined) return current || "(no role yet)";
-      if (sub !== "edit" && sub !== "add")
-        return yield* fail("role | role add <rule> | role edit -");
-      const text = textOf(rest, input.stdin);
-      const role = sub === "add" ? appendRule(current, text) : text;
-      if (text === "" || role.length > ROLE_CHARS) {
-        return yield* fail(
-          sub === "add"
-            ? `Give the rule, keeping the role under ${ROLE_CHARS} characters.`
-            : `Give the whole role on stdin, under ${ROLE_CHARS} characters.`,
-        );
-      }
-      if (role.trim() === current.trim()) return "Role unchanged.";
-      // Its role is the user's word on what it does, so changing it always asks.
-      const asked = yield* gate(
-        input,
-        "ask",
-        false,
-        sub === "add" ? "add to its role" : "change its role",
-        sub === "add" ? text : roleChanges(current, role),
-      );
-      if (asked !== null) return asked;
-      yield* runtime.files.writeRole(runtime.botsDir, botId, role);
-      return touched(sub === "add" ? "Rule added to your role." : "Role replaced.");
-    }
-    case "item": {
-      if (sub === "add") {
-        const title = textOf(rest, input.stdin);
-        if (title === "") return yield* fail("Give the item a title.");
-        const id = yield* store.addItem(botId, { title, note: flags.get("note") ?? "" }, at);
-        return touched(`Item #${id} added.`);
-      }
-      if (sub === "list") {
-        const items = (yield* store.listItems(botId)).filter(
-          (item) => flags.has("all") || (item.status !== "done" && !item.setAside),
-        );
-        return items.length === 0
-          ? "(no items)"
-          : items
-              .map(
-                (item) =>
-                  `#${item.id} [${item.status}${item.setAside ? ", set aside" : ""}] ${item.title}${item.note ? ` - ${item.note}` : ""}`,
-              )
-              .join("\n");
-      }
-      const id = yield* idOf(rest[0], "item");
-      const status = sub === "done" ? "done" : flags.get("status");
-      if (status !== undefined && !["open", "waiting", "done"].includes(status)) {
-        return yield* fail("--status is open, waiting or done.");
-      }
-      if (sub !== "edit" && sub !== "done") return yield* fail("item add | edit | done | list");
-      const changed = yield* store.updateItem(
-        botId,
-        id,
-        {
-          ...(flags.has("title") ? { title: flags.get("title")! } : {}),
-          ...(status !== undefined ? { status: status as ItemStatus } : {}),
-          ...(flags.has("note") ? { note: flags.get("note")! } : {}),
-        },
-        at,
-      );
-      return changed ? touched(`Item #${id} updated.`) : yield* fail(`You have no item #${id}.`);
-    }
-    case "routine":
-      return yield* routineCommand(botId, sub, rest, flags, input.stdin);
-    case "memory": {
-      const check = Effect.fn("ForkBot.checkMemory")(function* (text: string, excludeId?: number) {
-        if (text === "") return yield* fail("Write the note.");
-        const notes = yield* store.listMemory(botId);
-        const total = (except?: number) =>
-          notes
-            .filter((note) => note.id !== except)
-            .reduce((sum, note) => sum + Buffer.byteLength(note.text), 0);
-        if (total(excludeId) + Buffer.byteLength(text) > MEMORY_BYTES) {
-          return yield* fail(
-            `Memory would pass ${MEMORY_BYTES} bytes (now ${total()}). Merge or remove notes first.`,
-          );
-        }
-      });
-      if (sub === "add") {
-        const text = textOf(rest, input.stdin);
-        yield* check(text);
-        return touched(`Note ${yield* store.addMemory(botId, text)} saved.`);
-      }
-      const id = yield* idOf(rest[0], "note");
-      if (sub === "edit") {
-        const text = textOf(rest.slice(1), input.stdin);
-        yield* check(text, id);
-        return (yield* store.editMemory(botId, id, text))
-          ? touched(`Note ${id} rewritten.`)
-          : yield* fail(`You have no note ${id}.`);
-      }
-      if (sub === "remove") {
-        return (yield* store.removeMemory(botId, id))
-          ? touched(`Note ${id} removed.`)
-          : yield* fail(`You have no note ${id}.`);
-      }
-      return yield* fail("memory add | edit | remove");
-    }
-    case "thread":
-      return yield* threadCommand(input, sub, rest, flags);
-    case "chat":
-      return yield* chatMoved(botId);
-    default:
-      return yield* fail(`Unknown command "${command}". Run help.`);
-  }
 });
 
 const routineCommand = Effect.fn("ForkBot.routineCommand")(function* (
@@ -450,7 +298,7 @@ const routineCommand = Effect.fn("ForkBot.routineCommand")(function* (
  * A thread is the user's once they type in it after the bot last had it; messages T3 writes with
  * the user role do not count.
  */
-export const takenOverByUser = Effect.fn("ForkBot.takenOverByUser")(function* (
+const takenOverByUser = Effect.fn("ForkBot.takenOverByUser")(function* (
   projectId: string,
   threadId: string,
   handedBackAt: string | null,
@@ -524,234 +372,6 @@ const threadContext = Effect.fn("ForkBot.threadContext")(function* (
   return records === null ? null : contextFill(records);
 });
 
-/** Launches a thread the bot starts, under the id it already owns. */
-const launchOwned = Effect.fn("ForkBot.launchOwned")(function* (
-  commandId: CommandId,
-  threadId: ThreadId,
-  projectId: string,
-  modelSelection: ModelSelection,
-  runtimeMode: RuntimeMode,
-  prompt: string,
-  flags: ReadonlyMap<string, string>,
-) {
-  return yield* ThreadMessageIntake.launchThread({
-    commandId,
-    threadId,
-    projectId: ProjectId.make(projectId),
-    title: flags.get("title") ?? prompt.split("\n", 1)[0]!.slice(0, 80),
-    modelSelection,
-    runtimeMode: yield* runtimeModeFor(modelSelection, runtimeMode),
-    interactionMode: "default",
-    workspaceStrategy: flags.has("worktree")
-      ? { type: "worktree", baseRef: "HEAD" }
-      : { type: "root" },
-    initialMessage: {
-      messageId: MessageId.make(NodeCrypto.randomUUID()),
-      text: prompt,
-      attachments: [],
-    },
-    createdBy: "system",
-    creationSource: "server",
-  }).pipe(Effect.mapError((cause) => fail(`The thread did not start: ${cause.message}`)));
-});
-
-const threadCommand = Effect.fn("ForkBot.threadCommand")(function* (
-  call: ToolCall,
-  sub: string | undefined,
-  rest: ReadonlyArray<string>,
-  flags: ReadonlyMap<string, string>,
-) {
-  const botId = call.bot;
-  const stdin = call.stdin;
-  const runtime = yield* BotRuntime;
-  const threads = yield* ThreadManagement.ThreadManagementService;
-  const store = yield* runtime.store;
-  const bot = (yield* store.getBot(botId))!;
-
-  if (sub === "list") {
-    const notebook = yield* readNotebook(botId);
-    return notebook.threads.length === 0
-      ? "(no threads)"
-      : notebook.threads
-          .map(
-            (thread) =>
-              `${thread.threadId} "${thread.title ?? "untitled"}"${thread.itemId === null ? "" : ` for #${thread.itemId}`} (follow ${thread.follow})`,
-          )
-          .join("\n");
-  }
-
-  if (sub === "start") {
-    const prompt = textOf(rest, stdin);
-    if (prompt === "") return yield* fail("Give the thread its task.");
-    const follow = (flags.get("follow") ?? "attention") as FollowUp;
-    if (!["now", "attention", "routine"].includes(follow)) {
-      return yield* fail("--follow is now, attention or routine.");
-    }
-    const item = flags.get("item");
-    const itemId = item === undefined ? null : yield* idOf(item, "item");
-    if (
-      itemId !== null &&
-      !(yield* store.listItems(botId)).some((candidate) => candidate.id === itemId)
-    ) {
-      return yield* fail(`You have no item #${itemId}.`);
-    }
-    const wanted = flags.get("project")?.trim() ?? "";
-    if (wanted === "") return yield* fail("Name the project with --project.");
-    const projects = (yield* (yield* Project.ProjectService)
-      .listShells()
-      .pipe(Effect.orElseSucceed(() => []))).filter((shell) => !shell.archivedAt);
-    const project = projects.find(
-      (shell) =>
-        shell.id === wanted ||
-        shell.workspaceRoot === wanted ||
-        shell.title.toLowerCase() === wanted.toLowerCase(),
-    );
-    if (project === undefined) {
-      return yield* fail(
-        `No project "${wanted}". Projects: ${projects.map((shell) => `${shell.title} (${shell.workspaceRoot})`).join(", ")}`,
-      );
-    }
-    const preset = yield* threadModelFor(bot);
-    const picked = {
-      instanceId: flags.get("provider") ?? preset.instanceId,
-      model: flags.get("model") ?? (flags.has("provider") ? "" : preset.model),
-    } as ModelSelection;
-    if (picked.model === "") return yield* fail("With --provider, give --model too.");
-    // The preset keeps its options, effort among them; another starts at that model's defaults.
-    const modelSelection =
-      picked.instanceId === preset.instanceId && picked.model === preset.model ? preset : picked;
-    // One start at a time, so two starts in one turn cannot both fit under the limit.
-    return yield* runtime.threadStartLock.withPermit(
-      Effect.gen(function* () {
-        const running = (yield* store.listThreads(botId)).filter(
-          (thread) => !thread.takenOver && !isTerminalRunStatus(thread.status),
-        ).length;
-        const overBudget = running >= bot.settings.maxThreads;
-        const asked = yield* gate(
-          call,
-          "allow",
-          overBudget,
-          `start a thread in ${project.title}${overBudget ? ` (${running} of its ${bot.settings.maxThreads} threads already run)` : ""}`,
-          prompt,
-        );
-        if (asked !== null) return asked;
-        const commandId = CommandId.make(newId("fork-bot"));
-        const threadId = ThreadId.make(commandId);
-        // Owned before it launches: a run that ends at once is still reported.
-        yield* store.addThread({
-          threadId,
-          botId,
-          projectId: project.id,
-          itemId,
-          follow,
-          createdAt: yield* nowIso,
-        });
-        runtime.ownedThreads.set(threadId, botId);
-        yield* launchOwned(
-          commandId,
-          threadId,
-          project.id,
-          modelSelection,
-          bot.settings.runtimeMode,
-          prompt,
-          flags,
-        ).pipe(
-          Effect.onError(() =>
-            Effect.gen(function* () {
-              yield* store.removeThread(threadId, yield* nowIso);
-              runtime.ownedThreads.delete(threadId);
-            }).pipe(Effect.orDie),
-          ),
-        );
-        if (itemId !== null) yield* store.updateItem(botId, itemId, {}, yield* nowIso);
-        runtime.publish(botId);
-        return `Thread ${threadId} started in ${project.title}. ${
-          follow === "now"
-            ? "It will wake you when it stops; meanwhile the chat shows the user its progress. End your turn now, with NO_REPLY unless you have more to tell them."
-            : `It will wake you ${follow === "attention" ? "if it fails or needs someone" : "never; read it on a routine"}. End your turn now.`
-        }`;
-      }),
-    );
-  }
-
-  const threadId = rest[0];
-  if (threadId === undefined) return yield* fail("Name the thread.");
-
-  if (sub === "send") {
-    const owned = (yield* store.listThreads(botId)).find((thread) => thread.threadId === threadId);
-    if (owned === undefined) return yield* fail("You can only message threads you started.");
-    if (
-      owned.takenOver ||
-      (yield* takenOverByUser(owned.projectId, threadId, owned.handedBackAt))
-    ) {
-      return yield* fail(
-        "The user took this thread over; leave it to them until they hand it back.",
-      );
-    }
-    const text = textOf(rest.slice(1), stdin);
-    if (text === "") return yield* fail("Write the message.");
-    const fresh = flags.has("fresh");
-    const sent = yield* threads
-      .sendToThread({
-        projectId: ProjectId.make(owned.projectId),
-        commandId: CommandId.make(newId("fork-bot")),
-        threadId: ThreadId.make(threadId),
-        messageId: MessageId.make(NodeCrypto.randomUUID()),
-        text,
-        attachments: [],
-        // A fresh start cannot join a running turn, so it waits for that turn to end.
-        ...(fresh ? { mode: "queue", freshContext: true } : { mode: "auto" }),
-        createdBy: "system",
-        creationSource: "server",
-      })
-      .pipe(Effect.mapError((cause) => fail(`Not sent: ${cause.message}`)));
-    if (fresh) return `Sent (${sent.delivery}), on a clean context.`;
-    const fill = yield* threadContext(owned.projectId, threadId);
-    return fill === null || fill.used / fill.max < FRESH_AT
-      ? `Sent (${sent.delivery}).`
-      : `Sent (${sent.delivery}). ${contextLine(fill)}`;
-  }
-
-  if (sub === "read") {
-    // Another bot's work thread is its private workspace, not something in scope.
-    const workOf = runtime.workThreads.get(threadId);
-    if (workOf !== undefined && workOf !== botId) return yield* fail(`No thread ${threadId}.`);
-    const shell = yield* threads
-      .getThreadShell(ThreadId.make(threadId))
-      .pipe(Effect.orElseSucceed(() => null));
-    if (shell === null) return yield* fail(`No thread ${threadId}.`);
-    const limit = Math.min(Number(flags.get("limit") ?? READ_LIMIT) || READ_LIMIT, 100);
-    const records = yield* threads
-      .getProjectThreadRecords(
-        { projectId: shell.projectId, threadId: ThreadId.make(threadId) },
-        ["messages", "runs", "providerTurns"],
-        { messageRoles: ["user", "assistant"] },
-      )
-      .pipe(Effect.mapError((cause) => fail(`Cannot read it: ${cause.message}`)));
-    const latestRun = records.runs.toSorted((left, right) => right.ordinal - left.ordinal)[0];
-    const messages = records.messages
-      .filter((message) => message.text.trim() !== "")
-      .toSorted(
-        (left, right) =>
-          DateTime.toEpochMillis(left.createdAt) - DateTime.toEpochMillis(right.createdAt),
-      )
-      .slice(-limit);
-    return [
-      `"${shell.title}" - latest run ${latestRun?.status ?? "none"}. ${contextLine(contextFill(records))}`,
-      ...messages.map(
-        (message) =>
-          `[${message.role}${message.role === "user" && message.createdBy !== "user" ? ` (${message.createdBy})` : ""}] ${
-            message.text.length > READ_CHARS
-              ? `${message.text.slice(0, READ_CHARS)}… (cut)`
-              : message.text
-          }`,
-      ),
-    ].join("\n\n");
-  }
-
-  return yield* fail("thread start | send | read | list");
-});
-
 /** Earlier builds had one `chat` command for every channel; each channel is its own now. */
 const chatMoved = Effect.fn("ForkBot.chatMoved")(function* (botId: string) {
   const bot = (yield* (yield* (yield* BotRuntime).store).getBot(botId))!;
@@ -815,60 +435,463 @@ const AnswerInput = Schema.Struct({
   approve: Schema.Boolean,
 });
 
-/**
- * The user's answer to a question. Approving claims it once and runs the stored call, whose own
- * checks (ownership, takeover) run again; the bot hears the outcome on its next turn.
- */
-export const answerQuestion = Effect.fn("ForkBot.answerQuestion")(function* (input: unknown) {
-  const runtime = yield* BotRuntime;
-  const decoded = yield* decode(AnswerInput, input);
-  const store = runtime.existingStore();
-  const question =
-    (yield* (
-      store?.answerQuestion(
-        decoded.botId,
-        decoded.questionId,
-        decoded.approve ? "approved" : "declined",
-        yield* nowIso,
-      ) ?? Effect.undefined
-    )) ?? null;
-  if (question === null) {
-    return yield* new ForkHttpError({
-      status: 409,
-      code: "question_closed",
-      detail: "That question was already answered or has lapsed.",
-    });
-  }
-  if (!decoded.approve) {
+export const makeToolOperations = ({
+  notify,
+  readNotebook,
+  runtimeModeFor,
+  threadModelFor,
+  withShown,
+}: Pick<
+  BotCore,
+  "notify" | "readNotebook" | "runtimeModeFor" | "threadModelFor" | "withShown"
+>) => {
+  const runTool = Effect.fn("ForkBot.runTool")(function* (input: ToolCall) {
+    if (input.argv[0] !== undefined && !RESERVED_COMMANDS.has(input.argv[0])) {
+      return yield* connectorCommand(input);
+    }
+    const { positional, flags } = parseArgs(input.argv);
+    const [command, sub, ...rest] = positional;
+    const botId = input.bot;
+    const runtime = yield* BotRuntime;
+    const store = yield* runtime.store;
+    const at = yield* nowIso;
+    const touched = (output: string) => {
+      runtime.publish(botId);
+      return output;
+    };
+
+    switch (command) {
+      case undefined:
+      case "help": {
+        const bot = (yield* store.getBot(botId))!;
+        return HELP.replace("{connectors}", yield* helpFor(bot)).replace(
+          "{threadModel}",
+          modelFlags(yield* threadModelFor(bot)),
+        );
+      }
+      case "say": {
+        const text = textOf([sub ?? "", ...rest].filter(Boolean), input.stdin);
+        if (text === "" || text.length > SAY_CHARS)
+          return yield* fail(`Say 1 to ${SAY_CHARS} characters.`);
+        const said = { id: newId("msg"), botId, role: "bot" as const, text, createdAt: at };
+        const bot = yield* store.getBot(botId);
+        const turn = yield* store.getTurn(botId);
+        const posts = bot === null || turn === null ? [said] : yield* withShown(bot, turn, said);
+        for (const post of posts) yield* store.addChat(post);
+        yield* store.markSaid(botId);
+        return touched("Posted.");
+      }
+      case "notebook":
+        return renderNotebook(yield* readNotebook(botId));
+      case "role": {
+        const current = yield* runtime.files.readRole(runtime.botsDir, botId);
+        if (sub === undefined) return current || "(no role yet)";
+        if (sub !== "edit" && sub !== "add")
+          return yield* fail("role | role add <rule> | role edit -");
+        const text = textOf(rest, input.stdin);
+        const role = sub === "add" ? appendRule(current, text) : text;
+        if (text === "" || role.length > ROLE_CHARS) {
+          return yield* fail(
+            sub === "add"
+              ? `Give the rule, keeping the role under ${ROLE_CHARS} characters.`
+              : `Give the whole role on stdin, under ${ROLE_CHARS} characters.`,
+          );
+        }
+        if (role.trim() === current.trim()) return "Role unchanged.";
+        // Its role is the user's word on what it does, so changing it always asks.
+        const asked = yield* gate(
+          input,
+          "ask",
+          false,
+          sub === "add" ? "add to its role" : "change its role",
+          sub === "add" ? text : roleChanges(current, role),
+        );
+        if (asked !== null) return asked;
+        yield* runtime.files.writeRole(runtime.botsDir, botId, role);
+        return touched(sub === "add" ? "Rule added to your role." : "Role replaced.");
+      }
+      case "item": {
+        if (sub === "add") {
+          const title = textOf(rest, input.stdin);
+          if (title === "") return yield* fail("Give the item a title.");
+          const id = yield* store.addItem(botId, { title, note: flags.get("note") ?? "" }, at);
+          return touched(`Item #${id} added.`);
+        }
+        if (sub === "list") {
+          const items = (yield* store.listItems(botId)).filter(
+            (item) => flags.has("all") || (item.status !== "done" && !item.setAside),
+          );
+          return items.length === 0
+            ? "(no items)"
+            : items
+                .map(
+                  (item) =>
+                    `#${item.id} [${item.status}${item.setAside ? ", set aside" : ""}] ${item.title}${item.note ? ` - ${item.note}` : ""}`,
+                )
+                .join("\n");
+        }
+        const id = yield* idOf(rest[0], "item");
+        const status = sub === "done" ? "done" : flags.get("status");
+        if (status !== undefined && !["open", "waiting", "done"].includes(status)) {
+          return yield* fail("--status is open, waiting or done.");
+        }
+        if (sub !== "edit" && sub !== "done") return yield* fail("item add | edit | done | list");
+        const changed = yield* store.updateItem(
+          botId,
+          id,
+          {
+            ...(flags.has("title") ? { title: flags.get("title")! } : {}),
+            ...(status !== undefined ? { status: status as ItemStatus } : {}),
+            ...(flags.has("note") ? { note: flags.get("note")! } : {}),
+          },
+          at,
+        );
+        return changed ? touched(`Item #${id} updated.`) : yield* fail(`You have no item #${id}.`);
+      }
+      case "routine":
+        return yield* routineCommand(botId, sub, rest, flags, input.stdin);
+      case "memory": {
+        const check = Effect.fn("ForkBot.checkMemory")(function* (
+          text: string,
+          excludeId?: number,
+        ) {
+          if (text === "") return yield* fail("Write the note.");
+          const notes = yield* store.listMemory(botId);
+          const total = (except?: number) =>
+            notes
+              .filter((note) => note.id !== except)
+              .reduce((sum, note) => sum + Buffer.byteLength(note.text), 0);
+          if (total(excludeId) + Buffer.byteLength(text) > MEMORY_BYTES) {
+            return yield* fail(
+              `Memory would pass ${MEMORY_BYTES} bytes (now ${total()}). Merge or remove notes first.`,
+            );
+          }
+        });
+        if (sub === "add") {
+          const text = textOf(rest, input.stdin);
+          yield* check(text);
+          return touched(`Note ${yield* store.addMemory(botId, text)} saved.`);
+        }
+        const id = yield* idOf(rest[0], "note");
+        if (sub === "edit") {
+          const text = textOf(rest.slice(1), input.stdin);
+          yield* check(text, id);
+          return (yield* store.editMemory(botId, id, text))
+            ? touched(`Note ${id} rewritten.`)
+            : yield* fail(`You have no note ${id}.`);
+        }
+        if (sub === "remove") {
+          return (yield* store.removeMemory(botId, id))
+            ? touched(`Note ${id} removed.`)
+            : yield* fail(`You have no note ${id}.`);
+        }
+        return yield* fail("memory add | edit | remove");
+      }
+      case "thread":
+        return yield* threadCommand(input, sub, rest, flags);
+      case "chat":
+        return yield* chatMoved(botId);
+      default:
+        return yield* fail(`Unknown command "${command}". Run help.`);
+    }
+  });
+
+  /** Launches a thread the bot starts, under the id it already owns. */
+  const launchOwned = Effect.fn("ForkBot.launchOwned")(function* (
+    commandId: CommandId,
+    threadId: ThreadId,
+    projectId: string,
+    modelSelection: ModelSelection,
+    runtimeMode: RuntimeMode,
+    prompt: string,
+    flags: ReadonlyMap<string, string>,
+  ) {
+    return yield* ThreadMessageIntake.launchThread({
+      commandId,
+      threadId,
+      projectId: ProjectId.make(projectId),
+      title: flags.get("title") ?? prompt.split("\n", 1)[0]!.slice(0, 80),
+      modelSelection,
+      runtimeMode: yield* runtimeModeFor(modelSelection, runtimeMode),
+      interactionMode: "default",
+      workspaceStrategy: flags.has("worktree")
+        ? { type: "worktree", baseRef: "HEAD" }
+        : { type: "root" },
+      initialMessage: {
+        messageId: MessageId.make(NodeCrypto.randomUUID()),
+        text: prompt,
+        attachments: [],
+      },
+      createdBy: "system",
+      creationSource: "server",
+    }).pipe(
+      Effect.mapError((cause) => new BotOperationError({ stage: "launch-owned-thread", cause })),
+    );
+  });
+
+  const threadCommand = Effect.fn("ForkBot.threadCommand")(function* (
+    call: ToolCall,
+    sub: string | undefined,
+    rest: ReadonlyArray<string>,
+    flags: ReadonlyMap<string, string>,
+  ) {
+    const botId = call.bot;
+    const stdin = call.stdin;
+    const runtime = yield* BotRuntime;
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const store = yield* runtime.store;
+    const bot = (yield* store.getBot(botId))!;
+
+    if (sub === "list") {
+      const notebook = yield* readNotebook(botId);
+      return notebook.threads.length === 0
+        ? "(no threads)"
+        : notebook.threads
+            .map(
+              (thread) =>
+                `${thread.threadId} "${thread.title ?? "untitled"}"${thread.itemId === null ? "" : ` for #${thread.itemId}`} (follow ${thread.follow})`,
+            )
+            .join("\n");
+    }
+
+    if (sub === "start") {
+      const prompt = textOf(rest, stdin);
+      if (prompt === "") return yield* fail("Give the thread its task.");
+      const follow = (flags.get("follow") ?? "attention") as FollowUp;
+      if (!["now", "attention", "routine"].includes(follow)) {
+        return yield* fail("--follow is now, attention or routine.");
+      }
+      const item = flags.get("item");
+      const itemId = item === undefined ? null : yield* idOf(item, "item");
+      if (
+        itemId !== null &&
+        !(yield* store.listItems(botId)).some((candidate) => candidate.id === itemId)
+      ) {
+        return yield* fail(`You have no item #${itemId}.`);
+      }
+      const wanted = flags.get("project")?.trim() ?? "";
+      if (wanted === "") return yield* fail("Name the project with --project.");
+      const projects = (yield* (yield* Project.ProjectService)
+        .listShells()
+        .pipe(Effect.orElseSucceed(() => []))).filter((shell) => !shell.archivedAt);
+      const project = projects.find(
+        (shell) =>
+          shell.id === wanted ||
+          shell.workspaceRoot === wanted ||
+          shell.title.toLowerCase() === wanted.toLowerCase(),
+      );
+      if (project === undefined) {
+        return yield* fail(
+          `No project "${wanted}". Projects: ${projects.map((shell) => `${shell.title} (${shell.workspaceRoot})`).join(", ")}`,
+        );
+      }
+      const preset = yield* threadModelFor(bot);
+      const picked = {
+        instanceId: flags.get("provider") ?? preset.instanceId,
+        model: flags.get("model") ?? (flags.has("provider") ? "" : preset.model),
+      } as ModelSelection;
+      if (picked.model === "") return yield* fail("With --provider, give --model too.");
+      // The preset keeps its options, effort among them; another starts at that model's defaults.
+      const modelSelection =
+        picked.instanceId === preset.instanceId && picked.model === preset.model ? preset : picked;
+      // One start at a time, so two starts in one turn cannot both fit under the limit.
+      return yield* runtime.threadStartLock.withPermit(
+        Effect.gen(function* () {
+          const running = (yield* store.listThreads(botId)).filter(
+            (thread) => !thread.takenOver && !isTerminalRunStatus(thread.status),
+          ).length;
+          const overBudget = running >= bot.settings.maxThreads;
+          const asked = yield* gate(
+            call,
+            "allow",
+            overBudget,
+            `start a thread in ${project.title}${overBudget ? ` (${running} of its ${bot.settings.maxThreads} threads already run)` : ""}`,
+            prompt,
+          );
+          if (asked !== null) return asked;
+          const commandId = CommandId.make(newId("fork-bot"));
+          const threadId = ThreadId.make(commandId);
+          // Owned before it launches: a run that ends at once is still reported.
+          yield* store.addThread({
+            threadId,
+            botId,
+            projectId: project.id,
+            itemId,
+            follow,
+            createdAt: yield* nowIso,
+          });
+          runtime.ownedThreads.set(threadId, botId);
+          yield* launchOwned(
+            commandId,
+            threadId,
+            project.id,
+            modelSelection,
+            bot.settings.runtimeMode,
+            prompt,
+            flags,
+          ).pipe(
+            Effect.onError(() =>
+              Effect.gen(function* () {
+                yield* store.removeThread(threadId, yield* nowIso);
+                runtime.ownedThreads.delete(threadId);
+              }).pipe(Effect.orDie),
+            ),
+          );
+          if (itemId !== null) yield* store.updateItem(botId, itemId, {}, yield* nowIso);
+          runtime.publish(botId);
+          return `Thread ${threadId} started in ${project.title}. ${
+            follow === "now"
+              ? "It will wake you when it stops; meanwhile the chat shows the user its progress. End your turn now, with NO_REPLY unless you have more to tell them."
+              : `It will wake you ${follow === "attention" ? "if it fails or needs someone" : "never; read it on a routine"}. End your turn now.`
+          }`;
+        }),
+      );
+    }
+
+    const threadId = rest[0];
+    if (threadId === undefined) return yield* fail("Name the thread.");
+
+    if (sub === "send") {
+      const owned = (yield* store.listThreads(botId)).find(
+        (thread) => thread.threadId === threadId,
+      );
+      if (owned === undefined) return yield* fail("You can only message threads you started.");
+      if (
+        owned.takenOver ||
+        (yield* takenOverByUser(owned.projectId, threadId, owned.handedBackAt))
+      ) {
+        return yield* fail(
+          "The user took this thread over; leave it to them until they hand it back.",
+        );
+      }
+      const text = textOf(rest.slice(1), stdin);
+      if (text === "") return yield* fail("Write the message.");
+      const fresh = flags.has("fresh");
+      const sent = yield* threads
+        .sendToThread({
+          projectId: ProjectId.make(owned.projectId),
+          commandId: CommandId.make(newId("fork-bot")),
+          threadId: ThreadId.make(threadId),
+          messageId: MessageId.make(NodeCrypto.randomUUID()),
+          text,
+          attachments: [],
+          // A fresh start cannot join a running turn, so it waits for that turn to end.
+          ...(fresh ? { mode: "queue", freshContext: true } : { mode: "auto" }),
+          createdBy: "system",
+          creationSource: "server",
+        })
+        .pipe(
+          Effect.mapError(
+            (cause) => new BotOperationError({ stage: "send-to-owned-thread", cause }),
+          ),
+        );
+      if (fresh) return `Sent (${sent.delivery}), on a clean context.`;
+      const fill = yield* threadContext(owned.projectId, threadId);
+      return fill === null || fill.used / fill.max < FRESH_AT
+        ? `Sent (${sent.delivery}).`
+        : `Sent (${sent.delivery}). ${contextLine(fill)}`;
+    }
+
+    if (sub === "read") {
+      // Another bot's work thread is its private workspace, not something in scope.
+      const workOf = runtime.workThreads.get(threadId);
+      if (workOf !== undefined && workOf !== botId) return yield* fail(`No thread ${threadId}.`);
+      const shell = yield* threads
+        .getThreadShell(ThreadId.make(threadId))
+        .pipe(Effect.orElseSucceed(() => null));
+      if (shell === null) return yield* fail(`No thread ${threadId}.`);
+      const limit = Math.min(Number(flags.get("limit") ?? READ_LIMIT) || READ_LIMIT, 100);
+      const records = yield* threads
+        .getProjectThreadRecords(
+          { projectId: shell.projectId, threadId: ThreadId.make(threadId) },
+          ["messages", "runs", "providerTurns"],
+          { messageRoles: ["user", "assistant"] },
+        )
+        .pipe(
+          Effect.mapError((cause) => new BotOperationError({ stage: "read-owned-thread", cause })),
+        );
+      const latestRun = records.runs.toSorted((left, right) => right.ordinal - left.ordinal)[0];
+      const messages = records.messages
+        .filter((message) => message.text.trim() !== "")
+        .toSorted(
+          (left, right) =>
+            DateTime.toEpochMillis(left.createdAt) - DateTime.toEpochMillis(right.createdAt),
+        )
+        .slice(-limit);
+      return [
+        `"${shell.title}" - latest run ${latestRun?.status ?? "none"}. ${contextLine(contextFill(records))}`,
+        ...messages.map(
+          (message) =>
+            `[${message.role}${message.role === "user" && message.createdBy !== "user" ? ` (${message.createdBy})` : ""}] ${
+              message.text.length > READ_CHARS
+                ? `${message.text.slice(0, READ_CHARS)}… (cut)`
+                : message.text
+            }`,
+        ),
+      ].join("\n\n");
+    }
+
+    return yield* fail("thread start | send | read | list");
+  });
+
+  /**
+   * The user's answer to a question. Approving claims it once and runs the stored call, whose own
+   * checks (ownership, takeover) run again; the bot hears the outcome on its next turn.
+   */
+  const answerQuestion = Effect.fn("ForkBot.answerQuestion")(function* (input: unknown) {
+    const runtime = yield* BotRuntime;
+    const decoded = yield* decode(AnswerInput, input);
+    const store = runtime.existingStore();
+    const question =
+      (yield* (
+        store?.answerQuestion(
+          decoded.botId,
+          decoded.questionId,
+          decoded.approve ? "approved" : "declined",
+          yield* nowIso,
+        ) ?? Effect.undefined
+      )) ?? null;
+    if (question === null) {
+      return yield* new BotRejection({
+        code: "question_closed",
+        message: "That question was already answered or has lapsed.",
+      });
+    }
+    if (!decoded.approve) {
+      yield* notify(
+        question.botId,
+        `The user declined your question ${question.id}; it did not run.`,
+        true,
+      );
+      return {};
+    }
+    const outcome = yield* runTool({
+      bot: question.botId,
+      argv: question.argv,
+      stdin: question.stdin,
+      approved: true,
+      askedAt: question.createdAt,
+    }).pipe(
+      Effect.map((output) => ({ ok: true, output })),
+      Effect.catchTags({
+        BotRejection: (error) => Effect.succeed({ ok: false, output: error.message }),
+        BotOperationError: (error) =>
+          Effect.succeed({ ok: false, output: describeBotError(error) }),
+        InboxOperationError: (error) =>
+          Effect.succeed({ ok: false, output: describeInboxError(error) }),
+        InboxRejection: (error) => Effect.succeed({ ok: false, output: error.message }),
+      }),
+    );
+    yield* store!.setQuestionResult(question.id, outcome.output);
     yield* notify(
       question.botId,
-      `The user declined your question ${question.id}; it did not run.`,
+      outcome.ok
+        ? `The user approved your question ${question.id}, and it ran: ${outcome.output}`
+        : `The user approved your question ${question.id}, but it failed: ${outcome.output}`,
       true,
     );
-    return {};
-  }
-  const outcome = yield* runTool({
-    bot: question.botId,
-    argv: question.argv,
-    stdin: question.stdin,
-    approved: true,
-    askedAt: question.createdAt,
-  }).pipe(
-    Effect.map((output) => ({ ok: true, output })),
-    Effect.catchTags({
-      ForkHttpError: (error) => Effect.succeed({ ok: false, output: error.detail }),
-      InboxOperationError: (error) =>
-        Effect.succeed({ ok: false, output: describeInboxError(error) }),
-      InboxRejection: (error) => Effect.succeed({ ok: false, output: error.message }),
-    }),
-  );
-  yield* store!.setQuestionResult(question.id, outcome.output);
-  yield* notify(
-    question.botId,
-    outcome.ok
-      ? `The user approved your question ${question.id}, and it ran: ${outcome.output}`
-      : `The user approved your question ${question.id}, but it failed: ${outcome.output}`,
-    true,
-  );
-  return { ok: outcome.ok, output: outcome.output };
-});
+    return { ok: outcome.ok, output: outcome.output };
+  });
+
+  return { authenticateTool, runTool, answerQuestion, takenOverByUser };
+};

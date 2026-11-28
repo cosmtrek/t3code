@@ -14,7 +14,7 @@ import type { Conversation, Message } from "../../../channels/protocol.ts";
 import { InboxRuntime } from "../../../inbox/InboxRuntime.ts";
 import * as Inbox from "../../../inbox/operations.ts";
 import { BotRuntime } from "../../BotRuntime.ts";
-import { notify } from "../../operations.ts";
+import * as Bots from "../../operations.ts";
 import {
   connectorSettings,
   type Bot,
@@ -569,7 +569,8 @@ const fireMention = Effect.fn("ForkBot.fireMention")(function* (
               }: ${clip(message.text.trim() || "[no text]", QUOTE_CHARS)}`,
           ),
         ];
-  yield* notify(
+  const bots = yield* Bots.BotOperations;
+  yield* bots.notify(
     bot.id,
     [
       ...lines,

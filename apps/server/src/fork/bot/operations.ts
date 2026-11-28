@@ -22,8 +22,10 @@ import {
   type OrchestrationV2RunStatus,
   type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
+import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 
@@ -32,7 +34,9 @@ import * as ThreadManagement from "../../orchestration-v2/ThreadManagementServic
 import * as ThreadMessageIntake from "../../orchestration-v2/ThreadMessageIntake.ts";
 import { ManagedProjectFolders } from "../../project/ManagedProjectFolders.ts";
 import * as ProviderRegistry from "../../provider/ProviderRegistry.ts";
-import { firstProviderDefault, ForkHttpError } from "../inbox/operations.ts";
+import { firstProviderDefault } from "../inbox/operations.ts";
+import { BotOperationError, BotRejection } from "./errors.ts";
+import { makeToolOperations } from "./tools.ts";
 import { BotRuntime } from "./BotRuntime.ts";
 import { buildPacket, chatPreview, RECENT_CHAT_LIMIT, type Notebook } from "./packet.ts";
 import { nextDueAt } from "./routines.ts";
@@ -60,18 +64,15 @@ const TERMINAL: ReadonlySet<string> = new Set(TERMINAL_RUN_STATUSES);
 
 export const isTerminalRunStatus = (status: string) => TERMINAL.has(status);
 
-const badRequest = (detail: string, field?: string) =>
-  new ForkHttpError({ status: 400, code: "bad_request", detail, ...(field ? { field } : {}) });
-
-const notFound = () =>
-  new ForkHttpError({ status: 404, code: "not_found", detail: "That bot does not exist." });
-
-const internal = (cause: unknown) =>
-  new ForkHttpError({
-    status: 500,
-    code: "internal",
-    detail: cause instanceof Error ? cause.message : String(cause),
+const badRequest = (message: string, field?: string, cause?: unknown) =>
+  new BotRejection({
+    code: "bad_request",
+    message,
+    ...(field ? { field } : {}),
+    ...(cause === undefined ? {} : { cause }),
   });
+
+const notFound = () => new BotRejection({ code: "not_found", message: "That bot does not exist." });
 
 export const nowIso = DateTime.now.pipe(Effect.map(DateTime.formatIso));
 export const newId = (prefix: string) => `${prefix}_${NodeCrypto.randomUUID()}`;
@@ -86,7 +87,7 @@ const localTime = (at: DateTime.Zoned) => {
 
 export const decode = <S extends Schema.Top>(schema: S, input: unknown) =>
   Schema.decodeUnknownEffect(schema)(input).pipe(
-    Effect.mapError(() => badRequest("The request is not valid.")),
+    Effect.mapError((cause) => badRequest("The request is not valid.", undefined, cause)),
   );
 
 const requireBot = Effect.fn("ForkBot.requireBot")(function* (botId: string) {
@@ -97,7 +98,7 @@ const requireBot = Effect.fn("ForkBot.requireBot")(function* (botId: string) {
 });
 
 /** The bot's notebook with its threads' current titles. */
-export const readNotebook = Effect.fn("ForkBot.readNotebook")(function* (botId: string) {
+const readNotebook = Effect.fn("ForkBot.readNotebook")(function* (botId: string) {
   const runtime = yield* BotRuntime;
   const threads = yield* ThreadManagement.ThreadManagementService;
   const store = yield* runtime.store;
@@ -131,7 +132,7 @@ export interface BotSummary {
   readonly workThreadId: string | null;
 }
 
-export const listBots = Effect.fn("ForkBot.listBots")(function* () {
+const listBots = Effect.fn("ForkBot.listBots")(function* () {
   const store = (yield* BotRuntime).existingStore();
   const bots: ReadonlyArray<BotSummary> = yield* Effect.forEach(
     yield* store?.listBots() ?? Effect.succeed([]),
@@ -250,7 +251,7 @@ const activityOf = (runtime: BotRuntime["Service"], botId: string, since: string
       };
 };
 
-export const readBot = Effect.fn("ForkBot.readBot")(function* (params: URLSearchParams) {
+const readBot = Effect.fn("ForkBot.readBot")(function* (params: URLSearchParams) {
   const runtime = yield* BotRuntime;
   const bot = yield* requireBot(params.get("botId") ?? "");
   const store = yield* runtime.store;
@@ -291,7 +292,7 @@ const NoteInput = Schema.Struct({
 });
 
 /** A note, or a skill's SKILL.md by its folder name, for the Bots page to show. */
-export const readNote = Effect.fn("ForkBot.readNote")(function* (params: URLSearchParams) {
+const readNote = Effect.fn("ForkBot.readNote")(function* (params: URLSearchParams) {
   const runtime = yield* BotRuntime;
   const input = yield* decode(NoteInput, Object.fromEntries(params));
   const bot = yield* requireBot(input.botId);
@@ -310,7 +311,10 @@ export const readNote = Effect.fn("ForkBot.readNote")(function* (params: URLSear
     input.kind === "skill" || input.kind === "shared-skill",
   );
   if (text === null) {
-    return yield* new ForkHttpError({ status: 404, code: "not_found", detail: "No such note." });
+    return yield* new BotRejection({
+      code: "not_found",
+      message: "No such note.",
+    });
   }
   return { name: input.name, text: text.slice(0, NOTE_CHARS) };
 });
@@ -324,7 +328,7 @@ const CreateInput = Schema.Struct({
   brief: Schema.optional(Schema.NullOr(Schema.String)),
 });
 
-export const createBot = Effect.fn("ForkBot.createBot")(function* (input: unknown) {
+const createBot = Effect.fn("ForkBot.createBot")(function* (input: unknown) {
   const runtime = yield* BotRuntime;
   const decoded = yield* decode(CreateInput, input);
   const name = decoded.name.trim();
@@ -341,16 +345,16 @@ export const createBot = Effect.fn("ForkBot.createBot")(function* (input: unknow
       ? firstProviderDefault(yield* (yield* ProviderRegistry.ProviderRegistry).getProviders)
       : decoded.modelSelection;
   const modelSelection = yield* decode(ModelSelection, picked).pipe(
-    Effect.mapError(() => badRequest("Choose a model.", "modelSelection")),
+    Effect.mapError((error) => badRequest("Choose a model.", "modelSelection", error.cause)),
   );
   // Its work thread lives in the scratch project; refuse now rather than on the first message.
   yield* (yield* ManagedProjectFolders).ensureScratchProject.pipe(
     Effect.mapError(
-      () =>
-        new ForkHttpError({
-          status: 409,
+      (cause) =>
+        new BotRejection({
+          cause,
           code: "scratch_unavailable",
-          detail:
+          message:
             "Bots need the No project folder, which is unavailable when T3's data directory is inside a Git checkout.",
         }),
     ),
@@ -358,10 +362,10 @@ export const createBot = Effect.fn("ForkBot.createBot")(function* (input: unknow
   const id = newId("bot");
   yield* runtime.files
     .ensureWorkspace(runtime.botsDir, id)
-    .pipe(Effect.mapError((error) => internal(error.reason.cause)));
+    .pipe(Effect.mapError((cause) => new BotOperationError({ stage: "create-workspace", cause })));
   yield* runtime.files
     .writeToken(runtime.botsDir, id)
-    .pipe(Effect.mapError((error) => internal(error.reason.cause)));
+    .pipe(Effect.mapError((cause) => new BotOperationError({ stage: "write-token", cause })));
   yield* (yield* runtime.store).createBot(
     { id, name, modelSelection, createdAt: yield* nowIso },
     decoded.runtimeMode ?? (yield* runtimeModeFor(modelSelection, "auto")),
@@ -381,7 +385,7 @@ export function appendRule(role: string, rule: string): string {
 
 const RoleInput = Schema.Struct({ botId: Schema.String, role: Schema.String });
 
-export const saveRole = Effect.fn("ForkBot.saveRole")(function* (input: unknown) {
+const saveRole = Effect.fn("ForkBot.saveRole")(function* (input: unknown) {
   const runtime = yield* BotRuntime;
   const decoded = yield* decode(RoleInput, input);
   const bot = yield* requireBot(decoded.botId);
@@ -390,7 +394,7 @@ export const saveRole = Effect.fn("ForkBot.saveRole")(function* (input: unknown)
   }
   yield* runtime.files
     .writeRole(runtime.botsDir, bot.id, decoded.role)
-    .pipe(Effect.mapError((error) => internal(error.reason.cause)));
+    .pipe(Effect.mapError((cause) => new BotOperationError({ stage: "save-role", cause })));
   yield* (yield* runtime.store).enqueue(bot.id, "The user edited your role.", false, yield* nowIso);
   runtime.publish(bot.id);
   return {};
@@ -399,7 +403,7 @@ export const saveRole = Effect.fn("ForkBot.saveRole")(function* (input: unknown)
 const BotIdInput = Schema.Struct({ botId: Schema.String });
 
 /** Its threads stay as ordinary threads; only the bot and its notebook go. */
-export const deleteBot = Effect.fn("ForkBot.deleteBot")(function* (input: unknown) {
+const deleteBot = Effect.fn("ForkBot.deleteBot")(function* (input: unknown) {
   const runtime = yield* BotRuntime;
   const bot = yield* requireBot((yield* decode(BotIdInput, input)).botId);
   const store = yield* runtime.store;
@@ -419,7 +423,7 @@ export const deleteBot = Effect.fn("ForkBot.deleteBot")(function* (input: unknow
 
 const MessageInput = Schema.Struct({ botId: Schema.String, text: Schema.String });
 
-export const sendMessage = Effect.fn("ForkBot.sendMessage")(function* (input: unknown) {
+const sendMessage = Effect.fn("ForkBot.sendMessage")(function* (input: unknown) {
   const runtime = yield* BotRuntime;
   const decoded = yield* decode(MessageInput, input);
   const bot = yield* requireBot(decoded.botId);
@@ -470,7 +474,7 @@ const steer = Effect.fn("ForkBot.steer")(function* (bot: Bot, messageId: string,
   );
 });
 
-export const postError = Effect.fn("ForkBot.postError")(function* (botId: string, text: string) {
+const postError = Effect.fn("ForkBot.postError")(function* (botId: string, text: string) {
   const runtime = yield* BotRuntime;
   yield* (yield* runtime.store).addChat({
     id: newId("msg"),
@@ -483,7 +487,7 @@ export const postError = Effect.fn("ForkBot.postError")(function* (botId: string
 });
 
 /** The bot's chosen mode, or the broadest narrower one its provider offers. */
-export const runtimeModeFor = Effect.fn("ForkBot.runtimeModeFor")(function* (
+const runtimeModeFor = Effect.fn("ForkBot.runtimeModeFor")(function* (
   modelSelection: ModelSelection,
   wanted: RuntimeMode,
 ) {
@@ -501,7 +505,7 @@ export const modelFlags = (selection: ModelSelection) =>
   `--provider ${selection.instanceId} --model ${selection.model}`;
 
 /** What its threads run on unless it names another: its own model when the set one is gone. */
-export const threadModelFor = Effect.fn("ForkBot.threadModelFor")(function* (bot: Bot) {
+const threadModelFor = Effect.fn("ForkBot.threadModelFor")(function* (bot: Bot) {
   const wanted = bot.settings.threadModel;
   if (wanted === null) return bot.modelSelection;
   const providers = yield* (yield* ProviderRegistry.ProviderRegistry).getProviders;
@@ -579,7 +583,12 @@ const dispatch = Effect.fn("ForkBot.dispatch")(function* (
     creationSource: "server",
   });
   const run = launched.projection.runs.find((candidate) => candidate.userMessageId === messageId);
-  if (run === undefined) return yield* internal("The work thread started no run.");
+  if (run === undefined) {
+    return yield* new BotRejection({
+      code: "work_thread_no_run",
+      message: "The work thread started no run.",
+    });
+  }
   yield* (yield* runtime.store).setWorkThread(bot.id, launched.threadId, projectId);
   runtime.workThreads.set(launched.threadId, bot.id);
   return { threadId: launched.threadId, runId: run.id };
@@ -689,7 +698,7 @@ const wake = Effect.fn("ForkBot.wake")(function* (botId: string) {
 });
 
 /** The text a run ended with: its last assistant message that has any. */
-export const replyOf = Effect.fn("ForkBot.replyOf")(function* (
+const replyOf = Effect.fn("ForkBot.replyOf")(function* (
   projectId: string,
   threadId: string,
   runId: string,
@@ -717,7 +726,7 @@ type ChatPost = Omit<ChatMessage, "turnRunId">;
  * that the chat does not have yet, posted in order before `last`. The chat is where the user
  * reads a bot, so what the thread shows must reach it too. A page goes with the next message.
  */
-export const withShown = Effect.fn("ForkBot.withShown")(function* (
+const withShown = Effect.fn("ForkBot.withShown")(function* (
   bot: Bot,
   turn: Turn,
   last: ChatPost | null,
@@ -784,7 +793,7 @@ export function replyText(reply: string | null): string | null {
  * Ends the bot's turn when its run ends. Its last message is its reply, unless it already posted
  * with `say` or ended with NO_REPLY. Then the next turn may start.
  */
-export const finishRun = Effect.fn("ForkBot.finishRun")(function* (
+const finishRun = Effect.fn("ForkBot.finishRun")(function* (
   botId: string,
   runId: string,
   status: OrchestrationV2RunStatus,
@@ -843,11 +852,7 @@ export const finishRun = Effect.fn("ForkBot.finishRun")(function* (
 });
 
 /** Queues an event for the bot and wakes it if the event should. */
-export const notify = Effect.fn("ForkBot.notify")(function* (
-  botId: string,
-  text: string,
-  wakes: boolean,
-) {
+const notify = Effect.fn("ForkBot.notify")(function* (botId: string, text: string, wakes: boolean) {
   const runtime = yield* BotRuntime;
   yield* (yield* runtime.store).enqueue(botId, text, wakes, yield* nowIso);
   runtime.publish(botId);
@@ -855,9 +860,7 @@ export const notify = Effect.fn("ForkBot.notify")(function* (
 });
 
 /** Fires every routine due by `now` once, however many times it was due, and sets the next. */
-export const fireDueRoutines = Effect.fn("ForkBot.fireDueRoutines")(function* (
-  at?: DateTime.Zoned,
-) {
+const fireDueRoutines = Effect.fn("ForkBot.fireDueRoutines")(function* (at?: DateTime.Zoned) {
   const now = at ?? (yield* DateTime.nowInCurrentZone.pipe(DateTime.withCurrentZoneLocal));
   const runtime = yield* BotRuntime;
   const store = runtime.existingStore();
@@ -913,15 +916,14 @@ const fireRoutine = Effect.fn("ForkBot.fireRoutine")(function* (
 
 const RunRoutineInput = Schema.Struct({ botId: Schema.String, routineId: Schema.Number });
 
-export const runRoutineNow = Effect.fn("ForkBot.runRoutineNow")(function* (input: unknown) {
+const runRoutineNow = Effect.fn("ForkBot.runRoutineNow")(function* (input: unknown) {
   const decoded = yield* decode(RunRoutineInput, input);
   yield* requireBot(decoded.botId);
   const now = yield* DateTime.nowInCurrentZone.pipe(DateTime.withCurrentZoneLocal);
   if (!(yield* fireRoutine(decoded.botId, decoded.routineId, now, now))) {
-    return yield* new ForkHttpError({
-      status: 404,
+    return yield* new BotRejection({
       code: "not_found",
-      detail: "That routine does not exist.",
+      message: "That routine does not exist.",
     });
   }
   return {};
@@ -930,15 +932,14 @@ export const runRoutineNow = Effect.fn("ForkBot.runRoutineNow")(function* (input
 const ItemInput = Schema.Struct({ botId: Schema.String, itemId: Schema.Number });
 
 /** Brings a set-aside item back to the bot's open list. */
-export const reopenItem = Effect.fn("ForkBot.reopenItem")(function* (input: unknown) {
+const reopenItem = Effect.fn("ForkBot.reopenItem")(function* (input: unknown) {
   const runtime = yield* BotRuntime;
   const decoded = yield* decode(ItemInput, input);
   const bot = yield* requireBot(decoded.botId);
   if (!(yield* (yield* runtime.store).updateItem(bot.id, decoded.itemId, {}, yield* nowIso))) {
-    return yield* new ForkHttpError({
-      status: 404,
+    return yield* new BotRejection({
       code: "not_found",
-      detail: "That item does not exist.",
+      message: "That item does not exist.",
     });
   }
   runtime.publish(bot.id);
@@ -948,15 +949,14 @@ export const reopenItem = Effect.fn("ForkBot.reopenItem")(function* (input: unkn
 const MemoryInput = Schema.Struct({ botId: Schema.String, memoryId: Schema.Number });
 
 /** Removes one memory note the user no longer wants the bot to keep. */
-export const forgetMemory = Effect.fn("ForkBot.forgetMemory")(function* (input: unknown) {
+const forgetMemory = Effect.fn("ForkBot.forgetMemory")(function* (input: unknown) {
   const runtime = yield* BotRuntime;
   const decoded = yield* decode(MemoryInput, input);
   const bot = yield* requireBot(decoded.botId);
   if (!(yield* (yield* runtime.store).removeMemory(bot.id, decoded.memoryId))) {
-    return yield* new ForkHttpError({
-      status: 404,
+    return yield* new BotRejection({
       code: "not_found",
-      detail: "That memory does not exist.",
+      message: "That memory does not exist.",
     });
   }
   runtime.publish(bot.id);
@@ -964,17 +964,16 @@ export const forgetMemory = Effect.fn("ForkBot.forgetMemory")(function* (input: 
 });
 
 /** The user moves a note the bot filed as memory into its role, where a rule belongs. */
-export const moveMemoryToRole = Effect.fn("ForkBot.moveMemoryToRole")(function* (input: unknown) {
+const moveMemoryToRole = Effect.fn("ForkBot.moveMemoryToRole")(function* (input: unknown) {
   const runtime = yield* BotRuntime;
   const decoded = yield* decode(MemoryInput, input);
   const bot = yield* requireBot(decoded.botId);
   const store = yield* runtime.store;
   const note = (yield* store.listMemory(bot.id)).find((entry) => entry.id === decoded.memoryId);
   if (note === undefined) {
-    return yield* new ForkHttpError({
-      status: 404,
+    return yield* new BotRejection({
       code: "not_found",
-      detail: "That memory does not exist.",
+      message: "That memory does not exist.",
     });
   }
   const role = appendRule(yield* runtime.files.readRole(runtime.botsDir, bot.id), note.text);
@@ -983,7 +982,9 @@ export const moveMemoryToRole = Effect.fn("ForkBot.moveMemoryToRole")(function* 
   }
   yield* runtime.files
     .writeRole(runtime.botsDir, bot.id, role)
-    .pipe(Effect.mapError((error) => internal(error.reason.cause)));
+    .pipe(
+      Effect.mapError((cause) => new BotOperationError({ stage: "move-memory-to-role", cause })),
+    );
   yield* store.removeMemory(bot.id, note.id);
   yield* store.enqueue(
     bot.id,
@@ -996,7 +997,7 @@ export const moveMemoryToRole = Effect.fn("ForkBot.moveMemoryToRole")(function* 
 });
 
 /** On startup: a turn whose run ended while the server was down is finished now. */
-export const reconcile = Effect.fn("ForkBot.reconcile")(function* () {
+const reconcile = Effect.fn("ForkBot.reconcile")(function* () {
   const runtime = yield* BotRuntime;
   const threads = yield* ThreadManagement.ThreadManagementService;
   const store = runtime.existingStore();
@@ -1022,7 +1023,7 @@ export const reconcile = Effect.fn("ForkBot.reconcile")(function* () {
 const SeenInput = Schema.Struct({ botId: Schema.String });
 
 /** The user saw the bot's chat up to its latest message. */
-export const markSeen = Effect.fn("ForkBot.markSeen")(function* (input: unknown) {
+const markSeen = Effect.fn("ForkBot.markSeen")(function* (input: unknown) {
   const runtime = yield* BotRuntime;
   const decoded = yield* decode(SeenInput, input);
   const bot = yield* requireBot(decoded.botId);
@@ -1033,7 +1034,7 @@ export const markSeen = Effect.fn("ForkBot.markSeen")(function* (input: unknown)
 const PauseInput = Schema.Struct({ botId: Schema.String, paused: Schema.Boolean });
 
 /** A paused bot keeps queuing what happens and runs nothing until resumed. */
-export const setPaused = Effect.fn("ForkBot.setPaused")(function* (input: unknown) {
+const setPaused = Effect.fn("ForkBot.setPaused")(function* (input: unknown) {
   const runtime = yield* BotRuntime;
   const decoded = yield* decode(PauseInput, input);
   const bot = yield* requireBot(decoded.botId);
@@ -1069,7 +1070,7 @@ const SettingsInput = Schema.Struct({
 });
 
 /** Only the user sets these; the bot has no tool for them. */
-export const saveSettings = Effect.fn("ForkBot.saveSettings")(function* (input: unknown) {
+const saveSettings = Effect.fn("ForkBot.saveSettings")(function* (input: unknown) {
   const runtime = yield* BotRuntime;
   const decoded = yield* decode(SettingsInput, input);
   const bot = yield* requireBot(decoded.botId);
@@ -1087,7 +1088,9 @@ export const saveSettings = Effect.fn("ForkBot.saveSettings")(function* (input: 
     return yield* badRequest(`Name the bot in 1 to ${NAME_CHARS} characters.`, "name");
   }
   const pickModel = (value: unknown, field: string) =>
-    decode(ModelSelection, value).pipe(Effect.mapError(() => badRequest("Choose a model.", field)));
+    decode(ModelSelection, value).pipe(
+      Effect.mapError((error) => badRequest("Choose a model.", field, error.cause)),
+    );
   const modelSelection =
     decoded.modelSelection === undefined
       ? bot.modelSelection
@@ -1136,7 +1139,7 @@ export const saveSettings = Effect.fn("ForkBot.saveSettings")(function* (input: 
     connectors,
   };
   yield* alignWorkThreadMode({ ...bot, modelSelection, settings }).pipe(
-    Effect.mapError((cause) => badRequest(cause.message, "runtimeMode")),
+    Effect.mapError((cause) => new BotOperationError({ stage: "set-runtime-mode", cause })),
   );
   yield* store.setSettings(bot.id, settings);
   if (name !== bot.name || !sameModel(modelSelection, bot.modelSelection)) {
@@ -1177,7 +1180,7 @@ const renamed = Effect.fn("ForkBot.renamed")(function* (bot: Bot, name: string) 
 const HandBackInput = Schema.Struct({ botId: Schema.String, threadId: Schema.String });
 
 /** The user is done with a thread they took over; the bot owns it again from here. */
-export const handBack = Effect.fn("ForkBot.handBack")(function* (input: unknown) {
+const handBack = Effect.fn("ForkBot.handBack")(function* (input: unknown) {
   const runtime = yield* BotRuntime;
   const decoded = yield* decode(HandBackInput, input);
   const bot = yield* requireBot(decoded.botId);
@@ -1195,3 +1198,64 @@ export const handBack = Effect.fn("ForkBot.handBack")(function* (input: unknown)
   );
   return {};
 });
+
+const makeCore = Effect.gen(function* () {
+  const runtime = yield* BotRuntime;
+  const bind =
+    <Args extends ReadonlyArray<unknown>, A, E, R>(
+      operation: (...args: Args) => Effect.Effect<A, E, R>,
+    ) =>
+    (...args: Args) =>
+      operation(...args).pipe(Effect.provideService(BotRuntime, runtime));
+
+  return {
+    bind,
+    core: {
+      readNotebook: bind(readNotebook),
+      listBots: bind(listBots),
+      readBot: bind(readBot),
+      readNote: bind(readNote),
+      createBot: bind(createBot),
+      saveRole: bind(saveRole),
+      deleteBot: bind(deleteBot),
+      sendMessage: bind(sendMessage),
+      postError: bind(postError),
+      runtimeModeFor: bind(runtimeModeFor),
+      threadModelFor: bind(threadModelFor),
+      replyOf: bind(replyOf),
+      withShown: bind(withShown),
+      finishRun: bind(finishRun),
+      notify: bind(notify),
+      fireDueRoutines: bind(fireDueRoutines),
+      runRoutineNow: bind(runRoutineNow),
+      reopenItem: bind(reopenItem),
+      forgetMemory: bind(forgetMemory),
+      moveMemoryToRole: bind(moveMemoryToRole),
+      reconcile: bind(reconcile),
+      markSeen: bind(markSeen),
+      setPaused: bind(setPaused),
+      saveSettings: bind(saveSettings),
+      handBack: bind(handBack),
+    },
+  };
+});
+
+export type BotCore = Effect.Success<typeof makeCore>["core"];
+
+const make = Effect.gen(function* () {
+  const { bind, core } = yield* makeCore;
+  const tools = makeToolOperations(core);
+  return {
+    ...core,
+    authenticateTool: bind(tools.authenticateTool),
+    runTool: bind(tools.runTool),
+    answerQuestion: bind(tools.answerQuestion),
+    takenOverByUser: bind(tools.takenOverByUser),
+  };
+});
+
+export class BotOperations extends Context.Service<BotOperations, Effect.Success<typeof make>>()(
+  "t3/fork/bot/operations/BotOperations",
+) {}
+
+export const layer = Layer.effect(BotOperations, make);
