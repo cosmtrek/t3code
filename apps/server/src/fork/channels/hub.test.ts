@@ -1,3 +1,11 @@
+import {
+  createTestHub,
+  withTestClock,
+  httpTransport,
+  createTokenReader,
+  readChannelsFile,
+  type LegacyTransport as ChannelTransport,
+} from "./channelTestkit.ts";
 // @effect-diagnostics nodeBuiltinImport:off - Exercises the plain-TypeScript hub with temporary files.
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
@@ -5,23 +13,10 @@ import * as NodePath from "node:path";
 
 import { describe, expect, it } from "@effect/vitest";
 import * as Schema from "effect/Schema";
-import { vi } from "vite-plus/test";
 import { createSseParser } from "@t3tools/fork-client/sse";
 
-import {
-  ChannelConfigError,
-  createTokenReader,
-  readChannelsFile,
-  validateLoopbackBaseUrl,
-  type ChannelConfigEntry,
-} from "./config.ts";
-import {
-  ChannelHub,
-  channelAccess,
-  nextCheckDelay,
-  sleepUnlessAborted,
-  type ChannelStatus,
-} from "./hub.ts";
+import { ChannelConfigError, validateLoopbackBaseUrl, type ChannelConfigEntry } from "./config.ts";
+import { channelAccess, nextCheckDelay, type ChannelStatus } from "./hub.ts";
 import {
   AdapterConfig,
   AdapterError,
@@ -36,13 +31,7 @@ import {
   parseChannelEvent,
   type ChannelEvent,
 } from "./protocol.ts";
-import {
-  AdapterUnreachableError,
-  httpTransport,
-  type AdapterRequest,
-  type AdapterResponse,
-  type ChannelTransport,
-} from "./transport.ts";
+import { AdapterUnreachableError, type AdapterRequest, type AdapterResponse } from "./transport.ts";
 
 const encoder = new TextEncoder();
 const json = (status: number, value: unknown): AdapterResponse => ({
@@ -79,15 +68,19 @@ async function tempDir() {
 async function hubWith(
   handle: (request: AdapterRequest) => AdapterResponse,
   entry: Partial<ChannelConfigEntry> = {},
+  execute?: Parameters<typeof createTestHub>[1],
 ) {
   const dir = await tempDir();
   const tokenFile = NodePath.join(dir, "token");
   await NodeFSP.writeFile(tokenFile, "secret-token\n", { mode: 0o600 });
-  const hub = new ChannelHub({
-    configPath: NodePath.join(dir, "channels.json"),
-    transportFor: () => fakeTransport(handle),
-    background: false,
-  });
+  const hub = await createTestHub(
+    {
+      configPath: NodePath.join(dir, "channels.json"),
+      transportFor: () => fakeTransport(handle),
+      background: false,
+    },
+    execute,
+  );
   await hub.start();
   await hub.save(
     {
@@ -128,7 +121,7 @@ describe("ChannelHub checks", () => {
     {
       name: "unreachable",
       handle: () => {
-        throw new AdapterUnreachableError("connect ECONNREFUSED");
+        throw new AdapterUnreachableError({ message: "connect ECONNREFUSED" });
       },
       status: "unreachable",
       failedStep: "connect",
@@ -173,13 +166,13 @@ describe("ChannelHub checks", () => {
     const view = await hub.test("chat");
     expect(view.status).toBe(testCase.status);
     expect(view.steps.find((step) => !step.ok)?.id ?? null).toBe(testCase.failedStep);
-    hub.stop();
+    await hub.stop();
   });
 
   it("serves the last answer while the adapter is unreachable", async () => {
     let up = true;
     const { hub } = await hubWith((request) => {
-      if (!up) throw new AdapterUnreachableError("down");
+      if (!up) throw new AdapterUnreachableError({ message: "down" });
       if (request.path === "/health") return json(200, HEALTH);
       if (request.path === "/config") return json(200, CONFIG);
       return json(200, { items: [], nextCursor: null });
@@ -196,7 +189,7 @@ describe("ChannelHub checks", () => {
       stale: true,
     });
     await expect(hub.postJson("chat", "/messages", {})).rejects.toThrow();
-    hub.stop();
+    await hub.stop();
   });
 
   it("shares one adapter request among concurrent reads of a path, success or failure", async () => {
@@ -226,25 +219,29 @@ describe("ChannelHub checks", () => {
     // A failure is not cached.
     await hub.getJson("chat", "/conversations", RawPage).catch(() => undefined);
     expect(listed).toBe(3);
-    hub.stop();
+    await hub.stop();
   });
 
-  it("announces a moved lastSyncAt as a sync, not as changed lists", async () => {
-    let lastSyncAt = HEALTH.lastSyncAt;
-    const { hub } = await hubWith((request) =>
-      json(200, request.path === "/health" ? { ...HEALTH, lastSyncAt } : CONFIG),
-    );
-    await hub.test("chat");
-    const events: unknown[] = [];
-    hub.subscribe((event) => events.push(event));
-    await hub.test("chat");
-    expect(events).toEqual([]);
-    lastSyncAt = "2026-11-14T08:05:00.000Z";
-    await hub.test("chat");
-    expect(events).toEqual([{ type: "sync", channelId: "chat" }]);
-    expect(hub.get("chat")?.health?.lastSyncAt).toBe(lastSyncAt);
-    hub.stop();
-  });
+  it.effect("announces a moved lastSyncAt as a sync, not as changed lists", () =>
+    withTestClock(async (execute) => {
+      let lastSyncAt = HEALTH.lastSyncAt;
+      const { hub } = await hubWith(
+        (request) => json(200, request.path === "/health" ? { ...HEALTH, lastSyncAt } : CONFIG),
+        {},
+        execute,
+      );
+      await hub.test("chat");
+      const events: unknown[] = [];
+      hub.subscribe((event) => events.push(event));
+      await hub.test("chat");
+      expect(events).toEqual([]);
+      lastSyncAt = "2026-11-14T08:05:00.000Z";
+      await hub.test("chat");
+      expect(events).toEqual([{ type: "sync", channelId: "chat" }]);
+      expect(hub.get("chat")?.health?.lastSyncAt).toBe(lastSyncAt);
+      await hub.stop();
+    }),
+  );
 
   it("keeps ids stable and refuses duplicates", async () => {
     const { hub } = await hubWith((request) =>
@@ -275,7 +272,7 @@ describe("ChannelHub checks", () => {
       { create: true },
     );
     expect(added.id).toBe("chat-2");
-    hub.stop();
+    await hub.stop();
   });
 
   it("keeps the example channel: it cannot be removed or added again", async () => {
@@ -290,7 +287,7 @@ describe("ChannelHub checks", () => {
       ),
     ).rejects.toBeInstanceOf(ChannelConfigError);
     expect(hub.list().map((channel) => channel.id)).toEqual(["example", "chat"]);
-    hub.stop();
+    await hub.stop();
   });
 
   it("checks an adapter that is not saved yet, and keeps nothing of it", async () => {
@@ -307,7 +304,7 @@ describe("ChannelHub checks", () => {
       hub.probe({ baseUrl: "http://10.0.0.5:7341", tokenFile: "" }),
     ).rejects.toBeInstanceOf(ChannelConfigError);
     expect(hub.list().map((channel) => channel.id)).toEqual(["example", "chat"]);
-    hub.stop();
+    await hub.stop();
   });
 });
 
@@ -354,7 +351,7 @@ describe("ChannelHub lists", () => {
     expect(result.items.map((item) => item.id)).toEqual(["a", "b"]);
     expect(result.complete).toBe(true);
     expect(asked).toEqual([path, `${path}${path.includes("?") ? "&" : "?"}cursor=p%202`]);
-    hub.stop();
+    await hub.stop();
   });
 
   it("stops after maxPages when the adapter never ends the list", async () => {
@@ -371,7 +368,7 @@ describe("ChannelHub lists", () => {
     });
     expect(result.complete).toBe(false);
     expect(served).toBe(3);
-    hub.stop();
+    await hub.stop();
   });
 
   it("stops early when the adapter hands back a cursor it already gave", async () => {
@@ -391,7 +388,7 @@ describe("ChannelHub lists", () => {
     );
     expect(result.complete).toBe(false);
     expect(result.items.map((item) => item.id)).toEqual(["c1", "c2"]);
-    hub.stop();
+    await hub.stop();
   });
 
   it("skips an item that does not decode and keeps the rest of the page", async () => {
@@ -428,8 +425,8 @@ describe("ChannelHub lists", () => {
     await expect(
       broken.getAllPages("chat", "/conversations", Conversation, { maxPages: 1 }),
     ).rejects.toThrow(/does not match protocol/);
-    hub.stop();
-    broken.stop();
+    await hub.stop();
+    await broken.stop();
   });
 });
 
@@ -458,7 +455,7 @@ describe("ChannelHub token redaction", () => {
     expect(
       JSON.stringify({ ...(failure as object), message: (failure as Error).message }),
     ).not.toContain(token);
-    hub.stop();
+    await hub.stop();
   });
 
   it("redacts a token echoed in a send answer", async () => {
@@ -469,7 +466,7 @@ describe("ChannelHub token redaction", () => {
     });
     await hub.test("chat");
     expect(await hub.postJson("chat", "/messages", {})).toEqual({ messageId: "***" });
-    hub.stop();
+    await hub.stop();
   });
 
   it("tells the browser only which channel changed, never the adapter's ids", async () => {
@@ -478,7 +475,7 @@ describe("ChannelHub token redaction", () => {
     await NodeFSP.writeFile(tokenFile, "secret-token\n", { mode: 0o600 });
     let delivered!: () => void;
     const eventDelivered = new Promise<void>((resolve) => (delivered = resolve));
-    const hub = new ChannelHub({
+    const hub = await createTestHub({
       configPath: NodePath.join(dir, "channels.json"),
       transportFor: () => ({
         request: async (request) => json(200, request.path === "/health" ? HEALTH : CONFIG),
@@ -506,17 +503,30 @@ describe("ChannelHub token redaction", () => {
     await eventDelivered;
     expect(events).toContainEqual({ type: "inbox", channelId: "chat" });
     expect(JSON.stringify(events)).not.toContain("secret-token");
-    hub.stop();
+    await hub.stop();
   });
 
   it("redacts a token echoed in an unreachable error", async () => {
     const { hub } = await hubWith(() => {
-      throw new AdapterUnreachableError("connect to secret-token failed");
+      throw new AdapterUnreachableError({ message: "connect to secret-token failed" });
     });
     expect(JSON.stringify(await hub.test("chat"))).not.toContain("secret-token");
-    hub.stop();
+    await hub.stop();
   });
 });
+
+async function delivered(hub: Awaited<ReturnType<typeof createTestHub>>, send: () => void) {
+  const result = Promise.withResolvers<void>();
+  const stop = hub.subscribe((event) => {
+    if (event.type === "inbox") result.resolve();
+  });
+  try {
+    send();
+    await result.promise;
+  } finally {
+    stop();
+  }
+}
 
 describe("ChannelHub events", () => {
   async function streamingHub() {
@@ -527,7 +537,7 @@ describe("ChannelHub events", () => {
     const dir = await tempDir();
     const tokenFile = NodePath.join(dir, "token");
     await NodeFSP.writeFile(tokenFile, "secret-token\n", { mode: 0o600 });
-    const hub = new ChannelHub({
+    const hub = await createTestHub({
       configPath: NodePath.join(dir, "channels.json"),
       transportFor: () => ({
         request: async (request) => {
@@ -556,7 +566,7 @@ describe("ChannelHub events", () => {
       { create: true },
     );
     await streamOpen;
-    return { hub, asked, send: (event: ChannelEvent) => send(event) };
+    return { hub, asked, send: (event: ChannelEvent) => delivered(hub, () => send(event)) };
   }
 
   it("reads again only the conversation an event names", async () => {
@@ -571,18 +581,18 @@ describe("ChannelHub events", () => {
     const readAll = () => Promise.all(paths.map((path) => hub.getJson("chat", path, RawPage)));
     await readAll();
     asked.length = 0;
-    send({ type: "message.created", conversationId: "c 1" });
+    await send({ type: "message.created", conversationId: "c 1" });
     await readAll();
     expect(asked).toEqual(paths.slice(0, 3));
     asked.length = 0;
-    send({ type: "conversation.updated", conversationId: "c2" });
+    await send({ type: "conversation.updated", conversationId: "c2" });
     await readAll();
     expect(asked).toEqual([paths[0], ...paths.slice(3)]);
     asked.length = 0;
-    send({ type: "conversation.updated" });
+    await send({ type: "conversation.updated" });
     await readAll();
     expect(asked).toEqual(paths);
-    hub.stop();
+    await hub.stop();
   });
 
   it("reads lists again once the event stream (re)connects", async () => {
@@ -593,7 +603,7 @@ describe("ChannelHub events", () => {
     const dir = await tempDir();
     const tokenFile = NodePath.join(dir, "token");
     await NodeFSP.writeFile(tokenFile, "secret-token\n", { mode: 0o600 });
-    const hub = new ChannelHub({
+    const hub = await createTestHub({
       configPath: NodePath.join(dir, "channels.json"),
       transportFor: () => ({
         request: async (request) => {
@@ -625,17 +635,17 @@ describe("ChannelHub events", () => {
     await hub.getJson("chat", "/conversations", RawPage);
     await hub.getJson("chat", "/conversations", RawPage);
     expect(listed).toBe(1);
-    send({ type: "connected" });
+    await delivered(hub, () => send({ type: "connected" }));
     await hub.getJson("chat", "/conversations", RawPage);
     expect(listed).toBe(2);
-    hub.stop();
+    await hub.stop();
   });
 });
 
 describe("example channel simulation", () => {
   it("lists conversations newest first, so a capped read keeps the latest", async () => {
     const dir = await tempDir();
-    const hub = new ChannelHub({
+    const hub = await createTestHub({
       configPath: NodePath.join(dir, "channels.json"),
       background: false,
     });
@@ -671,7 +681,7 @@ describe("example channel simulation", () => {
       expect(messages.skipped).toBe(0);
       expect(messages.items[0]?.id).toBe(conversation.lastMessage?.id);
     }
-    hub.stop();
+    await hub.stop();
   });
 
   it.each([
@@ -682,7 +692,7 @@ describe("example channel simulation", () => {
     ["online", "online"],
   ] as const)("simulates %s", async (simulation, status) => {
     const dir = await tempDir();
-    const hub = new ChannelHub({
+    const hub = await createTestHub({
       configPath: NodePath.join(dir, "channels.json"),
       background: false,
     });
@@ -703,12 +713,12 @@ describe("example channel simulation", () => {
     expect(view.simulation).toBe(simulation);
     // Health from another protocol means nothing; the channel shows none.
     if (status === "incompatible") expect(view.health).toBeNull();
-    hub.stop();
+    await hub.stop();
   });
 
   it("keeps what was read when the adapter goes away", async () => {
     const dir = await tempDir();
-    const hub = new ChannelHub({
+    const hub = await createTestHub({
       configPath: NodePath.join(dir, "channels.json"),
       background: false,
     });
@@ -730,27 +740,7 @@ describe("example channel simulation", () => {
     const stale = await hub.getJson("example", "/conversations", schema);
     expect(stale).toEqual({ value: fresh.value, stale: true });
     expect(channelAccess(hub.get("example")!.status).send).toBe(false);
-    hub.stop();
-  });
-});
-
-describe("sleepUnlessAborted", () => {
-  it("removes its abort listener when the timer ends", async () => {
-    vi.useFakeTimers();
-    try {
-      const controller = new AbortController();
-      const added = vi.spyOn(controller.signal, "addEventListener");
-      const removed = vi.spyOn(controller.signal, "removeEventListener");
-      for (let round = 0; round < 3; round++) {
-        const sleeping = sleepUnlessAborted(1_000, controller.signal);
-        vi.advanceTimersByTime(1_000);
-        await sleeping;
-      }
-      expect(added).toHaveBeenCalledTimes(3);
-      expect(removed).toHaveBeenCalledTimes(3);
-    } finally {
-      vi.useRealTimers();
-    }
+    await hub.stop();
   });
 });
 
@@ -852,6 +842,26 @@ describe("validateLoopbackBaseUrl", () => {
 });
 
 describe("token reader", () => {
+  it("invalidates equal-size tokens when only fractional mtime changes", async () => {
+    const dir = await tempDir();
+    try {
+      const file = NodePath.join(dir, "token");
+      const read = createTokenReader();
+      await NodeFSP.writeFile(file, "one", { mode: 0o600 });
+      await NodeFSP.utimes(file, 1, 1.0001);
+      const before = await NodeFSP.stat(file);
+      expect(await read(file)).toEqual({ ok: true, token: "one", warning: null });
+      await NodeFSP.writeFile(file, "two");
+      await NodeFSP.utimes(file, 1, 1.0002);
+      const after = await NodeFSP.stat(file);
+      expect(before.mtime.getTime()).toBe(after.mtime.getTime());
+      expect(before.mtimeMs).not.toBe(after.mtimeMs);
+      expect(await read(file)).toEqual({ ok: true, token: "two", warning: null });
+    } finally {
+      await NodeFSP.rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("reads a trimmed token, warns on loose permissions, and explains failures", async () => {
     const dir = await tempDir();
     const read = createTokenReader();

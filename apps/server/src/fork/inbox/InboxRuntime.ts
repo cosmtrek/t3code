@@ -20,16 +20,17 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
 import * as ServerConfig from "../../config.ts";
-import { ChannelHub, type HubEvent } from "../channels/hub.ts";
+import * as ChannelHub from "../channels/hub.ts";
+import type { HubEvent } from "../channels/hub.ts";
 import { InboxStore } from "./store.ts";
 
 export interface InboxRuntimeShape {
-  readonly hub: ChannelHub;
+  readonly hub: ChannelHub.ChannelHub["Service"];
   readonly store: InboxStore;
   readonly channelsDir: string;
   readonly itemsDir: string;
   /** Hub events plus changes to delegated context folders. */
-  readonly subscribe: (listener: (event: HubEvent) => void) => () => void;
+  readonly subscribe: (listener: (event: HubEvent) => void) => Effect.Effect<Effect.Effect<void>>;
 }
 
 export class InboxRuntime extends Context.Service<InboxRuntime, InboxRuntimeShape>()(
@@ -115,21 +116,14 @@ const make = Effect.gen(function* () {
     Effect.sync(() => new InboxStore(path.join(channelsDir, "inbox.sqlite"))),
     (store) => Effect.sync(() => store.close()),
   );
-  const hub = yield* Effect.acquireRelease(
-    Effect.sync(() => new ChannelHub({ configPath: path.join(channelsDir, "channels.json") })),
-    (hub) => Effect.sync(() => hub.stop()),
-  );
-  const startError = yield* Effect.promise(() =>
-    hub.start().then(
-      () => null,
-      (error: unknown) => String(error),
+  const hub = yield* ChannelHub.ChannelHub;
+  yield* hub.start().pipe(
+    Effect.catch((error) =>
+      Effect.logWarning("Channels could not start; check channels.json.", {
+        cause: String(error),
+      }),
     ),
   );
-  if (startError !== null) {
-    yield* Effect.logWarning("Channels could not start; check channels.json.", {
-      cause: startError,
-    });
-  }
 
   const pending = new Set<string>();
   const ready = yield* Deferred.make<void>();
@@ -142,10 +136,10 @@ const make = Effect.gen(function* () {
         const remaining = Math.max(0, at + WATCH_DEBOUNCE_MS - (yield* Clock.currentTimeMillis));
         yield* Effect.sleep(remaining).pipe(
           Effect.andThen(
-            Effect.sync(() => {
+            Effect.gen(function* () {
               pending.delete(itemId);
               const link = store.linksForDelegation(itemId)[0];
-              if (link) hub.publish({ type: "inbox", channelId: link.channelId });
+              if (link) yield* hub.publish({ type: "inbox", channelId: link.channelId });
             }),
           ),
           Effect.forkIn(scope),

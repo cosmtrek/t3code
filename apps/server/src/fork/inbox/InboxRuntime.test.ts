@@ -20,7 +20,9 @@ import * as Scope from "effect/Scope";
 import { vi } from "vite-plus/test";
 
 import * as ServerConfig from "../../config.ts";
-import { ChannelHub } from "../channels/hub.ts";
+import { ChannelFileError } from "../channels/config.ts";
+import * as ChannelHub from "../channels/hub.ts";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as InboxRuntime from "./InboxRuntime.ts";
 import { InboxStore } from "./store.ts";
 
@@ -76,10 +78,18 @@ const setup = Effect.gen(function* () {
   io.readdir.mockReset().mockResolvedValue([]);
   io.stat.mockReset();
   io.rm.mockReset().mockResolvedValue(undefined);
-  const start = vi.spyOn(ChannelHub.prototype, "start").mockResolvedValue(undefined);
-  const stop = vi.spyOn(ChannelHub.prototype, "stop");
+  const hub = yield* ChannelHub.make({
+    configPath: NodePath.join(root, "channels.json"),
+    background: false,
+  }).pipe(
+    Effect.provideService(Scope.Scope, scope),
+    Effect.provide(Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer)),
+  );
+  const start = vi.spyOn(hub, "start").mockReturnValue(Effect.void);
+  const stop = vi.fn(() => hub.stop());
+  yield* Scope.addFinalizer(scope, Effect.suspend(stop));
   const close = vi.spyOn(InboxStore.prototype, "close");
-  const publish = vi.spyOn(ChannelHub.prototype, "publish");
+  const publish = vi.spyOn(hub, "publish");
   const context = yield* Layer.build(ServerConfig.layerTest(root, root)).pipe(
     Effect.provide(NodeServices.layer),
   );
@@ -114,6 +124,7 @@ const setup = Effect.gen(function* () {
           )
         : InboxRuntime.layer,
     ).pipe(
+      Effect.provideService(ChannelHub.ChannelHub, hub),
       Effect.provideService(ServerConfig.ServerConfig, config),
       Effect.provideService(Scope.Scope, scope),
       Effect.provideService(FileSystem.FileSystem, fs),
@@ -247,7 +258,14 @@ describe("InboxRuntime lifecycle", () => {
     Effect.scoped(
       Effect.gen(function* () {
         const fixture = yield* setup;
-        fixture.start.mockRejectedValue(new Error("invalid channels"));
+        fixture.start.mockReturnValue(
+          Effect.fail(
+            new ChannelFileError({
+              message: "invalid channels",
+              cause: new Error("invalid channels"),
+            }),
+          ),
+        );
         io.watch.mockImplementation(() => {
           throw new Error("watch unavailable");
         });

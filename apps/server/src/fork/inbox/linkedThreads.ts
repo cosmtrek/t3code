@@ -25,7 +25,7 @@ export const followLinkedThreads = Effect.fn("ForkInbox.followLinkedThreads")(fu
   yield* events.pipe(
     Stream.filter((event) => LINKED_THREAD_EVENT_TYPES.has(event.type)),
     Stream.runForEach((event) =>
-      Effect.sync(() => {
+      Effect.gen(function* () {
         const channelId = store.channelOfThread(event.threadId);
         if (channelId === null) return;
         if (event.type === "run.updated") {
@@ -33,7 +33,7 @@ export const followLinkedThreads = Effect.fn("ForkInbox.followLinkedThreads")(fu
           if (runStatus.get(event.threadId) === status) return;
           runStatus.set(event.threadId, status);
         }
-        hub.publish({ type: "inbox", channelId });
+        yield* hub.publish({ type: "inbox", channelId });
       }),
     ),
   );

@@ -238,13 +238,11 @@ const watchMentions = Effect.gen(function* () {
   const inbox = yield* Effect.serviceOption(InboxRuntime);
   if (Option.isNone(inbox)) return;
   const changed = yield* Queue.unbounded<string>();
-  yield* Effect.acquireRelease(
-    Effect.sync(() =>
-      inbox.value.subscribe((event) => {
-        if (event.type === "inbox") Queue.offerUnsafe(changed, event.channelId);
-      }),
-    ),
-    (unsubscribe) => Effect.sync(unsubscribe),
+  const _unsubscribe = yield* Effect.acquireRelease(
+    inbox.value.subscribe((event) => {
+      if (event.type === "inbox") Queue.offerUnsafe(changed, event.channelId);
+    }),
+    (unsubscribe) => unsubscribe,
   );
   const scan = (channelId: string) =>
     scanMentions(channelId).pipe(

@@ -1,8 +1,13 @@
-// @effect-diagnostics nodeBuiltinImport:off globalDate:off extendsNativeError:off - Runs outside the Effect runtime: adapter sockets, timers, and plain callbacks.
+// @effect-diagnostics-next-line nodeBuiltinImport:off - Token cache stamps require fractional mtimeMs, which FileSystem.FileInfo does not expose.
 import * as NodeFSP from "node:fs/promises";
-import * as NodeOS from "node:os";
+// @effect-diagnostics-next-line nodeBuiltinImport:off - Synchronous address validation retains the host's native path syntax.
 import * as NodePath from "node:path";
-
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as Clock from "effect/Clock";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
+import type * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 
 export const ChannelKind = Schema.Literals(["http-adapter", "example"]);
@@ -24,6 +29,8 @@ export const ChannelsFile = Schema.Struct({
 });
 export type ChannelsFile = typeof ChannelsFile.Type;
 
+const parseJson = (text: string): unknown => JSON.parse(text);
+const encodeFile = (file: ChannelsFile) => `${JSON.stringify(file, null, 2)}\n`;
 const decodeChannelsFile = Schema.decodeUnknownExit(ChannelsFile);
 
 const EXAMPLE_CHANNEL: ChannelConfigEntry = {
@@ -40,13 +47,22 @@ const DEFAULT_CHANNELS_FILE: ChannelsFile = { version: 1, channels: [EXAMPLE_CHA
 
 const CHANNEL_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,39}$/;
 
-export class ChannelConfigError extends Error {
-  readonly field: "id" | "name" | "baseUrl" | "tokenFile" | undefined;
-  constructor(message: string, field?: "id" | "name" | "baseUrl" | "tokenFile") {
-    super(message);
-    this.field = field;
-  }
-}
+export class ChannelFileError extends Schema.TaggedError<ChannelFileError>()("ChannelFileError", {
+  message: Schema.String,
+  cause: Schema.Defect(),
+}) {}
+
+const isChannelFileError = Schema.is(ChannelFileError);
+
+export class ChannelConfigError extends Schema.TaggedError<ChannelConfigError>()(
+  "ChannelConfigError",
+  {
+    message: Schema.String,
+    field: Schema.optional(Schema.Literals(["id", "name", "baseUrl", "tokenFile"])),
+  },
+) {}
+
+export const isChannelConfigError = Schema.is(ChannelConfigError);
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "[::1]", "::1", "localhost"]);
 
@@ -59,22 +75,28 @@ export function validateLoopbackBaseUrl(raw: string): string {
   try {
     url = new URL(raw.trim());
   } catch {
-    throw new ChannelConfigError("Enter a full address, such as http://127.0.0.1:7341.", "baseUrl");
+    throw new ChannelConfigError({
+      message: "Enter a full address, such as http://127.0.0.1:7341.",
+      field: "baseUrl",
+    });
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new ChannelConfigError("The address must start with http:// or https://.", "baseUrl");
+    throw new ChannelConfigError({
+      message: "The address must start with http:// or https://.",
+      field: "baseUrl",
+    });
   }
   if (!LOOPBACK_HOSTS.has(url.hostname)) {
-    throw new ChannelConfigError(
-      "Adapters must listen on this machine: use 127.0.0.1, ::1, or localhost.",
-      "baseUrl",
-    );
+    throw new ChannelConfigError({
+      message: "Adapters must listen on this machine: use 127.0.0.1, ::1, or localhost.",
+      field: "baseUrl",
+    });
   }
   if (url.username || url.password || url.search || url.hash) {
-    throw new ChannelConfigError(
-      "The address cannot carry credentials, a query, or a hash.",
-      "baseUrl",
-    );
+    throw new ChannelConfigError({
+      message: "The address cannot carry credentials, a query, or a hash.",
+      field: "baseUrl",
+    });
   }
   return url.origin + url.pathname.replace(/\/+$/, "");
 }
@@ -90,7 +112,7 @@ export function resolveLoopbackBase(raw: string): string {
 }
 
 /** `~` expands to the home directory; anything else must already be absolute. */
-function resolveTokenFilePath(raw: string, home = NodeOS.homedir()): string {
+function resolveTokenFilePath(raw: string, home: string): string {
   const trimmed = raw.trim();
   const expanded =
     trimmed === "~"
@@ -99,10 +121,10 @@ function resolveTokenFilePath(raw: string, home = NodeOS.homedir()): string {
         ? NodePath.join(home, trimmed.slice(2))
         : trimmed;
   if (!NodePath.isAbsolute(expanded)) {
-    throw new ChannelConfigError(
-      "The token file path must be absolute or start with ~/.",
-      "tokenFile",
-    );
+    throw new ChannelConfigError({
+      message: "The token file path must be absolute or start with ~/.",
+      field: "tokenFile",
+    });
   }
   return NodePath.normalize(expanded);
 }
@@ -113,7 +135,8 @@ export function validateAdapterAddress(draft: {
   readonly tokenFile: string;
 }): { readonly baseUrl: string; readonly tokenFile: string } {
   const tokenFile = draft.tokenFile.trim();
-  if (tokenFile.length > 0) resolveTokenFilePath(tokenFile);
+  if (tokenFile.length > 0 && tokenFile !== "~" && !tokenFile.startsWith("~/"))
+    resolveTokenFilePath(tokenFile, "");
   return { baseUrl: validateLoopbackBaseUrl(draft.baseUrl), tokenFile };
 }
 
@@ -135,53 +158,94 @@ export function channelIdFor(name: string, taken: ReadonlySet<string>): string {
 
 export function validateChannelEntry(entry: ChannelConfigEntry): ChannelConfigEntry {
   if (!CHANNEL_ID_PATTERN.test(entry.id)) {
-    throw new ChannelConfigError(
-      "Use lowercase letters, digits, and dashes for the id (up to 40 characters).",
-      "id",
-    );
+    throw new ChannelConfigError({
+      message: "Use lowercase letters, digits, and dashes for the id (up to 40 characters).",
+      field: "id",
+    });
   }
   const name = entry.name.trim();
   if (name.length === 0 || name.length > 80) {
-    throw new ChannelConfigError("Give the channel a name of up to 80 characters.", "name");
+    throw new ChannelConfigError({
+      message: "Give the channel a name of up to 80 characters.",
+      field: "name",
+    });
   }
   if (entry.kind === "example") return { ...entry, name, baseUrl: "", tokenFile: "" };
   return { ...entry, name, ...validateAdapterAddress(entry) };
 }
 
-export async function readChannelsFile(filePath: string): Promise<ChannelsFile> {
-  let text: string;
-  try {
-    text = await NodeFSP.readFile(filePath, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return DEFAULT_CHANNELS_FILE;
-    throw error;
-  }
-  const exit = decodeChannelsFile(JSON.parse(text));
-  if (exit._tag === "Failure") throw new Error(`${filePath} is not a valid channels file.`);
-  // The file may be edited by hand; it gets the same checks as the settings page.
-  for (const entry of exit.value.channels) {
-    try {
-      validateChannelEntry(entry);
-    } catch (error) {
-      throw new Error(`${filePath}: channel "${entry.id}": ${(error as Error).message}`, {
-        cause: error,
-      });
-    }
-  }
-  if (exit.value.channels.some((entry) => entry.kind === "example")) return exit.value;
-  // A file from before the example was built in may have removed it.
-  const taken = new Set(exit.value.channels.map((entry) => entry.id));
-  const example = { ...EXAMPLE_CHANNEL, id: channelIdFor(EXAMPLE_CHANNEL.id, taken) };
-  return { ...exit.value, channels: [example, ...exit.value.channels] };
-}
+const fileError = (error: PlatformError.PlatformError) =>
+  new ChannelFileError({
+    message: error.cause instanceof Error ? error.cause.message : error.message,
+    cause: error,
+  });
 
-/** Only the server writes the file, through a rename so a crash never leaves half of it. */
-export async function writeChannelsFile(filePath: string, file: ChannelsFile): Promise<void> {
-  await NodeFSP.mkdir(NodePath.dirname(filePath), { recursive: true });
-  const temporary = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  await NodeFSP.writeFile(temporary, `${JSON.stringify(file, null, 2)}\n`, { mode: 0o600 });
-  await NodeFSP.rename(temporary, filePath);
-}
+export const readChannelsFile = Effect.fn("ChannelConfig.read")(function* (filePath: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const text = yield* fs.readFileString(filePath).pipe(
+    Effect.catchIf(
+      (error) => error.reason._tag === "NotFound",
+      () => Effect.succeed(null),
+    ),
+    Effect.mapError(fileError),
+  );
+  if (text === null) return DEFAULT_CHANNELS_FILE;
+  return yield* Effect.try({
+    try: () => {
+      const exit = decodeChannelsFile(parseJson(text));
+      if (exit._tag === "Failure")
+        throw new ChannelFileError({
+          message: `${filePath} is not a valid channels file.`,
+          cause: exit,
+        });
+      for (const entry of exit.value.channels) {
+        try {
+          validateChannelEntry(entry);
+        } catch (error) {
+          throw new ChannelFileError({
+            message: `${filePath}: channel "${entry.id}": ${(error as Error).message}`,
+            cause: error,
+          });
+        }
+      }
+      if (exit.value.channels.some((entry) => entry.kind === "example")) return exit.value;
+      const taken = new Set(exit.value.channels.map((entry) => entry.id));
+      return {
+        ...exit.value,
+        channels: [
+          { ...EXAMPLE_CHANNEL, id: channelIdFor(EXAMPLE_CHANNEL.id, taken) },
+          ...exit.value.channels,
+        ],
+      };
+    },
+    catch: (cause) =>
+      isChannelFileError(cause)
+        ? cause
+        : new ChannelFileError({
+            message: cause instanceof Error ? cause.message : String(cause),
+            cause,
+          }),
+  });
+});
+
+export const writeChannelsFile = Effect.fn("ChannelConfig.write")(function* (
+  filePath: string,
+  file: ChannelsFile,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const now = yield* Clock.currentTimeMillis;
+  yield* fs.makeDirectory(path.dirname(filePath), { recursive: true });
+  const pid = yield* Effect.sync(() => process.pid);
+  const temporary = `${filePath}.${pid}.${now}.tmp`;
+  // Cancellation must not leave a partial replacement or a temporary file behind.
+  yield* Effect.uninterruptibleMask((restore) =>
+    restore(fs.writeFileString(temporary, encodeFile(file), { mode: 0o600 })).pipe(
+      Effect.andThen(fs.rename(temporary, filePath)),
+      Effect.ensuring(fs.remove(temporary, { force: true }).pipe(Effect.ignore)),
+    ),
+  );
+}, Effect.mapError(fileError));
 
 export type TokenReadResult =
   | { readonly ok: true; readonly token: string; readonly warning: string | null }
@@ -192,38 +256,50 @@ interface CachedToken {
   readonly result: TokenReadResult;
 }
 
-/** Reads a one-line token file, cached by mtime, size, and mode. The token never leaves the server. */
-export function createTokenReader() {
+/** Reads a one-line token file, cached by mtime, size, and mode. */
+export const createTokenReader = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const home = yield* HostProcess.HomeDirectory;
+  const platform = yield* HostProcess.Platform;
   const cache = new Map<string, CachedToken>();
-  return async (raw: string): Promise<TokenReadResult> => {
+  return Effect.fn("ChannelConfig.readToken")(function* (
+    raw: string,
+  ): Effect.fn.Return<TokenReadResult> {
     if (raw.trim().length === 0) return { ok: false, reason: "No token file is set." };
-    let filePath: string;
-    try {
-      filePath = resolveTokenFilePath(raw);
-    } catch (error) {
-      return { ok: false, reason: (error as Error).message };
-    }
-    let stat: import("node:fs").Stats;
-    try {
-      stat = await NodeFSP.stat(filePath);
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
+    const resolved = yield* Effect.try({
+      try: () => resolveTokenFilePath(raw, home),
+      catch: (error) => error as ChannelConfigError,
+    }).pipe(Effect.result);
+    if (resolved._tag === "Failure")
+      return { ok: false, reason: (resolved.failure as Error).message };
+    const filePath = resolved.success;
+    const unreadable = (error: PlatformError.PlatformError | ChannelFileError) => {
+      const cause = error.cause as { code?: string } | undefined;
+      return `${filePath} cannot be read (${cause?.code ?? "unknown error"}).`;
+    };
+    const statResult = yield* Effect.tryPromise({
+      try: () => NodeFSP.stat(filePath),
+      catch: (cause) =>
+        new ChannelFileError({ message: "The token file could not be inspected.", cause }),
+    }).pipe(Effect.result);
+    if (statResult._tag === "Failure")
       return {
         ok: false,
         reason:
-          code === "ENOENT"
+          (statResult.failure.cause as NodeJS.ErrnoException).code === "ENOENT"
             ? `${filePath} does not exist.`
-            : `${filePath} cannot be read (${code ?? "unknown error"}).`,
+            : unreadable(statResult.failure),
       };
-    }
-    const cached = cache.get(filePath);
+    const stat = statResult.success;
     const stamp = `${stat.mtimeMs}:${stat.size}:${stat.mode}`;
-    if (cached && cached.stamp === stamp) return cached.result;
+    const cached = cache.get(filePath);
+    if (cached?.stamp === stamp) return cached.result;
+    const read = yield* fs.readFileString(filePath).pipe(Effect.result);
     let result: TokenReadResult;
-    try {
-      const token = (await NodeFSP.readFile(filePath, "utf8")).trim();
-      // oxlint-disable-next-line t3code/no-global-process-runtime -- plain helper outside Effect; Windows has no mode bits.
-      const loose = process.platform !== "win32" && (stat.mode & 0o077) !== 0;
+    if (read._tag === "Failure") result = { ok: false, reason: unreadable(read.failure) };
+    else {
+      const token = read.success.trim();
+      const loose = platform !== "win32" && (stat.mode & 0o077) !== 0;
       result =
         token.length === 0 || token.includes("\n")
           ? { ok: false, reason: `${filePath} must hold the token on one line.` }
@@ -234,11 +310,8 @@ export function createTokenReader() {
                 ? `${filePath} is readable by other users; run chmod 600 on it.`
                 : null,
             };
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      result = { ok: false, reason: `${filePath} cannot be read (${code ?? "unknown error"}).` };
     }
     cache.set(filePath, { stamp, result });
     return result;
-  };
-}
+  });
+});

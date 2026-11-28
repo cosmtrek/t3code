@@ -27,7 +27,8 @@ import * as Project from "../../project/ProjectService.ts";
 import * as DocumentText from "../../provider/DocumentText.ts";
 import { ManagedProjectFolders } from "../../project/ManagedProjectFolders.ts";
 import * as ProviderRegistry from "../../provider/ProviderRegistry.ts";
-import { ChannelHub } from "../channels/hub.ts";
+import * as ChannelHub from "../channels/hub.ts";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import { ForkHttpError } from "../inbox/operations.ts";
 import { InboxRuntime } from "../inbox/InboxRuntime.ts";
 import { InboxStore } from "../inbox/store.ts";
@@ -331,41 +332,45 @@ const withChat = <E>(
   program: (h: Harness) => Effect.Effect<void, E, HarnessServices | InboxRuntime>,
 ) =>
   withHarness((h) =>
-    Effect.gen(function* () {
-      const dir = yield* Effect.promise(() =>
-        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-bot-chat-")),
-      );
-      const hub = new ChannelHub({
-        configPath: NodePath.join(dir, "channels.json"),
-        background: false,
-      });
-      yield* Effect.promise(async () => {
-        await hub.start();
-        const example = hub.list().find((channel) => channel.id === "example")!;
-        await hub.save(
-          {
-            id: example.id,
-            kind: example.kind,
-            name: example.name,
-            baseUrl: example.baseUrl,
-            tokenFile: example.tokenFile,
-            enabled: true,
-          },
-          { create: false },
+    Effect.scoped(
+      Effect.gen(function* () {
+        const dir = yield* Effect.promise(() =>
+          NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-bot-chat-")),
         );
-      });
-      const inbox = new InboxStore(":memory:");
-      yield* program(h).pipe(
-        Effect.provideService(InboxRuntime, {
-          hub,
-          store: inbox,
-          channelsDir: dir,
-          itemsDir: NodePath.join(dir, "items"),
-          subscribe: (listener) => hub.subscribe(listener),
-        }),
-        Effect.ensuring(Effect.promise(() => NodeFSP.rm(dir, { recursive: true, force: true }))),
-      );
-    }),
+        const hub = yield* ChannelHub.make({
+          // Adapter fixtures stay independent of the bot scheduling clock.
+          now: () => 1_795_824_000_000,
+          configPath: NodePath.join(dir, "channels.json"),
+          background: false,
+        }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer)));
+        yield* Effect.gen(function* () {
+          yield* hub.start();
+          const example = hub.list().find((channel) => channel.id === "example")!;
+          yield* hub.save(
+            {
+              id: example.id,
+              kind: example.kind,
+              name: example.name,
+              baseUrl: example.baseUrl,
+              tokenFile: example.tokenFile,
+              enabled: true,
+            },
+            { create: false },
+          );
+        });
+        const inbox = new InboxStore(":memory:");
+        yield* program(h).pipe(
+          Effect.provideService(InboxRuntime, {
+            hub,
+            store: inbox,
+            channelsDir: dir,
+            itemsDir: NodePath.join(dir, "items"),
+            subscribe: (listener) => hub.subscribe(listener),
+          }),
+          Effect.ensuring(Effect.promise(() => NodeFSP.rm(dir, { recursive: true, force: true }))),
+        );
+      }),
+    ),
   );
 
 describe("bot creation", () => {

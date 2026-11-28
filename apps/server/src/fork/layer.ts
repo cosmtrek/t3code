@@ -4,6 +4,7 @@
  */
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
 
 import { ThreadManagementService } from "../orchestration-v2/ThreadManagementService.ts";
 import * as BotFiles from "./bot/BotFiles.ts";
@@ -11,6 +12,7 @@ import * as BotRuntime from "./bot/BotRuntime.ts";
 import { startConnectors } from "./bot/connectors/registry.ts";
 import { followThreads, reconcileThreads } from "./bot/events.ts";
 import { fireDueRoutines, reconcile } from "./bot/operations.ts";
+import * as ChannelHub from "./channels/hub.ts";
 import { routesLayer } from "./http.ts";
 import * as Artifacts from "./inbox/artifacts.ts";
 import * as InboxRuntime from "./inbox/InboxRuntime.ts";
@@ -74,4 +76,5 @@ export const layer = Layer.mergeAll(routesLayer, linkedThreadsLayer, botsLayer).
   Layer.provide(
     Layer.merge(InboxRuntime.layer, BotRuntime.layer.pipe(Layer.provide(BotFiles.layer))),
   ),
+  Layer.provide(ChannelHub.layer.pipe(Layer.provide(FetchHttpClient.layer))),
 );

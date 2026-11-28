@@ -22,7 +22,7 @@ import * as DocumentText from "../../provider/DocumentText.ts";
 import * as Project from "../../project/ProjectService.ts";
 import * as ProviderRegistry from "../../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../../serverSettings.ts";
-import { ChannelHub } from "../channels/hub.ts";
+import { createTestHub } from "../channels/channelTestkit.ts";
 import type { AdapterRequest, AdapterResponse } from "../channels/transport.ts";
 import * as Artifacts from "./artifacts.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -209,7 +209,7 @@ async function harness(
   const posted: unknown[] = [];
   const uploaded: number[] = [];
   const control: { holdListings: Promise<void> | null } = { holdListings: null };
-  const hub = new ChannelHub({
+  const hub = await createTestHub({
     configPath: NodePath.join(dir, "channels.json"),
     transportFor: () => ({
       request: async (request) => {
@@ -243,11 +243,11 @@ async function harness(
   // Fixtures are at fixed past times; none should fall before the first-read cutoff.
   if (seedReadCutoff) store.readAllBefore(channelId, "2026-01-01T00:00:00.000Z");
   const runtime = {
-    hub,
+    hub: hub.service,
     store,
     channelsDir: dir,
     itemsDir: NodePath.join(dir, "items"),
-    subscribe: (listener: Parameters<ChannelHub["subscribe"]>[0]) => hub.subscribe(listener),
+    subscribe: hub.service.subscribe,
   };
   const shells = new Map<string, OrchestrationV2ThreadShell | null>();
   const settledThreads: string[] = [];
@@ -297,12 +297,12 @@ const idleShell = (threadId: string) =>
   }) as unknown as OrchestrationV2ThreadShell;
 
 /** Saves a delegation anchored at `anchorMessageId`; null scope is one made from a v1 topic. */
-const saveDelegation = (
+const saveDelegation = Effect.fn("Test.saveDelegation")(function* (
   h: Harness,
   conversationId: string,
   anchorMessageId: string,
   scope: "chain" | "range" | null = "chain",
-) => {
+) {
   const key = { ...h.keyOf(conversationId), anchorMessageId };
   const id = delegationIdFor(key);
   if (h.runtime.store.getDelegation(id) === null) {
@@ -315,10 +315,10 @@ const saveDelegation = (
       createdAt: at(0),
     });
     // As a delegation publishes once saved.
-    h.runtime.hub.invalidate(h.channelId);
+    yield* h.runtime.hub.invalidate(h.channelId);
   }
   return id;
-};
+});
 
 const linkThread = (
   h: Harness,
@@ -328,8 +328,8 @@ const linkThread = (
   minute: number,
   scope: "chain" | "range" | null = "chain",
 ) =>
-  Effect.promise(async () => {
-    const delegationId = saveDelegation(h, conversationId, anchorMessageId, scope);
+  Effect.gen(function* () {
+    const delegationId = yield* saveDelegation(h, conversationId, anchorMessageId, scope);
     h.runtime.store.addLink({
       ...h.keyOf(conversationId),
       delegationId,
@@ -339,7 +339,7 @@ const linkThread = (
     });
     h.shells.set(threadId, idleShell(threadId));
     const dir = threadContextDir(h.runtime.itemsDir, delegationId, threadId);
-    await NodeFSP.mkdir(dir, { recursive: true });
+    yield* Effect.promise(() => NodeFSP.mkdir(dir, { recursive: true }));
     return { dir, delegationId };
   });
 
@@ -457,7 +457,7 @@ describe("inbox listing", () => {
       expect(h.requests.filter((path) => path.includes("order=desc"))).toHaveLength(2);
 
       // A delegation reads its whole reply thread, every page, oldest first.
-      const delegationId = saveDelegation(h, "c-second", "j1");
+      const delegationId = yield* saveDelegation(h, "c-second", "j1");
       const detail = yield* Inbox.readDelegation(delegationQuery(h, delegationId)).pipe(
         Effect.provide(h.layer),
       );
@@ -481,7 +481,7 @@ describe("inbox listing", () => {
         expect(h.requests).toEqual([]);
         expect(yield* row()).toMatchObject({ unread: false });
         messages.push({ id: "m2", minute: 2, author: THEM });
-        h.runtime.hub.invalidate(h.channelId);
+        yield* h.runtime.hub.invalidate(h.channelId);
         expect(yield* row()).toMatchObject({ unread: true });
         // An unread DM counts toward the badge, and the sidebar lists it.
         const summary = () =>
@@ -516,7 +516,10 @@ describe("inbox listing", () => {
         harness(() => [{ id: "c", messages: [{ id: "m1", minute: 1, author: ME }] }]),
       );
       const { delegationId } = yield* linkThread(h, "c", "m1", "thread-1", 1);
-      const finished = (status: string, extra: Record<string, unknown> = {}) => {
+      const finished = Effect.fn("Test.finishRun")(function* (
+        status: string,
+        extra: Record<string, unknown> = {},
+      ) {
         h.shells.set("thread-1", {
           ...idleShell("thread-1"),
           status,
@@ -524,10 +527,10 @@ describe("inbox listing", () => {
           latestRunCompletedAt: DateTime.makeUnsafe(at(5)),
           ...extra,
         } as never);
-        h.runtime.hub.invalidate(h.channelId);
-      };
+        yield* h.runtime.hub.invalidate(h.channelId);
+      });
       const item = () => listOf(h).pipe(Effect.map((result) => result.delegations[0]));
-      finished("completed");
+      yield* finished("completed");
       expect(yield* item()).toMatchObject({
         id: delegationId,
         agentUnseen: true,
@@ -540,10 +543,10 @@ describe("inbox listing", () => {
         ["interrupted", { latestRunStopRequested: true }],
       ];
       for (const [status, extra] of quietRuns) {
-        finished(status, extra);
+        yield* finished(status, extra);
         expect(yield* item()).toMatchObject({ agentUnseen: false });
       }
-      finished("failed");
+      yield* finished("failed");
       yield* Inbox.markSeen({ channelId: h.channelId, delegationId, runCompletedAt: at(5) }).pipe(
         Effect.provide(h.layer),
       );
@@ -606,7 +609,7 @@ describe("inbox listing", () => {
     Effect.gen(function* () {
       const messages: FakeMessage[] = [{ id: "m1", minute: 1, author: THEM }];
       const h = yield* Effect.promise(() => harness(() => [{ id: "c", messages }]));
-      const delegationId = saveDelegation(h, "c", "m1");
+      const delegationId = yield* saveDelegation(h, "c", "m1");
       const reads = vi.spyOn(h.runtime.store, "listConversationReads");
       yield* Effect.all(
         [
@@ -636,7 +639,7 @@ describe("inbox listing", () => {
         release = resolve;
       });
       const announced = yield* Deferred.make<void>();
-      const stop = h.runtime.hub.subscribe((event) => {
+      const stop = yield* h.runtime.hub.subscribe((event) => {
         if (event.type === "counts" && event.channelId === h.channelId) {
           Deferred.doneUnsafe(announced, Effect.void);
         }
@@ -647,7 +650,7 @@ describe("inbox listing", () => {
       expect(early.channels.find((channel) => channel.id === h.channelId)?.unreadCount).toBeNull();
       release();
       yield* Deferred.await(announced);
-      stop();
+      yield* stop;
       const listings = h.requests.filter((path) => path.startsWith("/conversations?")).length;
       const later = yield* Inbox.overview().pipe(Effect.provide(h.layer));
       expect(later.channels.find((channel) => channel.id === h.channelId)?.unreadCount).toBe(1);
@@ -690,7 +693,7 @@ describe("inbox listing", () => {
           },
         ]),
       );
-      const delegationId = saveDelegation(h, "c", "anchor", null);
+      const delegationId = yield* saveDelegation(h, "c", "anchor", null);
       const detail = yield* Inbox.readDelegation(delegationQuery(h, delegationId)).pipe(
         Effect.provide(h.layer),
       );
@@ -967,7 +970,7 @@ describe("linked threads and their files", () => {
       ).toBe(true);
       h.shells.set("thread-1", null);
       // What followLinkedThreads publishes on thread.deleted.
-      h.runtime.hub.publish({ type: "inbox", channelId: h.channelId });
+      yield* h.runtime.hub.publish({ type: "inbox", channelId: h.channelId });
       const after = yield* Inbox.readDelegation(query).pipe(Effect.provide(h.layer));
       expect(after.delegation).toMatchObject({ hasDraft: false });
       expect(after.draft).toBeNull();
@@ -991,7 +994,10 @@ describe("following linked threads", () => {
       const h = yield* Effect.promise(() => harness(() => []));
       yield* linkThread(h, "c", "m1", "thread-linked", 1);
       const published: unknown[] = [];
-      h.runtime.hub.subscribe((event) => published.push(event));
+      const _unsubscribe = yield* Effect.acquireRelease(
+        h.runtime.hub.subscribe((event) => published.push(event)),
+        (stop) => stop,
+      );
       const event = (type: string, threadId: string, status = "running", runId = "run-1") =>
         ({ type, threadId, payload: { id: runId, status } }) as never;
       yield* followLinkedThreads(
@@ -1068,7 +1074,7 @@ describe("sending", () => {
       expect(listed.delegations[0]!.lastSentAt).not.toBeNull();
 
       const typed = yield* Effect.promise(() => harness(oneConversation));
-      const typedId = saveDelegation(typed, "c", "m1");
+      const typedId = yield* saveDelegation(typed, "c", "m1");
       yield* Inbox.send({ ...typed.keyOf("c"), delegationId: typedId, text: "by hand" }).pipe(
         Effect.provide(typed.layer),
       );
@@ -1096,7 +1102,7 @@ describe("sending", () => {
   it.effect("reports a sent message whose copy could not be saved, without failing the send", () =>
     Effect.gen(function* () {
       const h = yield* Effect.promise(() => harness(oneConversation));
-      const delegationId = saveDelegation(h, "c", "m1");
+      const delegationId = yield* saveDelegation(h, "c", "m1");
       // A file where the delegation's folder should be: the copy cannot be written.
       yield* Effect.promise(async () => {
         await NodeFSP.mkdir(h.runtime.itemsDir, { recursive: true });

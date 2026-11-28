@@ -32,11 +32,11 @@ import * as ThreadMessageIntake from "../../orchestration-v2/ThreadMessageIntake
 import * as Project from "../../project/ProjectService.ts";
 import * as ProviderRegistry from "../../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../../serverSettings.ts";
-import { ChannelConfigError, type ChannelConfigEntry } from "../channels/config.ts";
+import { isChannelConfigError, type ChannelConfigEntry } from "../channels/config.ts";
 import { EXAMPLE_SIMULATIONS } from "../channels/example/exampleChannel.ts";
 import {
-  AdapterRequestError,
-  ChannelUnavailableError,
+  isAdapterRequestError,
+  isChannelUnavailableError,
   channelAccess,
   type ChannelHub,
   type ChannelView,
@@ -97,14 +97,14 @@ const isBaseRefError = Schema.is(ThreadLaunchBaseRefError);
 
 function toForkError(error: unknown): ForkHttpError {
   if (isForkHttpError(error)) return error;
-  if (error instanceof ChannelUnavailableError) {
+  if (isChannelUnavailableError(error)) {
     return new ForkHttpError({
       status: error.status === "missing" ? 404 : 409,
       code: error.status,
       detail: error.message,
     });
   }
-  if (error instanceof AdapterRequestError) {
+  if (isAdapterRequestError(error)) {
     return new ForkHttpError({ status: 502, code: error.code, detail: error.message });
   }
   if (isBaseRefError(error)) {
@@ -115,7 +115,7 @@ function toForkError(error: unknown): ForkHttpError {
       field: "workspaceStrategy",
     });
   }
-  if (error instanceof ChannelConfigError) {
+  if (isChannelConfigError(error)) {
     return new ForkHttpError({
       status: 400,
       code: "invalid_config",
@@ -246,18 +246,20 @@ export const saveChannel = Effect.fn("ForkChannels.save")(function* (
     Effect.mapError(() => badRequest("The channel is missing fields.")),
   );
   const { hub } = yield* InboxRuntime;
-  return yield* attempt(() => hub.save(input satisfies ChannelConfigEntry, options));
+  return yield* hub
+    .save(input satisfies ChannelConfigEntry, options)
+    .pipe(Effect.mapError(toForkError));
 });
 
 export const removeChannel = Effect.fn("ForkChannels.remove")(function* (channelId: string) {
   const { hub } = yield* InboxRuntime;
-  const removed = yield* attempt(() => hub.remove(channelId));
+  const removed = yield* hub.remove(channelId).pipe(Effect.mapError(toForkError));
   return { removed };
 });
 
 export const testChannel = Effect.fn("ForkChannels.test")(function* (channelId: string) {
   const { hub } = yield* InboxRuntime;
-  return yield* channelEntry(yield* attempt(() => hub.test(channelId)));
+  return yield* channelEntry(yield* hub.test(channelId).pipe(Effect.mapError(toForkError)));
 });
 
 const ProbeInput = Schema.Struct({ baseUrl: Schema.String, tokenFile: Schema.String });
@@ -268,7 +270,7 @@ export const probeChannel = Effect.fn("ForkChannels.probe")(function* (body: unk
     Effect.mapError(() => badRequest("Give the adapter's address and token file.")),
   );
   const { hub } = yield* InboxRuntime;
-  return yield* attempt(() => hub.probe(input));
+  return yield* hub.probe(input).pipe(Effect.mapError(toForkError));
 });
 
 const SimulateInput = Schema.Struct({
@@ -282,7 +284,9 @@ export const simulateChannel = Effect.fn("ForkChannels.simulate")(function* (bod
     Effect.mapError(() => badRequest("Name the channel and a state to simulate.")),
   );
   const { hub } = yield* InboxRuntime;
-  return yield* channelEntry(yield* attempt(() => hub.simulate(input.channelId, input.simulation)));
+  return yield* channelEntry(
+    yield* hub.simulate(input.channelId, input.simulation).pipe(Effect.mapError(toForkError)),
+  );
 });
 
 export type LinkedThreadStatus = "running" | "idle" | "archived" | "deleted" | "unknown";
@@ -488,7 +492,7 @@ interface ListingMemo {
 
 /** Bounds a change no signal announced, as the client's poll does. */
 const LISTING_MEMO_MS = 10_000;
-const listingMemos = new WeakMap<ChannelHub, Map<string, ListingMemo>>();
+const listingMemos = new WeakMap<ChannelHub["Service"], Map<string, ListingMemo>>();
 
 /**
  * One event sends the overview, the list, and the open delegation here at once. They share one
@@ -545,9 +549,9 @@ const inspectDelegation = Effect.fn("ForkInbox.inspectDelegation")(function* (
 const computeChannel = Effect.fn("ForkInbox.computeChannel")(function* (channelId: string) {
   const runtime = yield* InboxRuntime;
   const { hub, store } = runtime;
-  const listed = yield* attempt(() =>
-    hub.getAllPages(channelId, conversationsPath, Conversation, { maxPages: CONVERSATION_PAGES }),
-  );
+  const listed = yield* hub
+    .getAllPages(channelId, conversationsPath, Conversation, { maxPages: CONVERSATION_PAGES })
+    .pipe(Effect.mapError(toForkError));
   const reads = new Map(
     store.listConversationReads(channelId).map((read) => [read.conversationId, read] as const),
   );
@@ -714,9 +718,7 @@ export const overview = Effect.fn("ForkInbox.overview")(function* () {
           // The read goes on; clients refetch the count once it lands.
           yield* Effect.forkDetach(
             readChannel(channel.id).pipe(
-              Effect.andThen(
-                Effect.sync(() => hub.publish({ type: "counts", channelId: channel.id })),
-              ),
+              Effect.andThen(hub.publish({ type: "counts", channelId: channel.id })),
               Effect.ignore,
             ),
           );
@@ -799,12 +801,12 @@ export const readChain = Effect.fn("ForkInbox.readChain")(function* (
   options: { readonly cacheMs?: number },
 ) {
   const { hub } = yield* InboxRuntime;
-  const result = yield* attempt(() =>
-    hub.getAllPages(channelId, chainPath(conversationId, rootId), Message, {
+  const result = yield* hub
+    .getAllPages(channelId, chainPath(conversationId, rootId), Message, {
       ...options,
       maxPages: MESSAGE_PAGES,
-    }),
-  );
+    })
+    .pipe(Effect.mapError(toForkError));
   yield* warnSkipped(channelId, "messages", result.skipped);
   const messages = sortMessages(result.items);
   return {
@@ -831,9 +833,9 @@ const readBackTo = Effect.fn("ForkInbox.readBackTo")(function* (
   let cursor: string | undefined;
   let found = false;
   for (let page = 0; page < RANGE_PAGES && !found; page++) {
-    const answer = yield* attempt(() =>
-      hub.getJson(channelId, conversationMessagesPath(conversationId, cursor), RawPage, options),
-    );
+    const answer = yield* hub
+      .getJson(channelId, conversationMessagesPath(conversationId, cursor), RawPage, options)
+      .pipe(Effect.mapError(toForkError));
     if (answer.stale) stale = true;
     const decoded = decodeMessages(answer.value.items);
     messages.push(...decoded.messages);
@@ -969,14 +971,14 @@ export const readConversation = Effect.fn("ForkInbox.readConversation")(function
     Effect.mapError(() => badRequest("Name the channel and conversation.")),
   );
   const { hub } = yield* InboxRuntime;
-  const page = yield* attempt(() =>
-    hub.getJson(
+  const page = yield* hub
+    .getJson(
       input.channelId,
       conversationMessagesPath(input.conversationId, input.cursor),
       RawPage,
       { cacheMs: 5_000 },
-    ),
-  );
+    )
+    .pipe(Effect.mapError(toForkError));
   const { messages, skipped } = decodeMessages(page.value.items);
   yield* warnSkipped(input.channelId, "messages", skipped);
   return {
@@ -993,7 +995,9 @@ export const media = Effect.fn("ForkInbox.media")(function* (query: URLSearchPar
   const key = query.get("key");
   if (!channelId || !messageId || !key) return yield* badRequest("Name the message and its file.");
   const { hub } = yield* InboxRuntime;
-  return yield* attempt(() => hub.getMedia(channelId, `/media/${enc(messageId)}/${enc(key)}`));
+  return yield* hub
+    .getMedia(channelId, `/media/${enc(messageId)}/${enc(key)}`)
+    .pipe(Effect.mapError(toForkError));
 });
 
 const ReadInput = Schema.Struct({
@@ -1013,7 +1017,7 @@ export const setRead = Effect.fn("ForkInbox.setRead")(function* (body: unknown) 
   const key = { channelId: input.channelId, conversationId: input.conversationId };
   if (input.read) runtime.store.markConversationRead(key, input.lastMessageAt);
   else runtime.store.pinConversationUnread(key);
-  runtime.hub.publish({ type: "inbox", channelId: input.channelId });
+  yield* runtime.hub.publish({ type: "inbox", channelId: input.channelId });
   return { ok: true };
 });
 
@@ -1032,7 +1036,7 @@ export const markSeen = Effect.fn("ForkInbox.markSeen")(function* (body: unknown
   );
   const runtime = yield* InboxRuntime;
   runtime.store.markAgentSeen(input.delegationId, input.runCompletedAt);
-  runtime.hub.publish({ type: "inbox", channelId: input.channelId });
+  yield* runtime.hub.publish({ type: "inbox", channelId: input.channelId });
   return { ok: true };
 });
 
@@ -1071,7 +1075,7 @@ export const settle = Effect.fn("ForkInbox.settle")(function* (body: unknown) {
       })
       .pipe(Effect.ignore);
   }
-  runtime.hub.publish({ type: "inbox", channelId: input.channelId });
+  yield* runtime.hub.publish({ type: "inbox", channelId: input.channelId });
   return { ok: true };
 });
 
@@ -1088,7 +1092,7 @@ export const markAllRead = Effect.fn("ForkInbox.markAllRead")(function* (body: u
   );
   const runtime = yield* InboxRuntime;
   runtime.store.markAllRead(input.channelId, input.before);
-  runtime.hub.publish({ type: "inbox", channelId: input.channelId });
+  yield* runtime.hub.publish({ type: "inbox", channelId: input.channelId });
   return { ok: true };
 });
 
@@ -1226,16 +1230,15 @@ const downloadImages = Effect.fn("ForkInbox.downloadImages")(function* (
   return yield* Effect.forEach(
     wanted,
     ({ message, attachment }) =>
-      attempt(async (): Promise<ContextImage> => {
-        const response = await hub.getMedia(
-          channelId,
-          `/media/${enc(message.id)}/${enc(attachment.key)}`,
-        );
+      Effect.gen(function* (): Effect.fn.Return<ContextImage, ForkHttpError> {
+        const response = yield* hub
+          .getMedia(channelId, `/media/${enc(message.id)}/${enc(attachment.key)}`)
+          .pipe(Effect.mapError(toForkError));
         const filePath = NodePath.join(
           mediaDir,
           mediaFileName(message.id, attachment.key, response.contentType),
         );
-        await NodeFSP.writeFile(filePath, response.body);
+        yield* attempt(() => NodeFSP.writeFile(filePath, response.body));
         return { messageId: message.id, key: attachment.key, path: filePath };
       }).pipe(
         Effect.orElseSucceed((): ContextImage => ({
@@ -1353,9 +1356,8 @@ const acknowledge = Effect.fn("ForkInbox.acknowledge")(function* (
   // Some chat apps toggle a reaction: adding the user's own again would take it away.
   if (message.reactions?.some((reaction) => reaction.key === key && reaction.includesSelf)) return;
   const { hub } = yield* InboxRuntime;
-  yield* attempt(() =>
-    hub.postJson(channelId, "/reactions", { conversationId, messageId: message.id, key }),
-  ).pipe(
+  yield* hub.postJson(channelId, "/reactions", { conversationId, messageId: message.id, key }).pipe(
+    Effect.mapError(toForkError),
     Effect.catch((error: ForkHttpError) =>
       Effect.logWarning("The adapter did not add the delegation's reaction.", {
         channelId,
@@ -1569,7 +1571,7 @@ export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown
     current,
     start,
   });
-  if (!result.existing) runtime.hub.publish({ type: "inbox", channelId: input.channelId });
+  if (!result.existing) yield* runtime.hub.publish({ type: "inbox", channelId: input.channelId });
   return { ...result, delegationId };
 });
 
@@ -1659,8 +1661,8 @@ export const send = Effect.fn("ForkInbox.send")(function* (body: unknown) {
       : null;
   const draftAtSend =
     draftDir === null ? null : (yield* contextFiles.readArtifacts(draftDir)).draft;
-  const answer = yield* attempt(() =>
-    runtime.hub.postJson(input.channelId, "/messages", {
+  const answer = yield* runtime.hub
+    .postJson(input.channelId, "/messages", {
       conversationId: input.conversationId,
       ...(input.replyToId === undefined ? {} : { replyToId: input.replyToId }),
       ...(input.replyToId !== undefined &&
@@ -1674,19 +1676,20 @@ export const send = Effect.fn("ForkInbox.send")(function* (body: unknown) {
       ...(attachments.length === 0
         ? {}
         : { attachments: attachments.map(({ uploadId }) => ({ uploadId })) }),
-    }),
-  ).pipe(
-    Effect.mapError((error) =>
-      error.status === 502 && SEND_ERROR_MESSAGES[error.code]
-        ? new ForkHttpError({
-            ...error,
-            detail: `${SEND_ERROR_MESSAGES[error.code]} ${error.detail}`,
-          })
-        : error,
-    ),
-  );
-  runtime.hub.invalidate(input.channelId);
-  runtime.hub.publish({ type: "inbox", channelId: input.channelId });
+    })
+    .pipe(
+      Effect.mapError(toForkError),
+      Effect.mapError((error) =>
+        error.status === 502 && SEND_ERROR_MESSAGES[error.code]
+          ? new ForkHttpError({
+              ...error,
+              detail: `${SEND_ERROR_MESSAGES[error.code]} ${error.detail}`,
+            })
+          : error,
+      ),
+    );
+  yield* runtime.hub.invalidate(input.channelId);
+  yield* runtime.hub.publish({ type: "inbox", channelId: input.channelId });
   const result = decodeSendResultOption(answer);
   if (result._tag === "None" || result.value.messageId.trim().length === 0) {
     // It may have gone out; sending again could post it twice, so nothing is cleared.
@@ -1747,7 +1750,9 @@ export const upload = Effect.fn("ForkInbox.upload")(function* (
   }
   if (bytes.byteLength === 0) return yield* badRequest("The file is empty.");
   const { hub } = yield* InboxRuntime;
-  const answer = yield* attempt(() => hub.upload(channelId, `/uploads?name=${enc(name)}`, bytes));
+  const answer = yield* hub
+    .upload(channelId, `/uploads?name=${enc(name)}`, bytes)
+    .pipe(Effect.mapError(toForkError));
   const uploaded = decodeUpload(answer);
   if (uploaded._tag === "None") {
     return yield* new ForkHttpError({
@@ -1786,6 +1791,6 @@ export const discardDraft = Effect.fn("ForkInbox.discardDraft")(function* (body:
     input.draft,
     discardedAt,
   );
-  runtime.hub.publish({ type: "inbox", channelId: input.channelId });
+  yield* runtime.hub.publish({ type: "inbox", channelId: input.channelId });
   return { discarded };
 });

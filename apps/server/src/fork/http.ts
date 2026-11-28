@@ -163,16 +163,13 @@ const eventsRoute = (runtime: InboxRuntimeShape, bots: BotRuntime["Service"]) =>
       yield* authenticateMediaRequest(AuthOrchestrationReadScope);
       const events = Stream.callback<HubEvent | BotEvent>((queue) =>
         Effect.acquireRelease(
-          Effect.sync(() => {
+          Effect.gen(function* () {
             const offer = (event: HubEvent | BotEvent) => Queue.offerUnsafe(queue, event);
-            const stopInbox = runtime.subscribe(offer);
+            const stopInbox = yield* runtime.subscribe(offer);
             const stopBots = bots.subscribe(offer);
-            return () => {
-              stopInbox();
-              stopBots();
-            };
+            return stopInbox.pipe(Effect.andThen(Effect.sync(stopBots)));
           }),
-          (unsubscribe) => Effect.sync(unsubscribe),
+          (unsubscribe) => unsubscribe,
         ),
       ).pipe(Stream.map((event) => `data: ${JSON.stringify(event)}\n\n`));
       const heartbeat = Stream.tick(HEARTBEAT_INTERVAL).pipe(Stream.map(() => ": ping\n\n"));

@@ -1,4 +1,9 @@
-// @effect-diagnostics globalDate:off globalTimers:off - Runs outside the Effect runtime: adapter sockets, timers, and plain callbacks.
+import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Queue from "effect/Queue";
+import * as Scope from "effect/Scope";
+import * as Stream from "effect/Stream";
 /**
  * The built-in example channel: protocol v2 served in process from made-up data, for
  * development, tests, screenshots, and trying the inbox without a real adapter.
@@ -71,7 +76,7 @@ const EXAMPLE_PAGE_SIZE = 2;
 const OPEN_URL_BASE = "https://chat.example.com";
 
 function hoursAgo(now: number, hours: number) {
-  return new Date(now - hours * 3_600_000).toISOString();
+  return DateTime.formatIso(DateTime.makeUnsafe(now - hours * 3_600_000));
 }
 
 function seed(now: number): ExampleConversation[] {
@@ -266,17 +271,17 @@ function paginate<T>(items: ReadonlyArray<T>, url: URL) {
 
 export interface ExampleChannel extends ChannelTransport {
   readonly simulation: () => ExampleSimulation;
-  readonly setSimulation: (simulation: ExampleSimulation) => void;
-  readonly dispose: () => void;
+  readonly setSimulation: (simulation: ExampleSimulation) => Effect.Effect<void>;
 }
 
-export function createExampleChannel(
+export const createExampleChannel = Effect.fn("ExampleChannel.make")(function* (
   options: { readonly now?: () => number } = {},
-): ExampleChannel {
-  const now = options.now ?? Date.now;
+) {
+  const clock = yield* Clock.Clock;
+  const now = options.now ?? (() => clock.currentTimeMillisUnsafe());
   const conversations = seed(now());
   const listeners = new Set<(event: ChannelEvent) => void>();
-  const timers = new Set<ReturnType<typeof setTimeout>>();
+  let reply: Effect.Effect<void> | null = null;
   /** Uploaded files, kept so a sent attachment can be shown again. */
   const uploads = new Map<string, { name: string; contentType: string; bytes: Uint8Array }>();
   let nextId = 1000;
@@ -355,7 +360,7 @@ export function createExampleChannel(
       id: conversation.id,
       kind: conversation.kind,
       name: conversation.name,
-      lastActivityAt: last?.createdAt ?? new Date(0).toISOString(),
+      lastActivityAt: last?.createdAt ?? DateTime.formatIso(DateTime.makeUnsafe(0)),
       relevant: conversation.relevant,
       muted: conversation.muted,
       lastMessage: last
@@ -423,7 +428,7 @@ export function createExampleChannel(
         id,
         replyToId,
         inThread,
-        createdAt: new Date(now()).toISOString(),
+        createdAt: DateTime.formatIso(DateTime.makeUnsafe(now())),
         author: SELF,
         mentionsSelf: false,
         text: body,
@@ -444,22 +449,23 @@ export function createExampleChannel(
     const messageId = messageIds[0]!;
     const other =
       conversation.messages.findLast((item) => item.author.id !== SELF.id)?.author ?? JORDAN;
-    const timer = setTimeout(() => {
-      timers.delete(timer);
-      append(conversation, {
-        id: `m-${nextId++}`,
-        replyToId,
-        inThread,
-        createdAt: new Date(now()).toISOString(),
-        author: other,
-        mentionsSelf: false,
-        text: "Thanks, got it. (This is an automatic reply from the example channel.)",
-        attachments: [],
-        links: [],
-      });
-    }, EXAMPLE_REPLY_DELAY_MS);
-    timer.unref?.();
-    timers.add(timer);
+    reply = Effect.sleep(EXAMPLE_REPLY_DELAY_MS).pipe(
+      Effect.andThen(
+        Effect.sync(() => {
+          append(conversation, {
+            id: `m-${nextId++}`,
+            replyToId,
+            inThread,
+            createdAt: DateTime.formatIso(DateTime.makeUnsafe(now())),
+            author: other,
+            mentionsSelf: false,
+            text: "Thanks, got it. (This is an automatic reply from the example channel.)",
+            attachments: [],
+            links: [],
+          });
+        }),
+      ),
+    );
     // Only someone who wrote here can be mentioned; anyone else went out as plain text.
     const unresolvedMentions = (Array.isArray(input?.mentions) ? input.mentions : [])
       .map((mention) => mention.userId)
@@ -534,7 +540,7 @@ export function createExampleChannel(
         adapterVersion: "example-1.0.0",
         online: simulation !== "collector_stopped",
         loggedIn: simulation !== "needs_login",
-        lastSyncAt: new Date(now()).toISOString(),
+        lastSyncAt: DateTime.formatIso(DateTime.makeUnsafe(now())),
         self: { name: SELF.name },
         logsUrl: null,
         lastError:
@@ -594,34 +600,46 @@ export function createExampleChannel(
   };
 
   return {
-    request: async (request) => {
-      if (simulation === "unreachable") {
-        throw new AdapterUnreachableError("Simulated: connection refused.");
+    request: Effect.fn("ExampleChannel.request")(function* (input: AdapterRequest) {
+      if (simulation === "unreachable")
+        return yield* new AdapterUnreachableError({ message: "Simulated: connection refused." });
+      const scope = yield* Scope.Scope;
+      const response = handle(input);
+      if (reply !== null) {
+        const pending = reply;
+        reply = null;
+        yield* pending.pipe(Effect.forkIn(scope));
       }
-      return handle(request);
-    },
-    events: (_token, onEvent, signal) =>
-      new Promise<void>((resolve, reject) => {
-        if (simulation === "unreachable") {
-          return reject(new AdapterUnreachableError("Simulated: connection refused."));
-        }
-        if (signal.aborted) return resolve();
-        listeners.add(onEvent);
-        onEvent({ type: "connected" });
-        signal.addEventListener("abort", () => {
-          listeners.delete(onEvent);
-          resolve();
-        });
-      }),
+      return response;
+    }),
+    events: () =>
+      Stream.callback<ChannelEvent, AdapterUnreachableError>((events) =>
+        Effect.gen(function* () {
+          if (simulation === "unreachable")
+            return yield* new AdapterUnreachableError({
+              message: "Simulated: connection refused.",
+            });
+          const emit = (event: ChannelEvent) => {
+            Queue.offerUnsafe(events, event);
+          };
+          yield* Effect.acquireRelease(
+            Effect.sync(() => {
+              listeners.add(emit);
+            }),
+            () =>
+              Effect.sync(() => {
+                listeners.delete(emit);
+              }),
+          );
+          yield* Queue.offer(events, { type: "connected" });
+        }),
+      ),
     simulation: () => simulation,
-    setSimulation: (next) => {
-      simulation = next;
-      emit({ type: "health.changed" });
-    },
-    dispose: () => {
-      for (const timer of timers) clearTimeout(timer);
-      timers.clear();
-      listeners.clear();
-    },
-  };
-}
+    setSimulation: Effect.fn("ExampleChannel.setSimulation")((next: ExampleSimulation) =>
+      Effect.sync(() => {
+        simulation = next;
+        emit({ type: "health.changed" });
+      }),
+    ),
+  } satisfies ExampleChannel;
+});
