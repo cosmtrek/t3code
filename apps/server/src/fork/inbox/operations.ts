@@ -19,24 +19,24 @@ import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
 import * as DateTime from "effect/DateTime";
 import * as Clock from "effect/Clock";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 
 import { resolveRuntimeMode } from "../../mcp/delegatedTaskModes.ts";
-import { ThreadLaunchBaseRefError } from "../../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../../orchestration-v2/ThreadManagementService.ts";
 import * as ThreadMessageIntake from "../../orchestration-v2/ThreadMessageIntake.ts";
 import * as Project from "../../project/ProjectService.ts";
 import * as ProviderRegistry from "../../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../../serverSettings.ts";
-import { isChannelConfigError, type ChannelConfigEntry } from "../channels/config.ts";
+import type { ChannelConfigEntry } from "../channels/config.ts";
 import { EXAMPLE_SIMULATIONS } from "../channels/example/exampleChannel.ts";
 import {
   isAdapterRequestError,
-  isChannelUnavailableError,
   channelAccess,
   type ChannelHub,
   type ChannelView,
@@ -91,51 +91,77 @@ export class ForkHttpError extends Schema.TaggedError<ForkHttpError>()("ForkHttp
   }
 }
 
-const isForkHttpError = Schema.is(ForkHttpError);
+export class InboxRejection extends Schema.TaggedError<
+  InboxRejection,
+  { readonly brand: unique symbol }
+>()("InboxRejection", {
+  code: Schema.Literals([
+    "bad_request",
+    "missing",
+    "scope_too_long",
+    "empty_scope",
+    "delivery_unknown",
+    "upload_failed",
+  ]),
+  message: Schema.String,
+  field: Schema.optional(Schema.String),
+  cause: Schema.optional(Schema.Defect()),
+}) {}
 
-const isBaseRefError = Schema.is(ThreadLaunchBaseRefError);
-
-function toForkError(error: unknown): ForkHttpError {
-  if (isForkHttpError(error)) return error;
-  if (isChannelUnavailableError(error)) {
-    return new ForkHttpError({
-      status: error.status === "missing" ? 404 : 409,
-      code: error.status,
-      detail: error.message,
-    });
+export class InboxOperationError extends Schema.TaggedError<
+  InboxOperationError,
+  { readonly brand: unique symbol }
+>()("InboxOperationError", {
+  stage: Schema.Literals([
+    "save-channel",
+    "remove-channel",
+    "test-channel",
+    "probe-channel",
+    "simulate-channel",
+    "list-conversations",
+    "read-chain",
+    "read-history",
+    "read-conversation",
+    "read-media",
+    "save-image",
+    "resolve-project-defaults",
+    "launch-delegation",
+    "send-message",
+    "upload-file",
+  ]),
+  cause: Schema.Defect(),
+}) {
+  override get message(): string {
+    return `Inbox operation failed during ${this.stage}.`;
   }
-  if (isAdapterRequestError(error)) {
-    return new ForkHttpError({ status: 502, code: error.code, detail: error.message });
-  }
-  if (isBaseRefError(error)) {
-    return new ForkHttpError({
-      status: 400,
-      code: "bad_request",
-      detail: error.message,
-      field: "workspaceStrategy",
-    });
-  }
-  if (isChannelConfigError(error)) {
-    return new ForkHttpError({
-      status: 400,
-      code: "invalid_config",
-      detail: error.message,
-      ...(error.field ? { field: error.field } : {}),
-    });
-  }
-  return new ForkHttpError({
-    status: 500,
-    code: "internal",
-    detail: error instanceof Error ? error.message : String(error),
-  });
 }
 
-const attempt = <A>(run: () => Promise<A>) => Effect.tryPromise({ try: run, catch: toForkError });
+export class InboxContextError extends Schema.TaggedError<
+  InboxContextError,
+  { readonly brand: unique symbol }
+>()("InboxContextError", {
+  stage: Schema.Literals([
+    "create-context-directory",
+    "create-media-directory",
+    "write-context",
+    "remove-context-directory",
+  ]),
+  cause: Schema.Defect(),
+}) {
+  override get message(): string {
+    return `Inbox context preparation failed during ${this.stage}.`;
+  }
+}
 
 const prettyJson = (value: object) => `${JSON.stringify(value, null, 2)}\n`;
 
-const badRequest = (detail: string, field?: string) =>
-  new ForkHttpError({ status: 400, code: "bad_request", detail, ...(field ? { field } : {}) });
+const badRequest = (message: string, field?: string, cause?: unknown) =>
+  new InboxRejection({
+    code: "bad_request",
+    message,
+    ...(field ? { field } : {}),
+    ...(cause === undefined ? {} : { cause }),
+  });
 
 const CONVERSATION_LIMIT = 100;
 const MESSAGE_LIMIT = 200;
@@ -223,7 +249,7 @@ const channelEntry = Effect.fn("ForkChannels.entry")(function* (view: ChannelVie
   } satisfies ChannelListEntry;
 });
 
-export const listChannels = Effect.fn("ForkChannels.list")(function* () {
+const listChannels = Effect.fn("ForkChannels.list")(function* () {
   const { hub } = yield* InboxRuntime;
   return { channels: yield* Effect.forEach(hub.list(), channelEntry) };
 });
@@ -238,39 +264,49 @@ const ChannelInput = Schema.Struct({
 });
 const decodeChannelInput = Schema.decodeUnknownEffect(ChannelInput);
 
-export const saveChannel = Effect.fn("ForkChannels.save")(function* (
+const saveChannel = Effect.fn("ForkChannels.save")(function* (
   body: unknown,
   options: { readonly create: boolean },
 ) {
   const input = yield* decodeChannelInput(body).pipe(
-    Effect.mapError(() => badRequest("The channel is missing fields.")),
+    Effect.mapError((cause) => badRequest("The channel is missing fields.", undefined, cause)),
   );
   const { hub } = yield* InboxRuntime;
   return yield* hub
     .save(input satisfies ChannelConfigEntry, options)
-    .pipe(Effect.mapError(toForkError));
+    .pipe(Effect.mapError((cause) => new InboxOperationError({ stage: "save-channel", cause })));
 });
 
-export const removeChannel = Effect.fn("ForkChannels.remove")(function* (channelId: string) {
+const removeChannel = Effect.fn("ForkChannels.remove")(function* (channelId: string) {
   const { hub } = yield* InboxRuntime;
-  const removed = yield* hub.remove(channelId).pipe(Effect.mapError(toForkError));
+  const removed = yield* hub
+    .remove(channelId)
+    .pipe(Effect.mapError((cause) => new InboxOperationError({ stage: "remove-channel", cause })));
   return { removed };
 });
 
-export const testChannel = Effect.fn("ForkChannels.test")(function* (channelId: string) {
+const testChannel = Effect.fn("ForkChannels.test")(function* (channelId: string) {
   const { hub } = yield* InboxRuntime;
-  return yield* channelEntry(yield* hub.test(channelId).pipe(Effect.mapError(toForkError)));
+  return yield* channelEntry(
+    yield* hub
+      .test(channelId)
+      .pipe(Effect.mapError((cause) => new InboxOperationError({ stage: "test-channel", cause }))),
+  );
 });
 
 const ProbeInput = Schema.Struct({ baseUrl: Schema.String, tokenFile: Schema.String });
 const decodeProbeInput = Schema.decodeUnknownEffect(ProbeInput);
 
-export const probeChannel = Effect.fn("ForkChannels.probe")(function* (body: unknown) {
+const probeChannel = Effect.fn("ForkChannels.probe")(function* (body: unknown) {
   const input = yield* decodeProbeInput(body).pipe(
-    Effect.mapError(() => badRequest("Give the adapter's address and token file.")),
+    Effect.mapError((cause) =>
+      badRequest("Give the adapter's address and token file.", undefined, cause),
+    ),
   );
   const { hub } = yield* InboxRuntime;
-  return yield* hub.probe(input).pipe(Effect.mapError(toForkError));
+  return yield* hub
+    .probe(input)
+    .pipe(Effect.mapError((cause) => new InboxOperationError({ stage: "probe-channel", cause })));
 });
 
 const SimulateInput = Schema.Struct({
@@ -279,13 +315,19 @@ const SimulateInput = Schema.Struct({
 });
 const decodeSimulateInput = Schema.decodeUnknownEffect(SimulateInput);
 
-export const simulateChannel = Effect.fn("ForkChannels.simulate")(function* (body: unknown) {
+const simulateChannel = Effect.fn("ForkChannels.simulate")(function* (body: unknown) {
   const input = yield* decodeSimulateInput(body).pipe(
-    Effect.mapError(() => badRequest("Name the channel and a state to simulate.")),
+    Effect.mapError((cause) =>
+      badRequest("Name the channel and a state to simulate.", undefined, cause),
+    ),
   );
   const { hub } = yield* InboxRuntime;
   return yield* channelEntry(
-    yield* hub.simulate(input.channelId, input.simulation).pipe(Effect.mapError(toForkError)),
+    yield* hub
+      .simulate(input.channelId, input.simulation)
+      .pipe(
+        Effect.mapError((cause) => new InboxOperationError({ stage: "simulate-channel", cause })),
+      ),
   );
 });
 
@@ -487,7 +529,7 @@ interface ChannelListing {
 interface ListingMemo {
   readonly revision: number;
   readonly at: number;
-  readonly fiber: Fiber.Fiber<ChannelListing, ForkHttpError | InboxStoreError>;
+  readonly fiber: Fiber.Fiber<ChannelListing, InboxOperationError | InboxStoreError>;
 }
 
 /** Bounds a change no signal announced, as the client's poll does. */
@@ -499,7 +541,7 @@ const listingMemos = new WeakMap<ChannelHub["Service"], Map<string, ListingMemo>
  * read of the channel, reused until the hub's revision for it moves (an adapter event, a read, a
  * link, a thread's run) or it gets old.
  */
-export const readChannel = Effect.fn("ForkInbox.readChannel")(function* (channelId: string) {
+const readChannel = Effect.fn("ForkInbox.readChannel")(function* (channelId: string) {
   const { hub } = yield* InboxRuntime;
   let memos = listingMemos.get(hub);
   if (memos === undefined) {
@@ -551,7 +593,9 @@ const computeChannel = Effect.fn("ForkInbox.computeChannel")(function* (channelI
   const { hub, store } = runtime;
   const listed = yield* hub
     .getAllPages(channelId, conversationsPath, Conversation, { maxPages: CONVERSATION_PAGES })
-    .pipe(Effect.mapError(toForkError));
+    .pipe(
+      Effect.mapError((cause) => new InboxOperationError({ stage: "list-conversations", cause })),
+    );
   const reads = new Map(
     (yield* store.listConversationReads(channelId)).map(
       (read) => [read.conversationId, read] as const,
@@ -699,7 +743,7 @@ const attentionOf = (listing: ChannelListing): ChannelAttention => {
 const OVERVIEW_WAIT = "500 millis";
 
 /** Enabled channels with their state; the sidebar badge sums `unreadCount`. */
-export const overview = Effect.fn("ForkInbox.overview")(function* () {
+const overview = Effect.fn("ForkInbox.overview")(function* () {
   const { hub } = yield* InboxRuntime;
   const channels = hub.list().filter((channel) => channel.enabled);
   const summaries = yield* Effect.forEach(
@@ -711,8 +755,8 @@ export const overview = Effect.fn("ForkInbox.overview")(function* () {
           ? yield* readChannel(channel.id).pipe(
               Effect.map((result) => ({ ok: true as const, result })),
               Effect.catchTags({
-                ForkHttpError: (error) =>
-                  Effect.succeed({ ok: false as const, error: error.detail }),
+                InboxOperationError: (error) =>
+                  Effect.succeed({ ok: false as const, error: describeInboxError(error) }),
               }),
               Effect.timeoutOption(OVERVIEW_WAIT),
             )
@@ -754,12 +798,15 @@ const channelOrMissing = Effect.fn("ForkInbox.channel")(function* (channelId: st
   const { hub } = yield* InboxRuntime;
   const channel = hub.get(channelId);
   if (channel === null) {
-    return yield* new ForkHttpError({ status: 404, code: "missing", detail: "No such channel." });
+    return yield* new InboxRejection({
+      code: "missing",
+      message: "No such channel.",
+    });
   }
   return channel;
 });
 
-export const listInbox = Effect.fn("ForkInbox.list")(function* (channelId: string) {
+const listInbox = Effect.fn("ForkInbox.list")(function* (channelId: string) {
   const channel = yield* channelOrMissing(channelId);
   const result = yield* readChannel(channelId);
   return {
@@ -797,7 +844,7 @@ interface ScopeMessages {
   readonly stale: boolean;
 }
 
-export const readChain = Effect.fn("ForkInbox.readChain")(function* (
+const readChain = Effect.fn("ForkInbox.readChain")(function* (
   channelId: string,
   conversationId: string,
   rootId: string,
@@ -809,7 +856,7 @@ export const readChain = Effect.fn("ForkInbox.readChain")(function* (
       ...options,
       maxPages: MESSAGE_PAGES,
     })
-    .pipe(Effect.mapError(toForkError));
+    .pipe(Effect.mapError((cause) => new InboxOperationError({ stage: "read-chain", cause })));
   yield* warnSkipped(channelId, "messages", result.skipped);
   const messages = sortMessages(result.items);
   return {
@@ -838,7 +885,7 @@ const readBackTo = Effect.fn("ForkInbox.readBackTo")(function* (
   for (let page = 0; page < RANGE_PAGES && !found; page++) {
     const answer = yield* hub
       .getJson(channelId, conversationMessagesPath(conversationId, cursor), RawPage, options)
-      .pipe(Effect.mapError(toForkError));
+      .pipe(Effect.mapError((cause) => new InboxOperationError({ stage: "read-history", cause })));
     if (answer.stale) stale = true;
     const decoded = decodeMessages(answer.value.items);
     messages.push(...decoded.messages);
@@ -885,7 +932,10 @@ const DelegationQuery = Schema.Struct({ channelId: Schema.String, delegationId: 
 const decodeDelegationQuery = Schema.decodeUnknownEffect(DelegationQuery);
 
 const missingDelegation = () =>
-  new ForkHttpError({ status: 404, code: "missing", detail: "No such delegation." });
+  new InboxRejection({
+    code: "missing",
+    message: "No such delegation.",
+  });
 
 const findDelegation = Effect.fn("ForkInbox.findDelegation")(function* (
   channelId: string,
@@ -920,11 +970,9 @@ const findDelegation = Effect.fn("ForkInbox.findDelegation")(function* (
   };
 });
 
-export const readDelegation = Effect.fn("ForkInbox.readDelegation")(function* (
-  query: URLSearchParams,
-) {
+const readDelegation = Effect.fn("ForkInbox.readDelegation")(function* (query: URLSearchParams) {
   const input = yield* decodeDelegationQuery(Object.fromEntries(query)).pipe(
-    Effect.mapError(() => badRequest("Name the channel and delegation.")),
+    Effect.mapError((cause) => badRequest("Name the channel and delegation.", undefined, cause)),
   );
   const runtime = yield* InboxRuntime;
   const contextFiles = yield* Artifacts.Artifacts;
@@ -970,11 +1018,11 @@ const ConversationInput = Schema.Struct({
 const decodeConversationInput = Schema.decodeUnknownEffect(ConversationInput);
 
 /** One page of the conversation, newest first from the adapter, oldest first to the client. */
-export const readConversation = Effect.fn("ForkInbox.readConversation")(function* (
+const readConversation = Effect.fn("ForkInbox.readConversation")(function* (
   query: URLSearchParams,
 ) {
   const input = yield* decodeConversationInput(Object.fromEntries(query)).pipe(
-    Effect.mapError(() => badRequest("Name the channel and conversation.")),
+    Effect.mapError((cause) => badRequest("Name the channel and conversation.", undefined, cause)),
   );
   const { hub } = yield* InboxRuntime;
   const page = yield* hub
@@ -984,7 +1032,9 @@ export const readConversation = Effect.fn("ForkInbox.readConversation")(function
       RawPage,
       { cacheMs: 5_000 },
     )
-    .pipe(Effect.mapError(toForkError));
+    .pipe(
+      Effect.mapError((cause) => new InboxOperationError({ stage: "read-conversation", cause })),
+    );
   const { messages, skipped } = decodeMessages(page.value.items);
   yield* warnSkipped(input.channelId, "messages", skipped);
   return {
@@ -995,7 +1045,7 @@ export const readConversation = Effect.fn("ForkInbox.readConversation")(function
   };
 });
 
-export const media = Effect.fn("ForkInbox.media")(function* (query: URLSearchParams) {
+const media = Effect.fn("ForkInbox.media")(function* (query: URLSearchParams) {
   const channelId = query.get("channelId");
   const messageId = query.get("messageId");
   const key = query.get("key");
@@ -1003,7 +1053,7 @@ export const media = Effect.fn("ForkInbox.media")(function* (query: URLSearchPar
   const { hub } = yield* InboxRuntime;
   return yield* hub
     .getMedia(channelId, `/media/${enc(messageId)}/${enc(key)}`)
-    .pipe(Effect.mapError(toForkError));
+    .pipe(Effect.mapError((cause) => new InboxOperationError({ stage: "read-media", cause })));
 });
 
 const ReadInput = Schema.Struct({
@@ -1015,9 +1065,11 @@ const ReadInput = Schema.Struct({
 });
 const decodeReadInput = Schema.decodeUnknownEffect(ReadInput);
 
-export const setRead = Effect.fn("ForkInbox.setRead")(function* (body: unknown) {
+const setRead = Effect.fn("ForkInbox.setRead")(function* (body: unknown) {
   const input = yield* decodeReadInput(body).pipe(
-    Effect.mapError(() => badRequest("Name the conversation and whether it is read.")),
+    Effect.mapError((cause) =>
+      badRequest("Name the conversation and whether it is read.", undefined, cause),
+    ),
   );
   const runtime = yield* InboxRuntime;
   const key = { channelId: input.channelId, conversationId: input.conversationId };
@@ -1036,9 +1088,11 @@ const SeenInput = Schema.Struct({
 const decodeSeenInput = Schema.decodeUnknownEffect(SeenInput);
 
 /** The user looked at the delegation's result. */
-export const markSeen = Effect.fn("ForkInbox.markSeen")(function* (body: unknown) {
+const markSeen = Effect.fn("ForkInbox.markSeen")(function* (body: unknown) {
   const input = yield* decodeSeenInput(body).pipe(
-    Effect.mapError(() => badRequest("Name the delegation and the run end it showed.")),
+    Effect.mapError((cause) =>
+      badRequest("Name the delegation and the run end it showed.", undefined, cause),
+    ),
   );
   const runtime = yield* InboxRuntime;
   yield* runtime.store.markAgentSeen(input.delegationId, input.runCompletedAt);
@@ -1057,9 +1111,11 @@ const decodeSettleInput = Schema.decodeUnknownEffect(SettleInput);
  * Marks a delegation done, or open again. Settling also settles its thread, as finished work does
  * in the sidebar; reopening leaves the thread alone, since writing to it wakes it anyway.
  */
-export const settle = Effect.fn("ForkInbox.settle")(function* (body: unknown) {
+const settle = Effect.fn("ForkInbox.settle")(function* (body: unknown) {
   const input = yield* decodeSettleInput(body).pipe(
-    Effect.mapError(() => badRequest("Name the delegation and whether it is settled.")),
+    Effect.mapError((cause) =>
+      badRequest("Name the delegation and whether it is settled.", undefined, cause),
+    ),
   );
   const runtime = yield* InboxRuntime;
   const delegation = yield* runtime.store.getDelegation(input.delegationId);
@@ -1092,9 +1148,9 @@ const ReadAllInput = Schema.Struct({
 });
 const decodeReadAllInput = Schema.decodeUnknownEffect(ReadAllInput);
 
-export const markAllRead = Effect.fn("ForkInbox.markAllRead")(function* (body: unknown) {
+const markAllRead = Effect.fn("ForkInbox.markAllRead")(function* (body: unknown) {
   const input = yield* decodeReadAllInput(body).pipe(
-    Effect.mapError(() => badRequest("Name the channel and a time.")),
+    Effect.mapError((cause) => badRequest("Name the channel and a time.", undefined, cause)),
   );
   const runtime = yield* InboxRuntime;
   yield* runtime.store.markAllRead(input.channelId, input.before);
@@ -1150,11 +1206,11 @@ const AnchorInput = Schema.Struct({
 });
 const decodeAnchorInput = Schema.decodeUnknownEffect(AnchorInput);
 
-export const delegateOptions = Effect.fn("ForkInbox.delegateOptions")(function* (
-  query: URLSearchParams,
-) {
+const delegateOptions = Effect.fn("ForkInbox.delegateOptions")(function* (query: URLSearchParams) {
   const key = yield* decodeAnchorInput(Object.fromEntries(query)).pipe(
-    Effect.mapError(() => badRequest("Name the channel, conversation, and message.")),
+    Effect.mapError((cause) =>
+      badRequest("Name the channel, conversation, and message.", undefined, cause),
+    ),
   );
   const runtime = yield* InboxRuntime;
   const channel = yield* channelOrMissing(key.channelId);
@@ -1232,19 +1288,29 @@ const downloadImages = Effect.fn("ForkInbox.downloadImages")(function* (
       .filter((attachment) => attachment.kind === "image")
       .map((attachment) => ({ message, attachment })),
   );
-  if (wanted.length > 0) yield* Effect.promise(() => NodeFSP.mkdir(mediaDir, { recursive: true }));
+  if (wanted.length > 0) {
+    yield* Effect.tryPromise({
+      try: () => NodeFSP.mkdir(mediaDir, { recursive: true }),
+      catch: (cause) => new InboxContextError({ stage: "create-media-directory", cause }),
+    });
+  }
   return yield* Effect.forEach(
     wanted,
     ({ message, attachment }) =>
-      Effect.gen(function* (): Effect.fn.Return<ContextImage, ForkHttpError> {
+      Effect.gen(function* (): Effect.fn.Return<ContextImage, InboxOperationError> {
         const response = yield* hub
           .getMedia(channelId, `/media/${enc(message.id)}/${enc(attachment.key)}`)
-          .pipe(Effect.mapError(toForkError));
+          .pipe(
+            Effect.mapError((cause) => new InboxOperationError({ stage: "read-media", cause })),
+          );
         const filePath = NodePath.join(
           mediaDir,
           mediaFileName(message.id, attachment.key, response.contentType),
         );
-        yield* attempt(() => NodeFSP.writeFile(filePath, response.body));
+        yield* Effect.tryPromise({
+          try: () => NodeFSP.writeFile(filePath, response.body),
+          catch: (cause) => new InboxOperationError({ stage: "save-image", cause }),
+        });
         return { messageId: message.id, key: attachment.key, path: filePath };
       }).pipe(
         Effect.orElseSucceed((): ContextImage => ({
@@ -1313,10 +1379,9 @@ const readNewScope = Effect.fn("ForkInbox.readNewScope")(function* (
     });
     // A thread that sees only part of the thread would answer from half a conversation.
     if (!chain.complete) {
-      return yield* new ForkHttpError({
-        status: 422,
+      return yield* new InboxRejection({
         code: "scope_too_long",
-        detail: `This reply thread is longer than the ${MESSAGE_PAGES} pages T3 Code reads, so it cannot be delegated.`,
+        message: `This reply thread is longer than the ${MESSAGE_PAGES} pages T3 Code reads, so it cannot be delegated.`,
       });
     }
     return { ...chain, untilAt: null };
@@ -1325,10 +1390,9 @@ const readNewScope = Effect.fn("ForkInbox.readNewScope")(function* (
     cacheMs: 0,
   });
   if (!back.found) {
-    return yield* new ForkHttpError({
-      status: 422,
+    return yield* new InboxRejection({
       code: "scope_too_long",
-      detail: `That message is older than the ${RANGE_PAGES} pages T3 Code reads back, so it cannot be delegated.`,
+      message: `That message is older than the ${RANGE_PAGES} pages T3 Code reads back, so it cannot be delegated.`,
     });
   }
   const all = messagesInRange(back.messages, input.anchorMessageId, null);
@@ -1363,19 +1427,18 @@ const acknowledge = Effect.fn("ForkInbox.acknowledge")(function* (
   if (message.reactions?.some((reaction) => reaction.key === key && reaction.includesSelf)) return;
   const { hub } = yield* InboxRuntime;
   yield* hub.postJson(channelId, "/reactions", { conversationId, messageId: message.id, key }).pipe(
-    Effect.mapError(toForkError),
-    Effect.catch((error: ForkHttpError) =>
+    Effect.catch((cause) =>
       Effect.logWarning("The adapter did not add the delegation's reaction.", {
         channelId,
-        code: error.code,
+        error: cause._tag,
       }),
     ),
   );
 });
 
-export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown) {
+const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown) {
   const input = yield* decodeDelegateInput(body).pipe(
-    Effect.mapError(() => badRequest("The delegation is missing fields.")),
+    Effect.mapError((cause) => badRequest("The delegation is missing fields.", undefined, cause)),
   );
   const runtime = yield* InboxRuntime;
   const contextFiles = yield* Artifacts.Artifacts;
@@ -1383,10 +1446,9 @@ export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown
   const listing = yield* readChannel(input.channelId);
   const conversation = listing.raw.find((candidate) => candidate.id === input.conversationId);
   if (conversation === undefined) {
-    return yield* new ForkHttpError({
-      status: 404,
+    return yield* new InboxRejection({
       code: "missing",
-      detail:
+      message:
         listing.truncatedAtPages === null
           ? "This conversation is no longer listed by the channel."
           : `This conversation is not in the first ${listing.truncatedAtPages} pages the channel lists.`,
@@ -1406,21 +1468,26 @@ export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown
   ) {
     const scoped = yield* readNewScope(input);
     if (scoped.messages.length === 0) {
-      return yield* new ForkHttpError({
-        status: 422,
-        code: "missing",
-        detail: "The channel has none of these messages any more.",
+      return yield* new InboxRejection({
+        code: "empty_scope",
+        message: "The channel has none of these messages any more.",
       });
     }
     const projects = yield* activeProjects;
     const project = projects.find((candidate) => candidate.id === input.projectId);
     if (!project) return yield* badRequest("Choose a project in this environment.", "projectId");
-    const defaults = yield* projectDefaults(project).pipe(Effect.mapError(toForkError));
+    const defaults = yield* projectDefaults(project).pipe(
+      Effect.mapError(
+        (cause) => new InboxOperationError({ stage: "resolve-project-defaults", cause }),
+      ),
+    );
     const modelSelection =
       input.modelSelection === undefined || input.modelSelection === null
         ? defaults.selection
         : yield* decodeModelSelection(input.modelSelection).pipe(
-            Effect.mapError(() => badRequest("The model is not valid.", "modelSelection")),
+            Effect.mapError((cause) =>
+              badRequest("The model is not valid.", "modelSelection", cause),
+            ),
           );
     if (modelSelection === null) {
       return yield* badRequest("This project has no default model; choose one.", "modelSelection");
@@ -1429,16 +1496,16 @@ export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown
       input.workspaceStrategy === undefined || input.workspaceStrategy === null
         ? { type: "root" }
         : yield* decodeWorkspaceStrategy(input.workspaceStrategy).pipe(
-            Effect.mapError(() => badRequest("The workspace is not valid.", "workspaceStrategy")),
+            Effect.mapError((cause) =>
+              badRequest("The workspace is not valid.", "workspaceStrategy", cause),
+            ),
           );
     if (workspaceStrategy.type === "existing_worktree") {
-      const isDirectory = yield* Effect.promise(() =>
-        NodeFSP.stat(workspaceStrategy.worktreePath).then(
-          (stat) => stat.isDirectory(),
-          () => false,
-        ),
-      );
-      if (!isDirectory) {
+      const stat = yield* Effect.tryPromise({
+        try: () => NodeFSP.stat(workspaceStrategy.worktreePath),
+        catch: (cause) => badRequest("That checkout does not exist.", "workspaceStrategy", cause),
+      });
+      if (!stat.isDirectory()) {
         return yield* badRequest("That checkout does not exist.", "workspaceStrategy");
       }
     }
@@ -1452,7 +1519,10 @@ export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown
     const commandId = CommandId.make(`fork-inbox:${NodeCrypto.randomUUID()}`);
     const threadId = ThreadId.make(commandId);
     const contextDir = contextFiles.threadContextDir(runtime.itemsDir, delegationId, threadId);
-    yield* Effect.promise(() => NodeFSP.mkdir(contextDir, { recursive: true }));
+    yield* Effect.tryPromise({
+      try: () => NodeFSP.mkdir(contextDir, { recursive: true }),
+      catch: (cause) => new InboxContextError({ stage: "create-context-directory", cause }),
+    });
     const images = yield* downloadImages(input.channelId, contextDir, scoped.messages);
     const anchor = scoped.messages.find((message) => message.id === input.anchorMessageId);
     const preview = clipPreview(anchor ?? scoped.messages[0]);
@@ -1502,29 +1572,31 @@ export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown
       markdown: supports(channel, "markdown"),
     });
     const requestedAt = DateTime.formatIso(yield* DateTime.now);
-    yield* Effect.promise(() =>
-      Promise.all([
-        NodeFSP.writeFile(NodePath.join(contextDir, CONTEXT_FILE), context),
-        NodeFSP.writeFile(
-          NodePath.join(contextDir, REQUEST_FILE),
-          prettyJson({
-            requestedAt,
-            channelId: input.channelId,
-            conversationId: input.conversationId,
-            anchorMessageId: input.anchorMessageId,
-            scope: input.scope,
-            untilAt: scoped.untilAt,
-            projectId: project.id,
-            note: input.note ?? "",
-            modelSelection,
-            runtimeMode,
-            workspaceStrategy,
-            threadId,
-            replacesThreadId: replacing?.threadId ?? null,
-          }),
-        ),
-      ]),
-    );
+    yield* Effect.tryPromise({
+      try: () =>
+        Promise.all([
+          NodeFSP.writeFile(NodePath.join(contextDir, CONTEXT_FILE), context),
+          NodeFSP.writeFile(
+            NodePath.join(contextDir, REQUEST_FILE),
+            prettyJson({
+              requestedAt,
+              channelId: input.channelId,
+              conversationId: input.conversationId,
+              anchorMessageId: input.anchorMessageId,
+              scope: input.scope,
+              untilAt: scoped.untilAt,
+              projectId: project.id,
+              note: input.note ?? "",
+              modelSelection,
+              runtimeMode,
+              workspaceStrategy,
+              threadId,
+              replacesThreadId: replacing?.threadId ?? null,
+            }),
+          ),
+        ]),
+      catch: (cause) => new InboxContextError({ stage: "write-context", cause }),
+    });
     const result = yield* ThreadMessageIntake.launchThread({
       commandId,
       threadId,
@@ -1539,9 +1611,12 @@ export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown
       createdBy: "user",
       creationSource: "server",
     }).pipe(
-      Effect.mapError(toForkError),
+      Effect.mapError((cause) => new InboxOperationError({ stage: "launch-delegation", cause })),
       Effect.tapError(() =>
-        Effect.promise(() => NodeFSP.rm(contextDir, { recursive: true, force: true })),
+        Effect.tryPromise({
+          try: () => NodeFSP.rm(contextDir, { recursive: true, force: true }),
+          catch: (cause) => new InboxContextError({ stage: "remove-context-directory", cause }),
+        }),
       ),
     );
     const at = DateTime.formatIso(yield* DateTime.now);
@@ -1630,9 +1705,9 @@ function mentionsToSend(text: string, mentions: ReadonlyArray<Mention>): Readonl
     .slice(0, MAX_MENTIONS);
 }
 
-export const send = Effect.fn("ForkInbox.send")(function* (body: unknown) {
+const send = Effect.fn("ForkInbox.send")(function* (body: unknown) {
   const input = yield* decodeSendInput(body).pipe(
-    Effect.mapError(() => badRequest("The message is missing fields.")),
+    Effect.mapError((cause) => badRequest("The message is missing fields.", undefined, cause)),
   );
   const text = input.text.trim();
   const runtime = yield* InboxRuntime;
@@ -1685,26 +1760,15 @@ export const send = Effect.fn("ForkInbox.send")(function* (body: unknown) {
         ? {}
         : { attachments: attachments.map(({ uploadId }) => ({ uploadId })) }),
     })
-    .pipe(
-      Effect.mapError(toForkError),
-      Effect.mapError((error) =>
-        error.status === 502 && SEND_ERROR_MESSAGES[error.code]
-          ? new ForkHttpError({
-              ...error,
-              detail: `${SEND_ERROR_MESSAGES[error.code]} ${error.detail}`,
-            })
-          : error,
-      ),
-    );
+    .pipe(Effect.mapError((cause) => new InboxOperationError({ stage: "send-message", cause })));
   yield* runtime.hub.invalidate(input.channelId);
   yield* runtime.hub.publish({ type: "inbox", channelId: input.channelId });
   const result = decodeSendResultOption(answer);
   if (result._tag === "None" || result.value.messageId.trim().length === 0) {
     // It may have gone out; sending again could post it twice, so nothing is cleared.
-    return yield* new ForkHttpError({
-      status: 502,
+    return yield* new InboxRejection({
       code: "delivery_unknown",
-      detail:
+      message:
         "The adapter took the message but did not confirm it was sent. Check the chat before sending again; the draft is kept.",
     });
   }
@@ -1743,10 +1807,7 @@ export const send = Effect.fn("ForkInbox.send")(function* (body: unknown) {
 });
 
 /** Hands the adapter a file to attach to a later send. */
-export const upload = Effect.fn("ForkInbox.upload")(function* (
-  query: URLSearchParams,
-  bytes: Uint8Array,
-) {
+const upload = Effect.fn("ForkInbox.upload")(function* (query: URLSearchParams, bytes: Uint8Array) {
   const channelId = query.get("channelId");
   const name = query.get("name")?.trim() ?? "";
   if (channelId === null || name.length === 0) {
@@ -1760,13 +1821,12 @@ export const upload = Effect.fn("ForkInbox.upload")(function* (
   const { hub } = yield* InboxRuntime;
   const answer = yield* hub
     .upload(channelId, `/uploads?name=${enc(name)}`, bytes)
-    .pipe(Effect.mapError(toForkError));
+    .pipe(Effect.mapError((cause) => new InboxOperationError({ stage: "upload-file", cause })));
   const uploaded = decodeUpload(answer);
   if (uploaded._tag === "None") {
-    return yield* new ForkHttpError({
-      status: 502,
+    return yield* new InboxRejection({
       code: "upload_failed",
-      detail: "The adapter did not confirm the upload.",
+      message: "The adapter did not confirm the upload.",
     });
   }
   return uploaded.value;
@@ -1781,9 +1841,9 @@ const DiscardDraftInput = Schema.Struct({
 const decodeDiscardDraftInput = Schema.decodeUnknownEffect(DiscardDraftInput);
 
 /** Drops the current thread's draft; "Draft reply" asks for a new one. */
-export const discardDraft = Effect.fn("ForkInbox.discardDraft")(function* (body: unknown) {
+const discardDraft = Effect.fn("ForkInbox.discardDraft")(function* (body: unknown) {
   const input = yield* decodeDiscardDraftInput(body).pipe(
-    Effect.mapError(() => badRequest("Name the delegation and its draft.")),
+    Effect.mapError((cause) => badRequest("Name the delegation and its draft.", undefined, cause)),
   );
   const runtime = yield* InboxRuntime;
   const contextFiles = yield* Artifacts.Artifacts;
@@ -1802,3 +1862,56 @@ export const discardDraft = Effect.fn("ForkInbox.discardDraft")(function* (body:
   yield* runtime.hub.publish({ type: "inbox", channelId: input.channelId });
   return { discarded };
 });
+
+export const describeInboxError = (error: InboxOperationError | InboxRejection): string => {
+  if (error._tag === "InboxRejection") return error.message;
+  const { cause } = error;
+  const message = cause instanceof Error ? cause.message : String(cause);
+  const advice =
+    error.stage === "send-message" && isAdapterRequestError(cause)
+      ? SEND_ERROR_MESSAGES[cause.code]
+      : undefined;
+  return advice ? `${advice} ${message}` : message;
+};
+
+const make = Effect.gen(function* () {
+  const runtime = yield* InboxRuntime;
+  const bind =
+    <Args extends ReadonlyArray<unknown>, A, E, R>(
+      operation: (...args: Args) => Effect.Effect<A, E, R>,
+    ) =>
+    (...args: Args) =>
+      operation(...args).pipe(Effect.provideService(InboxRuntime, runtime));
+
+  return {
+    listChannels: bind(listChannels),
+    saveChannel: bind(saveChannel),
+    removeChannel: bind(removeChannel),
+    testChannel: bind(testChannel),
+    probeChannel: bind(probeChannel),
+    simulateChannel: bind(simulateChannel),
+    readChannel: bind(readChannel),
+    overview: bind(overview),
+    listInbox: bind(listInbox),
+    readChain: bind(readChain),
+    readDelegation: bind(readDelegation),
+    readConversation: bind(readConversation),
+    media: bind(media),
+    setRead: bind(setRead),
+    markSeen: bind(markSeen),
+    settle: bind(settle),
+    markAllRead: bind(markAllRead),
+    delegateOptions: bind(delegateOptions),
+    delegate: bind(delegate),
+    send: bind(send),
+    upload: bind(upload),
+    discardDraft: bind(discardDraft),
+  };
+});
+
+export class InboxOperations extends Context.Service<
+  InboxOperations,
+  Effect.Success<typeof make>
+>()("t3/fork/inbox/operations/InboxOperations") {}
+
+export const layer = Layer.effect(InboxOperations, make);

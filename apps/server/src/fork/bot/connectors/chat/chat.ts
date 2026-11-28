@@ -46,13 +46,16 @@ const latestOf = (left: string, right: string | null | undefined) =>
 const withInbox = Effect.fnUntraced(function* <A, E, R>(effect: Effect.Effect<A, E, R>) {
   const inbox = yield* Effect.serviceOption(InboxRuntime);
   if (Option.isNone(inbox)) return yield* toolError("No chat channel is set up here.");
-  return yield* Effect.provideService(effect, InboxRuntime, inbox.value);
+  return yield* effect;
 });
-const readChannel = (channelId: string) => withInbox(Inbox.readChannel(channelId));
-const readChain = (...args: Parameters<typeof Inbox.readChain>) =>
-  withInbox(Inbox.readChain(...args));
-const readConversation = (query: URLSearchParams) => withInbox(Inbox.readConversation(query));
-const sendMessage = (body: unknown) => withInbox(Inbox.send(body));
+const readChannel = (channelId: string) =>
+  withInbox(Inbox.InboxOperations.use((inbox) => inbox.readChannel(channelId)));
+const readChain = (...args: Parameters<Inbox.InboxOperations["Service"]["readChain"]>) =>
+  withInbox(Inbox.InboxOperations.use((inbox) => inbox.readChain(...args)));
+const readConversation = (query: URLSearchParams) =>
+  withInbox(Inbox.InboxOperations.use((inbox) => inbox.readConversation(query)));
+const sendMessage = (body: unknown) =>
+  withInbox(Inbox.InboxOperations.use((inbox) => inbox.send(body)));
 
 const clip = (text: string, chars: number) =>
   text.length > chars ? `${text.slice(0, chars)}… (cut)` : text;
@@ -237,7 +240,8 @@ export const listConversations = Effect.fn("ForkBot.listConversations")(function
   const lines: Array<{ readonly at: number; readonly text: string }> = [];
   const listing = yield* readChannel(channel.id).pipe(
     Effect.catchTags({
-      ForkHttpError: (error) => Effect.fail(toolError(`${channelName(channel)}: ${error.detail}`)),
+      InboxOperationError: (error) =>
+        Effect.fail(toolError(`${channelName(channel)}: ${Inbox.describeInboxError(error)}`)),
     }),
   );
   for (const conversation of listing.conversations) {

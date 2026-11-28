@@ -7,7 +7,12 @@ import type * as Effect from "effect/Effect";
 import type * as Scope from "effect/Scope";
 
 import type * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
-import { ForkHttpError } from "../../inbox/operations.ts";
+import {
+  ForkHttpError,
+  type InboxOperations,
+  type InboxOperationError,
+  type InboxRejection,
+} from "../../inbox/operations.ts";
 import type { Artifacts } from "../../inbox/artifacts.ts";
 import type { BotRuntime } from "../BotRuntime.ts";
 import type { notify } from "../operations.ts";
@@ -17,6 +22,7 @@ import type { Bot, BotStoreError, ConnectorSettings } from "../store.ts";
 /** What a connector may use: the bot's own services, its threads, and waking bots. */
 export type BotServices =
   | Artifacts
+  | InboxOperations
   | BotRuntime
   | ThreadManagement.ThreadManagementService
   | Effect.Services<ReturnType<typeof notify>>;
@@ -57,7 +63,11 @@ export interface ConnectorCall {
 
 type Run = Effect.Effect<
   string,
-  ForkHttpError | InboxStoreError | Effect.Error<ReturnType<typeof notify>>,
+  | ForkHttpError
+  | InboxOperationError
+  | InboxRejection
+  | InboxStoreError
+  | Effect.Error<ReturnType<typeof notify>>,
   BotServices
 >;
 
@@ -87,7 +97,11 @@ export interface Connector {
     call: ConnectorCall,
   ) => Effect.Effect<
     Action,
-    ForkHttpError | InboxStoreError | Effect.Error<ReturnType<typeof notify>>,
+    | ForkHttpError
+    | InboxOperationError
+    | InboxRejection
+    | InboxStoreError
+    | Effect.Error<ReturnType<typeof notify>>,
     BotServices
   >;
   /** The kind's own settings from what the user saved. */

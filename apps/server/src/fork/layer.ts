@@ -17,6 +17,7 @@ import { routesLayer } from "./http.ts";
 import * as Artifacts from "./inbox/artifacts.ts";
 import * as InboxRuntime from "./inbox/InboxRuntime.ts";
 import { followLinkedThreads } from "./inbox/linkedThreads.ts";
+import * as Inbox from "./inbox/operations.ts";
 
 const linkedThreadsLayer = Layer.effectDiscard(
   Effect.gen(function* () {
@@ -71,7 +72,11 @@ const botsLayer = Layer.effectDiscard(
   }),
 );
 
-export const layer = Layer.mergeAll(routesLayer, linkedThreadsLayer, botsLayer).pipe(
+export const layer = Layer.mergeAll(
+  routesLayer,
+  linkedThreadsLayer,
+  botsLayer.pipe(Layer.provide(Inbox.layer)),
+).pipe(
   Layer.provide(Artifacts.layer),
   Layer.provide(
     Layer.merge(InboxRuntime.layer, BotRuntime.layer.pipe(Layer.provide(BotFiles.layer))),

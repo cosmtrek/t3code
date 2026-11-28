@@ -22,7 +22,7 @@ import * as Schema from "effect/Schema";
 import * as ThreadManagement from "../../orchestration-v2/ThreadManagementService.ts";
 import * as ThreadMessageIntake from "../../orchestration-v2/ThreadMessageIntake.ts";
 import * as Project from "../../project/ProjectService.ts";
-import { ForkHttpError } from "../inbox/operations.ts";
+import { describeInboxError, ForkHttpError } from "../inbox/operations.ts";
 import { BotRuntime } from "./BotRuntime.ts";
 import { enabledFor, helpFor, listInstances, RESERVED_COMMANDS } from "./connectors/registry.ts";
 import { textOf, toolError, type FlagSpec } from "./connectors/types.ts";
@@ -857,6 +857,9 @@ export const answerQuestion = Effect.fn("ForkBot.answerQuestion")(function* (inp
     Effect.map((output) => ({ ok: true, output })),
     Effect.catchTags({
       ForkHttpError: (error) => Effect.succeed({ ok: false, output: error.detail }),
+      InboxOperationError: (error) =>
+        Effect.succeed({ ok: false, output: describeInboxError(error) }),
+      InboxRejection: (error) => Effect.succeed({ ok: false, output: error.message }),
     }),
   );
   yield* store!.setQuestionResult(question.id, outcome.output);

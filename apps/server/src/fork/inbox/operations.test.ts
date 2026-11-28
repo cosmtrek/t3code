@@ -33,10 +33,19 @@ const threadContextDir = (itemsDir: string, itemId: string, threadId: string) =>
 import { delegationIdFor } from "./derive.ts";
 import { InboxRuntime } from "./InboxRuntime.ts";
 import { followLinkedThreads } from "./linkedThreads.ts";
+import { inboxErrorResponse } from "../http.ts";
+import * as HttpServerResponse from "effect/http/HttpServerResponse";
 import * as Inbox from "./operations.ts";
 import * as InboxStore from "./store.ts";
 
 const TOKEN = "secret-token";
+const inboxHttpFailure = Effect.fn("Test.inboxHttpFailure")(function* (
+  error: Inbox.InboxOperationError | Inbox.InboxRejection,
+) {
+  const response = HttpServerResponse.toWeb(inboxErrorResponse(error));
+  const body = yield* Effect.promise(async () => (await response.json()) as { field?: string });
+  return { status: response.status, field: body.field };
+});
 const encoder = new TextEncoder();
 const json = (status: number, value: unknown): AdapterResponse => ({
   status,
@@ -182,6 +191,7 @@ interface Harness {
   /** While set, conversation listings wait for it. */
   holdListings: Promise<void> | null;
   readonly runtime: InboxRuntime["Service"];
+  readonly inbox: Inbox.InboxOperations["Service"];
   readonly shells: Map<string, OrchestrationV2ThreadShell | null>;
   /** Every thread the inbox asked to settle. */
   readonly settledThreads: string[];
@@ -297,6 +307,9 @@ const harnessWith = Effect.fn("Test.harnessWith")(function* (
   );
   return {
     settledThreads,
+    inbox: yield* Inbox.InboxOperations.pipe(
+      Effect.provide(Inbox.layer.pipe(Layer.provide(layer))),
+    ),
     channelId,
     requests,
     posted,
@@ -376,7 +389,7 @@ const linkThread = (
 const delegationQuery = (h: Harness, delegationId: string) =>
   new URLSearchParams({ channelId: h.channelId, delegationId });
 
-const listOf = (h: Harness) => Inbox.listInbox(h.channelId).pipe(Effect.provide(h.layer));
+const listOf = (h: Harness) => h.inbox.listInbox(h.channelId).pipe(Effect.provide(h.layer));
 
 const launchLayer = (h: Harness, launched: Array<ThreadLaunch.ThreadLaunchInput>) =>
   Layer.mergeAll(
@@ -417,7 +430,7 @@ describe("inbox listing", () => {
         {},
         false,
       );
-      const read = Inbox.readChannel(h.channelId).pipe(Effect.provide(h.layer));
+      const read = h.inbox.readChannel(h.channelId).pipe(Effect.provide(h.layer));
       const first = yield* read;
       expect(yield* h.runtime.store.readAllBefore(h.channelId, "unused")).toBe(
         "2026-11-14T08:10:00.000Z",
@@ -472,13 +485,15 @@ describe("inbox listing", () => {
 
       // The chat view reads one page at a time, newest page first, and pages back by cursor.
       const conversation = (cursor?: string) =>
-        Inbox.readConversation(
-          new URLSearchParams({
-            channelId: h.channelId,
-            conversationId: "c-second",
-            ...(cursor === undefined ? {} : { cursor }),
-          }),
-        ).pipe(Effect.provide(h.layer));
+        h.inbox
+          .readConversation(
+            new URLSearchParams({
+              channelId: h.channelId,
+              conversationId: "c-second",
+              ...(cursor === undefined ? {} : { cursor }),
+            }),
+          )
+          .pipe(Effect.provide(h.layer));
       const newest = yield* conversation();
       expect(newest.messages.map((message) => message.id)).toEqual(["s2"]);
       expect(newest.nextCursor).toBe("1");
@@ -488,9 +503,9 @@ describe("inbox listing", () => {
 
       // A delegation reads its whole reply thread, every page, oldest first.
       const delegationId = yield* saveDelegation(h, "c-second", "j1");
-      const detail = yield* Inbox.readDelegation(delegationQuery(h, delegationId)).pipe(
-        Effect.provide(h.layer),
-      );
+      const detail = yield* h.inbox
+        .readDelegation(delegationQuery(h, delegationId))
+        .pipe(Effect.provide(h.layer));
       expect(detail.messages.map((message) => message.id)).toEqual(["j1", "j2", "j3"]);
       expect(detail).toMatchObject({ complete: true, rootMissing: false });
     }),
@@ -505,9 +520,9 @@ describe("inbox listing", () => {
         const key = h.keyOf("c");
         const row = () => listOf(h).pipe(Effect.map((result) => result.conversations[0]));
         h.requests.length = 0;
-        yield* Inbox.setRead({ ...key, read: true, lastMessageAt: at(1) }).pipe(
-          Effect.provide(h.layer),
-        );
+        yield* h.inbox
+          .setRead({ ...key, read: true, lastMessageAt: at(1) })
+          .pipe(Effect.provide(h.layer));
         expect(h.requests).toEqual([]);
         expect(yield* row()).toMatchObject({ unread: false });
         messages.push({ id: "m2", minute: 2, author: THEM });
@@ -515,7 +530,7 @@ describe("inbox listing", () => {
         expect(yield* row()).toMatchObject({ unread: true });
         // An unread DM counts toward the badge, and the sidebar lists it.
         const summary = () =>
-          Inbox.overview().pipe(
+          h.inbox.overview().pipe(
             Effect.map((overview) =>
               overview.channels.find((channel) => channel.id === h.channelId),
             ),
@@ -526,14 +541,14 @@ describe("inbox listing", () => {
         expect((yield* summary())?.attention?.conversations.map(({ id }) => id)).toEqual([
           key.conversationId,
         ]);
-        yield* Inbox.setRead({ ...key, read: true, lastMessageAt: at(2) }).pipe(
-          Effect.provide(h.layer),
-        );
-        yield* Inbox.setRead({ ...key, read: false }).pipe(Effect.provide(h.layer));
+        yield* h.inbox
+          .setRead({ ...key, read: true, lastMessageAt: at(2) })
+          .pipe(Effect.provide(h.layer));
+        yield* h.inbox.setRead({ ...key, read: false }).pipe(Effect.provide(h.layer));
         expect(yield* row()).toMatchObject({ unread: true });
-        yield* Inbox.markAllRead({ channelId: h.channelId, before: at(2) }).pipe(
-          Effect.provide(h.layer),
-        );
+        yield* h.inbox
+          .markAllRead({ channelId: h.channelId, before: at(2) })
+          .pipe(Effect.provide(h.layer));
         expect(yield* row()).toMatchObject({ unread: false });
         expect(yield* badge()).toBe(0);
         expect((yield* summary())?.attention?.conversations).toEqual([]);
@@ -577,9 +592,9 @@ describe("inbox listing", () => {
         expect(yield* item()).toMatchObject({ agentUnseen: false });
       }
       yield* finished("failed");
-      yield* Inbox.markSeen({ channelId: h.channelId, delegationId, runCompletedAt: at(5) }).pipe(
-        Effect.provide(h.layer),
-      );
+      yield* h.inbox
+        .markSeen({ channelId: h.channelId, delegationId, runCompletedAt: at(5) })
+        .pipe(Effect.provide(h.layer));
       expect(yield* item()).toMatchObject({ agentUnseen: false });
     }),
   );
@@ -602,26 +617,26 @@ describe("inbox listing", () => {
         const item = () => listOf(h).pipe(Effect.map((result) => result.delegations[0]));
         expect(yield* item()).toMatchObject({ agentUnseen: true, hasDraft: true, settledAt: null });
 
-        yield* Inbox.settle({ channelId: h.channelId, delegationId, settled: true }).pipe(
-          Effect.provide(h.layer),
-        );
+        yield* h.inbox
+          .settle({ channelId: h.channelId, delegationId, settled: true })
+          .pipe(Effect.provide(h.layer));
         expect(yield* item()).toMatchObject({ agentUnseen: false, hasDraft: false, thread: null });
         expect((yield* item())?.settledAt).not.toBeNull();
         expect(h.settledThreads).toEqual(["thread-1"]);
         // Opening it still shows its thread.
-        const opened = yield* Inbox.readDelegation(delegationQuery(h, delegationId)).pipe(
-          Effect.provide(h.layer),
-        );
+        const opened = yield* h.inbox
+          .readDelegation(delegationQuery(h, delegationId))
+          .pipe(Effect.provide(h.layer));
         expect(opened.delegation.thread?.threadId).toBe("thread-1");
 
-        yield* Inbox.settle({ channelId: h.channelId, delegationId, settled: false }).pipe(
-          Effect.provide(h.layer),
-        );
+        yield* h.inbox
+          .settle({ channelId: h.channelId, delegationId, settled: false })
+          .pipe(Effect.provide(h.layer));
         expect(yield* item()).toMatchObject({ settledAt: null, hasDraft: true });
 
-        yield* Inbox.settle({ channelId: h.channelId, delegationId, settled: true }).pipe(
-          Effect.provide(h.layer),
-        );
+        yield* h.inbox
+          .settle({ channelId: h.channelId, delegationId, settled: true })
+          .pipe(Effect.provide(h.layer));
         const key = { ...h.keyOf("c"), anchorMessageId: "m1" };
         yield* h.runtime.store.saveDelegation({
           ...key,
@@ -643,16 +658,16 @@ describe("inbox listing", () => {
       const reads = vi.spyOn(h.runtime.store, "listConversationReads");
       yield* Effect.all(
         [
-          Inbox.overview(),
-          Inbox.listInbox(h.channelId),
-          Inbox.readDelegation(delegationQuery(h, delegationId)),
+          h.inbox.overview(),
+          h.inbox.listInbox(h.channelId),
+          h.inbox.readDelegation(delegationQuery(h, delegationId)),
         ],
         { concurrency: "unbounded" },
       ).pipe(Effect.provide(h.layer));
       expect(reads).toHaveBeenCalledTimes(1);
-      yield* Inbox.setRead({ ...h.keyOf("c"), read: true, lastMessageAt: at(1) }).pipe(
-        Effect.provide(h.layer),
-      );
+      yield* h.inbox
+        .setRead({ ...h.keyOf("c"), read: true, lastMessageAt: at(1) })
+        .pipe(Effect.provide(h.layer));
       const result = yield* listOf(h);
       expect(reads).toHaveBeenCalledTimes(2);
       expect(result.conversations[0]).toMatchObject({ unread: false });
@@ -674,7 +689,7 @@ describe("inbox listing", () => {
           Deferred.doneUnsafe(announced, Effect.void);
         }
       });
-      const overview = yield* Inbox.overview().pipe(Effect.provide(h.layer), Effect.forkChild);
+      const overview = yield* h.inbox.overview().pipe(Effect.provide(h.layer), Effect.forkChild);
       yield* TestClock.adjust("1 second");
       const early = yield* Fiber.join(overview);
       expect(early.channels.find((channel) => channel.id === h.channelId)?.unreadCount).toBeNull();
@@ -682,7 +697,7 @@ describe("inbox listing", () => {
       yield* Deferred.await(announced);
       yield* stop;
       const listings = h.requests.filter((path) => path.startsWith("/conversations?")).length;
-      const later = yield* Inbox.overview().pipe(Effect.provide(h.layer));
+      const later = yield* h.inbox.overview().pipe(Effect.provide(h.layer));
       expect(later.channels.find((channel) => channel.id === h.channelId)?.unreadCount).toBe(1);
       // The announcement reuses the read that landed instead of starting another.
       expect(h.requests.filter((path) => path.startsWith("/conversations?"))).toHaveLength(
@@ -720,9 +735,9 @@ describe("inbox listing", () => {
         },
       ]);
       const delegationId = yield* saveDelegation(h, "c", "anchor", null);
-      const detail = yield* Inbox.readDelegation(delegationQuery(h, delegationId)).pipe(
-        Effect.provide(h.layer),
-      );
+      const detail = yield* h.inbox
+        .readDelegation(delegationQuery(h, delegationId))
+        .pipe(Effect.provide(h.layer));
       expect(detail.messages.map((message) => message.id)).toEqual(["anchor", "inside"]);
     }),
   );
@@ -752,22 +767,23 @@ describe("delegating", () => {
         workspaceRoot: `/code/${id}`,
         archivedAt: null,
       });
-      const options = yield* Inbox.delegateOptions(
-        new URLSearchParams({ ...h.keyOf("c"), anchorMessageId: "m1" }),
-      ).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            h.layer,
-            Layer.mock(Project.ProjectService)({
-              listShells: () => Effect.succeed([project("p-first"), project("p-second")] as never),
-            }),
-            Layer.mock(ServerSettings.ServerSettingsService)({
-              getSettings: Effect.fail("no settings" as never),
-            }),
-            Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+      const options = yield* h.inbox
+        .delegateOptions(new URLSearchParams({ ...h.keyOf("c"), anchorMessageId: "m1" }))
+        .pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              h.layer,
+              Layer.mock(Project.ProjectService)({
+                listShells: () =>
+                  Effect.succeed([project("p-first"), project("p-second")] as never),
+              }),
+              Layer.mock(ServerSettings.ServerSettingsService)({
+                getSettings: Effect.fail("no settings" as never),
+              }),
+              Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+            ),
           ),
-        ),
-      );
+        );
       expect(options).toMatchObject({ scope: "chain", defaultProjectId: "p-second" });
       // The last thread's checkout, so another thread continues where it worked.
       expect(options.defaultWorkspaceStrategy).toEqual({
@@ -791,14 +807,16 @@ describe("delegating", () => {
       ]);
       const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
       const delegate = (anchorMessageId: string, workspaceStrategy?: unknown) =>
-        Inbox.delegate({
-          ...h.keyOf("c"),
-          anchorMessageId,
-          scope: "chain",
-          projectId: "p",
-          modelSelection: { instanceId: "codex", model: "gpt" },
-          ...(workspaceStrategy === undefined ? {} : { workspaceStrategy }),
-        }).pipe(Effect.provide(launchLayer(h, launched)));
+        h.inbox
+          .delegate({
+            ...h.keyOf("c"),
+            anchorMessageId,
+            scope: "chain",
+            projectId: "p",
+            modelSelection: { instanceId: "codex", model: "gpt" },
+            ...(workspaceStrategy === undefined ? {} : { workspaceStrategy }),
+          })
+          .pipe(Effect.provide(launchLayer(h, launched)));
 
       yield* delegate("root");
       const worktree = { type: "worktree", baseRef: "main", startFromOrigin: true };
@@ -819,7 +837,11 @@ describe("delegating", () => {
       expect(JSON.parse(request).workspaceStrategy).toEqual(worktree);
 
       const error = yield* delegate("bad", { type: "worktree" }).pipe(Effect.flip);
-      expect(error).toMatchObject({ status: 400, field: "workspaceStrategy" });
+      if (error._tag !== "InboxRejection") throw error;
+      expect(yield* inboxHttpFailure(error)).toMatchObject({
+        status: 400,
+        field: "workspaceStrategy",
+      });
       expect(launched).toHaveLength(2);
     }),
   );
@@ -849,9 +871,9 @@ describe("delegating", () => {
       );
       const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
       const delegate = (input: Record<string, unknown>) =>
-        Inbox.delegate({ ...h.keyOf("c"), projectId: "p", ...input }).pipe(
-          Effect.provide(launchLayer(h, launched)),
-        );
+        h.inbox
+          .delegate({ ...h.keyOf("c"), projectId: "p", ...input })
+          .pipe(Effect.provide(launchLayer(h, launched)));
       const contextOf = (result: { delegationId: string; threadId: string }) =>
         Effect.promise(() =>
           NodeFSP.readFile(
@@ -889,9 +911,9 @@ describe("delegating", () => {
         preview: "text of aside",
       });
       // Read again later, the range stays where it was delegated.
-      const detail = yield* Inbox.readDelegation(delegationQuery(h, range.delegationId)).pipe(
-        Effect.provide(h.layer),
-      );
+      const detail = yield* h.inbox
+        .readDelegation(delegationQuery(h, range.delegationId))
+        .pipe(Effect.provide(h.layer));
       expect(detail.messages.map((message) => message.id)).toEqual(["aside", "reply"]);
 
       const backwards = yield* delegate({
@@ -900,7 +922,11 @@ describe("delegating", () => {
         untilMessageId: "aside",
         modelSelection,
       }).pipe(Effect.flip);
-      expect(backwards).toMatchObject({ status: 400, field: "untilMessageId" });
+      if (backwards._tag !== "InboxRejection") throw backwards;
+      expect(yield* inboxHttpFailure(backwards)).toMatchObject({
+        status: 400,
+        field: "untilMessageId",
+      });
 
       yield* delegate({ anchorMessageId: "reply", scope: "range", modelSelection });
       // The picked message gets the reaction, the sender's first when it is mine, never a second.
@@ -930,27 +956,29 @@ describe("delegating", () => {
   ] as const)("refuses %s, before starting anything", ([_name, scope, messages]) =>
     Effect.gen(function* () {
       const h = yield* harness(() => [{ id: "c", kind: "dm", messages }]);
-      const error = yield* Inbox.delegate({
-        ...h.keyOf("c"),
-        anchorMessageId: "m0",
-        scope,
-        projectId: "p",
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            h.layer,
-            // Refused before any of these is used.
-            Layer.mock(ServerSettings.ServerSettingsService)({}),
-            Layer.mock(ProviderRegistry.ProviderRegistry)({}),
-            Layer.succeed(ServerConfig.ServerConfig, {} as never),
-            Layer.mock(ThreadLaunch.ThreadLaunchService)({}),
-            Layer.mock(DocumentText.DocumentText)({}),
-            FileSystem.layerNoop({}),
+      const error = yield* h.inbox
+        .delegate({
+          ...h.keyOf("c"),
+          anchorMessageId: "m0",
+          scope,
+          projectId: "p",
+        })
+        .pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              h.layer,
+              // Refused before any of these is used.
+              Layer.mock(ServerSettings.ServerSettingsService)({}),
+              Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+              Layer.succeed(ServerConfig.ServerConfig, {} as never),
+              Layer.mock(ThreadLaunch.ThreadLaunchService)({}),
+              Layer.mock(DocumentText.DocumentText)({}),
+              FileSystem.layerNoop({}),
+            ),
           ),
-        ),
-        Effect.flip,
-      );
-      if (error._tag !== "ForkHttpError") throw error;
+          Effect.flip,
+        );
+      if (error._tag !== "InboxRejection") throw error;
       expect(error.code).toBe("scope_too_long");
       expect(yield* h.runtime.store.listLinks(h.channelId)).toEqual([]);
       expect(yield* h.runtime.store.listDelegations(h.channelId)).toEqual([]);
@@ -972,13 +1000,13 @@ describe("linked threads and their files", () => {
       yield* h.runtime.store.detachLink(old.delegationId, "thread-old", "replaced", at(2));
       yield* linkThread(h, "c", "m1", "thread-new", 2);
       const query = delegationQuery(h, old.delegationId);
-      const fresh = yield* Inbox.readDelegation(query).pipe(Effect.provide(h.layer));
+      const fresh = yield* h.inbox.readDelegation(query).pipe(Effect.provide(h.layer));
       expect(fresh.draft).toBeNull();
       expect(fresh.delegation.hasDraft).toBe(false);
       expect(fresh.previousThreads.map((thread) => thread.threadId)).toEqual(["thread-old"]);
       // The old thread finishes later and writes again.
       yield* Effect.promise(() => NodeFSP.writeFile(NodePath.join(old.dir, "draft.md"), "late\n"));
-      expect((yield* Inbox.readDelegation(query).pipe(Effect.provide(h.layer))).draft).toBeNull();
+      expect((yield* h.inbox.readDelegation(query).pipe(Effect.provide(h.layer))).draft).toBeNull();
     }),
   );
 
@@ -989,12 +1017,12 @@ describe("linked threads and their files", () => {
       yield* Effect.promise(() => NodeFSP.writeFile(NodePath.join(dir, "draft.md"), "reply\n"));
       const query = delegationQuery(h, delegationId);
       expect(
-        (yield* Inbox.readDelegation(query).pipe(Effect.provide(h.layer))).delegation.hasDraft,
+        (yield* h.inbox.readDelegation(query).pipe(Effect.provide(h.layer))).delegation.hasDraft,
       ).toBe(true);
       h.shells.set("thread-1", null);
       // What followLinkedThreads publishes on thread.deleted.
       yield* h.runtime.hub.publish({ type: "inbox", channelId: h.channelId });
-      const after = yield* Inbox.readDelegation(query).pipe(Effect.provide(h.layer));
+      const after = yield* h.inbox.readDelegation(query).pipe(Effect.provide(h.layer));
       expect(after.delegation).toMatchObject({ hasDraft: false });
       expect(after.draft).toBeNull();
     }),
@@ -1052,11 +1080,10 @@ describe("sending", () => {
       const h = yield* harness(oneConversation, () => json(200, { ok: true }));
       const { dir, delegationId } = yield* linkThread(h, "c", "m1", "thread-1", 1);
       yield* Effect.promise(() => NodeFSP.writeFile(NodePath.join(dir, "draft.md"), "reply\n"));
-      const error = yield* Inbox.send({ ...h.keyOf("c"), delegationId, text: "reply" }).pipe(
-        Effect.provide(h.layer),
-        Effect.flip,
-      );
-      if (error._tag !== "ForkHttpError") throw error;
+      const error = yield* h.inbox
+        .send({ ...h.keyOf("c"), delegationId, text: "reply" })
+        .pipe(Effect.provide(h.layer), Effect.flip);
+      if (error._tag !== "InboxRejection") throw error;
       expect(error.code).toBe("delivery_unknown");
       expect(
         yield* Effect.promise(() => NodeFSP.readFile(NodePath.join(dir, "draft.md"), "utf8")),
@@ -1071,12 +1098,14 @@ describe("sending", () => {
       yield* Effect.promise(() =>
         NodeFSP.writeFile(NodePath.join(dir, "draft.md"), "draft text\n"),
       );
-      const sent = yield* Inbox.send({
-        ...h.keyOf("c"),
-        delegationId,
-        replyToId: "m1",
-        text: "edited text",
-      }).pipe(Effect.provide(h.layer));
+      const sent = yield* h.inbox
+        .send({
+          ...h.keyOf("c"),
+          delegationId,
+          replyToId: "m1",
+          text: "edited text",
+        })
+        .pipe(Effect.provide(h.layer));
       expect(sent.messageId).toBe("sent-1");
       expect(h.posted).toEqual([{ conversationId: "c", replyToId: "m1", text: "edited text" }]);
       const delegationDir = NodePath.join(h.runtime.itemsDir, delegationId);
@@ -1092,14 +1121,14 @@ describe("sending", () => {
       const threadFiles = yield* Effect.promise(() => NodeFSP.readdir(dir));
       expect(threadFiles).not.toContain("draft.md");
       expect(threadFiles.some((file) => /^draft\..+\.md$/.test(file))).toBe(true);
-      const listed = yield* Inbox.listInbox(h.channelId).pipe(Effect.provide(h.layer));
+      const listed = yield* h.inbox.listInbox(h.channelId).pipe(Effect.provide(h.layer));
       expect(listed.delegations[0]!.lastSentAt).not.toBeNull();
 
       const typed = yield* harness(oneConversation);
       const typedId = yield* saveDelegation(typed, "c", "m1");
-      yield* Inbox.send({ ...typed.keyOf("c"), delegationId: typedId, text: "by hand" }).pipe(
-        Effect.provide(typed.layer),
-      );
+      yield* typed.inbox
+        .send({ ...typed.keyOf("c"), delegationId: typedId, text: "by hand" })
+        .pipe(Effect.provide(typed.layer));
       const typedDir = NodePath.join(typed.runtime.itemsDir, typedId);
       const [typedRecord] = yield* Effect.promise(() => NodeFSP.readdir(typedDir));
       expect(
@@ -1109,9 +1138,9 @@ describe("sending", () => {
       ).toContain("source: typed");
 
       // A reply outside any delegation keeps no copy.
-      const plain = yield* Inbox.send({ ...typed.keyOf("c"), text: "hi" }).pipe(
-        Effect.provide(typed.layer),
-      );
+      const plain = yield* typed.inbox
+        .send({ ...typed.keyOf("c"), text: "hi" })
+        .pipe(Effect.provide(typed.layer));
       expect(plain).toEqual({
         messageId: "sent-1",
         archived: null,
@@ -1130,9 +1159,9 @@ describe("sending", () => {
         await NodeFSP.mkdir(h.runtime.itemsDir, { recursive: true });
         await NodeFSP.writeFile(NodePath.join(h.runtime.itemsDir, delegationId), "");
       });
-      const sent = yield* Inbox.send({ ...h.keyOf("c"), delegationId, text: "reply" }).pipe(
-        Effect.provide(h.layer),
-      );
+      const sent = yield* h.inbox
+        .send({ ...h.keyOf("c"), delegationId, text: "reply" })
+        .pipe(Effect.provide(h.layer));
       expect(sent.archived).toBe(false);
     }),
   );
@@ -1152,14 +1181,16 @@ describe("sending", () => {
         () => json(200, { messageId: "sent-1", unresolvedMentions: ["u3"] }),
         { capabilities: ["mentions"] },
       );
-      const sent = yield* Inbox.send({ ...h.keyOf("c"), text, mentions }).pipe(
-        Effect.provide(h.layer),
-      );
+      const sent = yield* h.inbox
+        .send({ ...h.keyOf("c"), text, mentions })
+        .pipe(Effect.provide(h.layer));
       expect(h.posted).toEqual([{ conversationId: "c", text, mentions: mentions.slice(0, 2) }]);
       expect(sent.unresolvedMentions).toEqual(["Sam"]);
 
       const plain = yield* harness(oneConversation);
-      yield* Inbox.send({ ...plain.keyOf("c"), text, mentions }).pipe(Effect.provide(plain.layer));
+      yield* plain.inbox
+        .send({ ...plain.keyOf("c"), text, mentions })
+        .pipe(Effect.provide(plain.layer));
       expect(plain.posted).toEqual([{ conversationId: "c", text }]);
     }),
   );
@@ -1168,14 +1199,14 @@ describe("sending", () => {
     Effect.gen(function* () {
       const h = yield* harness(oneConversation, undefined, { capabilities: ["quotes"] });
       for (const inThread of [false, true]) {
-        yield* Inbox.send({ ...h.keyOf("c"), replyToId: "m1", inThread, text: "hi" }).pipe(
-          Effect.provide(h.layer),
-        );
+        yield* h.inbox
+          .send({ ...h.keyOf("c"), replyToId: "m1", inThread, text: "hi" })
+          .pipe(Effect.provide(h.layer));
       }
       // Without a message to answer there is no thread to choose.
-      yield* Inbox.send({ ...h.keyOf("c"), inThread: false, text: "hi" }).pipe(
-        Effect.provide(h.layer),
-      );
+      yield* h.inbox
+        .send({ ...h.keyOf("c"), inThread: false, text: "hi" })
+        .pipe(Effect.provide(h.layer));
       expect(h.posted).toEqual([
         { conversationId: "c", replyToId: "m1", inThread: false, text: "hi" },
         { conversationId: "c", replyToId: "m1", inThread: true, text: "hi" },
@@ -1183,9 +1214,9 @@ describe("sending", () => {
       ]);
 
       const plain = yield* harness(oneConversation);
-      yield* Inbox.send({ ...plain.keyOf("c"), replyToId: "m1", inThread: false, text: "hi" }).pipe(
-        Effect.provide(plain.layer),
-      );
+      yield* plain.inbox
+        .send({ ...plain.keyOf("c"), replyToId: "m1", inThread: false, text: "hi" })
+        .pipe(Effect.provide(plain.layer));
       expect(plain.posted).toEqual([{ conversationId: "c", replyToId: "m1", text: "hi" }]);
     }),
   );
@@ -1204,18 +1235,20 @@ describe("sending", () => {
       );
       const file = new URLSearchParams({ channelId: h.channelId, name: "my chart.png" });
       expect(
-        yield* Inbox.upload(file, new Uint8Array([1, 2, 3])).pipe(Effect.provide(h.layer)),
+        yield* h.inbox.upload(file, new Uint8Array([1, 2, 3])).pipe(Effect.provide(h.layer)),
       ).toEqual(upload);
       expect(h.requests).toContain("/uploads?name=my%20chart.png");
       expect(h.uploaded).toEqual([3]);
 
       // Files alone are a message; the adapter gets ids, the user gets the failed names.
-      const sent = yield* Inbox.send({
-        ...h.keyOf("c"),
-        text: "",
-        format: "markdown",
-        attachments,
-      }).pipe(Effect.provide(h.layer));
+      const sent = yield* h.inbox
+        .send({
+          ...h.keyOf("c"),
+          text: "",
+          format: "markdown",
+          attachments,
+        })
+        .pipe(Effect.provide(h.layer));
       expect(h.posted).toEqual([
         {
           conversationId: "c",
@@ -1227,21 +1260,27 @@ describe("sending", () => {
       expect(sent.failedAttachments).toEqual(["log.txt"]);
 
       const plain = yield* harness(oneConversation);
-      yield* Inbox.send({ ...plain.keyOf("c"), text: "**hi**", format: "markdown" }).pipe(
-        Effect.provide(plain.layer),
-      );
+      yield* plain.inbox
+        .send({ ...plain.keyOf("c"), text: "**hi**", format: "markdown" })
+        .pipe(Effect.provide(plain.layer));
       expect(plain.posted).toEqual([{ conversationId: "c", text: "**hi**" }]);
-      const noFiles = yield* Inbox.send({
-        ...plain.keyOf("c"),
-        text: "see file",
-        attachments,
-      }).pipe(Effect.provide(plain.layer), Effect.flip);
-      const noUpload = yield* Inbox.upload(
-        new URLSearchParams({ channelId: plain.channelId, name: "a.png" }),
-        new Uint8Array([1]),
-      ).pipe(Effect.provide(plain.layer), Effect.flip);
-      if (noFiles._tag !== "ForkHttpError") throw noFiles;
-      expect([noFiles.status, noUpload.status]).toEqual([400, 400]);
+      const noFiles = yield* plain.inbox
+        .send({
+          ...plain.keyOf("c"),
+          text: "see file",
+          attachments,
+        })
+        .pipe(Effect.provide(plain.layer), Effect.flip);
+      const noUpload = yield* plain.inbox
+        .upload(
+          new URLSearchParams({ channelId: plain.channelId, name: "a.png" }),
+          new Uint8Array([1]),
+        )
+        .pipe(Effect.provide(plain.layer), Effect.flip);
+      if (noFiles._tag !== "InboxRejection") throw noFiles;
+      expect([inboxErrorResponse(noFiles).status, inboxErrorResponse(noUpload).status]).toEqual([
+        400, 400,
+      ]);
       expect(plain.posted).toHaveLength(1);
     }),
   );
@@ -1251,11 +1290,11 @@ describe("channel settings", () => {
   it.effect("returns a tested channel in the same shape as the list", () =>
     Effect.gen(function* () {
       const h = yield* harness(() => []);
-      const tested = yield* Inbox.testChannel(h.channelId).pipe(Effect.provide(h.layer));
+      const tested = yield* h.inbox.testChannel(h.channelId).pipe(Effect.provide(h.layer));
       expect(tested.projectMatches).toEqual([
         { path: "~/code/somewhere", projectId: null, projectTitle: null },
       ]);
-      const listed = yield* Inbox.listChannels().pipe(Effect.provide(h.layer));
+      const listed = yield* h.inbox.listChannels().pipe(Effect.provide(h.layer));
       expect(Object.keys(tested).toSorted()).toEqual(
         Object.keys(listed.channels.find((channel) => channel.id === h.channelId)!).toSorted(),
       );
@@ -1346,9 +1385,9 @@ describe("tagged replies", () => {
             } as never),
         }),
       );
-      const detail = yield* Inbox.readDelegation(delegationQuery(h, delegationId)).pipe(
-        Effect.provide(layer),
-      );
+      const detail = yield* h.inbox
+        .readDelegation(delegationQuery(h, delegationId))
+        .pipe(Effect.provide(layer));
       expect(detail.draft).toBe("fixed it");
       expect(
         yield* Effect.promise(() => NodeFSP.readFile(NodePath.join(dir, "draft.md"), "utf8")),

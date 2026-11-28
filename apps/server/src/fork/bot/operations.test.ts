@@ -32,7 +32,7 @@ import { ManagedProjectFolders } from "../../project/ManagedProjectFolders.ts";
 import * as ProviderRegistry from "../../provider/ProviderRegistry.ts";
 import * as ChannelHub from "../channels/hub.ts";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
-import { ForkHttpError } from "../inbox/operations.ts";
+import * as Inbox from "../inbox/operations.ts";
 import { InboxRuntime } from "../inbox/InboxRuntime.ts";
 import * as InboxStore from "../inbox/store.ts";
 import { BotRuntime } from "./BotRuntime.ts";
@@ -41,12 +41,12 @@ import * as Bots from "./operations.ts";
 import { answerQuestion, authenticateTool, MEMORY_BYTES, parseArgs, runTool } from "./tools.ts";
 import * as BotStore from "./store.ts";
 
-const isHttpError = Schema.is(ForkHttpError);
+const isHttpError = Schema.is(Inbox.ForkHttpError);
 
 const httpFailure = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   Effect.flip(effect).pipe(
     Effect.map((error) => {
-      expect(error).toBeInstanceOf(ForkHttpError);
+      expect(error).toBeInstanceOf(Inbox.ForkHttpError);
       if (isHttpError(error)) return error;
       throw error;
     }),
@@ -102,6 +102,7 @@ interface UserMessage {
 }
 
 type HarnessServices =
+  | Inbox.InboxOperations
   | Artifacts.Artifacts
   | BotRuntime
   | ThreadManagement.ThreadManagementService
@@ -165,6 +166,7 @@ const harness = (providedStore?: BotStore.BotStore["Service"]) =>
       return runId;
     };
     const layer = Layer.mergeAll(
+      Layer.mock(Inbox.InboxOperations)({}),
       Artifacts.layer.pipe(Layer.provide(NodeServices.layer)),
       Layer.succeed(BotRuntime, runtime),
       Layer.mock(ThreadManagement.ThreadManagementService)({
@@ -364,6 +366,7 @@ const withChat = <E>(
         });
         const inbox = yield* InboxStore.make(":memory:").pipe(Effect.provide(NodeServices.layer));
         yield* program(h).pipe(
+          Effect.provide(Inbox.layer),
           Effect.provideService(InboxRuntime, {
             hub,
             store: inbox,
