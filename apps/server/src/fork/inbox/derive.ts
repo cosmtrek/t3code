@@ -1,6 +1,8 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- Effect's Digest is effectful; delegation ids stay a plain function.
 import * as NodeCrypto from "node:crypto";
 
+import * as DateTime from "effect/DateTime";
+
 import type { Conversation, Message } from "../channels/protocol.ts";
 import type { ConversationRead, Delegation } from "./store.ts";
 
@@ -145,8 +147,7 @@ export function rangeUntil(
   if (delegation.scope === "range") return delegation.untilAt;
   const anchor = instant(anchorAt);
   if (!Number.isFinite(anchor)) return null;
-  // @effect-diagnostics-next-line globalDate:off -- a pure function over the adapter's ISO times.
-  return new Date(anchor + LEGACY_DM_WINDOW_MS).toISOString();
+  return DateTime.formatIso(DateTime.makeUnsafe(anchor + LEGACY_DM_WINDOW_MS));
 }
 
 /**

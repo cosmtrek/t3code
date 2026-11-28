@@ -398,7 +398,7 @@ const routineCommand = Effect.fn("ForkBot.routineCommand")(function* (
 ) {
   const runtime = yield* BotRuntime;
   const store = yield* runtime.store;
-  const now = DateTime.toDateUtc(yield* DateTime.now);
+  const now = yield* DateTime.nowInCurrentZone.pipe(DateTime.withCurrentZoneLocal);
   if (sub === "list") {
     const routines = store.listRoutines(botId);
     return routines.length === 0
@@ -420,7 +420,7 @@ const routineCommand = Effect.fn("ForkBot.routineCommand")(function* (
       title,
       prompt,
       schedule,
-      nextDueAt: nextDueAt(schedule, now)?.toISOString() ?? null,
+      nextDueAt: nextDueAt(schedule, now)?.pipe(DateTime.formatIso) ?? null,
     });
     runtime.publish(botId);
     return `Routine ${id} added: ${describeSchedule(schedule)}.`;
@@ -440,7 +440,7 @@ const routineCommand = Effect.fn("ForkBot.routineCommand")(function* (
     ...(flags.has("title") ? { title: flags.get("title")! } : {}),
     ...(prompt !== "" ? { prompt } : {}),
     ...(schedule !== undefined
-      ? { schedule, nextDueAt: nextDueAt(schedule, now)?.toISOString() ?? null }
+      ? { schedule, nextDueAt: nextDueAt(schedule, now)?.pipe(DateTime.formatIso) ?? null }
       : {}),
   });
   if (!changed) return yield* fail(`You have no routine ${id}.`);

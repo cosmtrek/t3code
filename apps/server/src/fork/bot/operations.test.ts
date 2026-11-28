@@ -522,7 +522,7 @@ describe("bot turns", () => {
             // Missed on three mornings while the server was down.
             nextDueAt: new Date(2026, 10, 20, 9, 0).toISOString(),
           });
-          yield* Bots.fireDueRoutines(new Date(2026, 10, 23, 11, 40));
+          yield* Bots.fireDueRoutines(DateTime.makeZonedUnsafe(new Date(2026, 10, 23, 11, 40)));
           expect(h.runs).toHaveLength(1);
           expect(h.packets[0]).toContain(
             'Routine 1 "PR check" is due. It was due at 09:00 and starts late, at 11:40.',

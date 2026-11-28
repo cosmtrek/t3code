@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off globalDate:off globalDateInEffect:off - UUIDs remain synchronous; calendar calculations still use local Date values.
+// @effect-diagnostics nodeBuiltinImport:off - UUIDs remain synchronous.
 /**
  * Bots: create one, talk to it, and run its turns. A turn starts when the user writes, a routine
  * comes due, or one of its threads needs it; it runs in the bot's one work thread and acts through
@@ -75,10 +75,14 @@ const internal = (cause: unknown) =>
 
 export const nowIso = DateTime.now.pipe(Effect.map(DateTime.formatIso));
 export const newId = (prefix: string) => `${prefix}_${NodeCrypto.randomUUID()}`;
-const localDay = (at: Date) =>
-  `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, "0")}-${String(at.getDate()).padStart(2, "0")}`;
-const localTime = (at: Date) =>
-  `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
+const localDay = (at: DateTime.Zoned) => {
+  const parts = DateTime.toParts(at);
+  return `${parts.year}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`;
+};
+const localTime = (at: DateTime.Zoned) => {
+  const parts = DateTime.toParts(at);
+  return `${String(parts.hour).padStart(2, "0")}:${String(parts.minute).padStart(2, "0")}`;
+};
 
 export const decode = <S extends Schema.Top>(schema: S, input: unknown) =>
   Schema.decodeUnknownEffect(schema)(input).pipe(
@@ -253,7 +257,10 @@ export const readBot = Effect.fn("ForkBot.readBot")(function* (params: URLSearch
     bot: {
       ...bot,
       turnsToday:
-        bot.lastTurnDay === localDay(DateTime.toDateUtc(yield* DateTime.now)) ? bot.turnsToday : 0,
+        bot.lastTurnDay ===
+        localDay(yield* DateTime.nowInCurrentZone.pipe(DateTime.withCurrentZoneLocal))
+          ? bot.turnsToday
+          : 0,
     },
     role: yield* runtime.files.readRole(runtime.botsDir, bot.id),
     workingSince: since,
@@ -598,7 +605,7 @@ const wake = Effect.fn("ForkBot.wake")(function* (botId: string) {
       const waiting = store.waitingMessages(botId);
       const queued = store.queued(botId);
       if (waiting.length === 0 && !queued.some((event) => event.wakes)) return null;
-      const now = DateTime.toDateUtc(yield* DateTime.now);
+      const now = yield* DateTime.nowInCurrentZone.pipe(DateTime.withCurrentZoneLocal);
       const today = localDay(now);
       const firstTurnToday = bot.lastTurnDay !== today;
       const turnsToday = firstTurnToday ? 0 : bot.turnsToday;
@@ -640,7 +647,7 @@ const wake = Effect.fn("ForkBot.wake")(function* (botId: string) {
           recentChat: answered,
           newMessages: waiting,
           events: queued.map((event) => event.text),
-          now,
+          now: DateTime.toDateUtc(now),
           firstTurnToday,
           connectors: yield* briefFor(bot),
           threadModel: modelFlags(yield* threadModelFor(bot)),
@@ -841,17 +848,19 @@ export const notify = Effect.fn("ForkBot.notify")(function* (
 });
 
 /** Fires every routine due by `now` once, however many times it was due, and sets the next. */
-export const fireDueRoutines = Effect.fn("ForkBot.fireDueRoutines")(function* (at?: Date) {
-  const now = at ?? DateTime.toDateUtc(yield* DateTime.now);
+export const fireDueRoutines = Effect.fn("ForkBot.fireDueRoutines")(function* (
+  at?: DateTime.Zoned,
+) {
+  const now = at ?? (yield* DateTime.nowInCurrentZone.pipe(DateTime.withCurrentZoneLocal));
   const runtime = yield* BotRuntime;
   const store = runtime.existingStore();
   if (store === null) return;
   for (const botId of store.setAsideStale(
-    new Date(now.getTime() - SET_ASIDE_AFTER_DAYS * 86_400_000).toISOString(),
+    DateTime.formatIso(DateTime.subtractDuration(now, SET_ASIDE_AFTER_DAYS * 86_400_000)),
   )) {
     runtime.publish(botId);
   }
-  for (const question of store.expireQuestions(now.toISOString())) {
+  for (const question of store.expireQuestions(DateTime.formatIso(now))) {
     yield* notify(
       question.botId,
       `Your question ${question.id} lapsed unanswered after 24 hours; it did not run. Ask again only if it still holds.`,
@@ -859,26 +868,32 @@ export const fireDueRoutines = Effect.fn("ForkBot.fireDueRoutines")(function* (a
     );
   }
   for (const routine of store.listRoutines()) {
-    if (routine.nextDueAt === null || Date.parse(routine.nextDueAt) > now.getTime()) continue;
+    if (routine.nextDueAt === null || Date.parse(routine.nextDueAt) > DateTime.toEpochMillis(now))
+      continue;
     store.updateRoutine(routine.botId, routine.id, {
-      nextDueAt: nextDueAt(routine.schedule, now)?.toISOString() ?? null,
+      nextDueAt: nextDueAt(routine.schedule, now)?.pipe(DateTime.formatIso) ?? null,
     });
-    yield* fireRoutine(routine.botId, routine.id, new Date(routine.nextDueAt), now);
+    yield* fireRoutine(
+      routine.botId,
+      routine.id,
+      DateTime.makeZonedUnsafe(routine.nextDueAt, { timeZone: now.zone }),
+      now,
+    );
   }
 });
 
 const fireRoutine = Effect.fn("ForkBot.fireRoutine")(function* (
   botId: string,
   routineId: number,
-  dueAt: Date,
-  now: Date,
+  dueAt: DateTime.Zoned,
+  now: DateTime.Zoned,
 ) {
   const routine = (yield* (yield* BotRuntime).store)
     .listRoutines(botId)
     .find((candidate) => candidate.id === routineId);
   if (routine === undefined) return false;
   const late =
-    now.getTime() - dueAt.getTime() > LATE_MS
+    DateTime.toEpochMillis(now) - DateTime.toEpochMillis(dueAt) > LATE_MS
       ? ` It was due at ${localTime(dueAt)} and starts late, at ${localTime(now)}.`
       : "";
   yield* notify(
@@ -894,7 +909,7 @@ const RunRoutineInput = Schema.Struct({ botId: Schema.String, routineId: Schema.
 export const runRoutineNow = Effect.fn("ForkBot.runRoutineNow")(function* (input: unknown) {
   const decoded = yield* decode(RunRoutineInput, input);
   yield* requireBot(decoded.botId);
-  const now = DateTime.toDateUtc(yield* DateTime.now);
+  const now = yield* DateTime.nowInCurrentZone.pipe(DateTime.withCurrentZoneLocal);
   if (!(yield* fireRoutine(decoded.botId, decoded.routineId, now, now))) {
     return yield* new ForkHttpError({
       status: 404,
