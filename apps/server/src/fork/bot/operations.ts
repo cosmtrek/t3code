@@ -11,7 +11,9 @@ import type { HtmlRenderReference } from "@t3tools/shared/htmlRender";
 import { htmlRenderFromToolItem, sentMessageFromToolItem } from "@t3tools/shared/toolOutput";
 
 import {
+  ChatAttachment,
   CommandId,
+  getProviderAttachmentLimitError,
   MessageId,
   ModelSelection,
   ProjectId,
@@ -26,10 +28,14 @@ import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 
+import * as ServerConfig from "../../config.ts";
 import { resolveRuntimeMode } from "../../mcp/delegatedTaskModes.ts";
+import * as AttachmentClaims from "../../orchestration-v2/AttachmentClaims.ts";
+import * as ProviderSessions from "../../orchestration-v2/ProviderSessionManager.ts";
 import * as ThreadManagement from "../../orchestration-v2/ThreadManagementService.ts";
 import * as ThreadMessageIntake from "../../orchestration-v2/ThreadMessageIntake.ts";
 import { ManagedProjectFolders } from "../../project/ManagedProjectFolders.ts";
@@ -38,7 +44,13 @@ import { firstProviderDefault } from "../inbox/operations.ts";
 import { BotOperationError, BotRejection } from "./errors.ts";
 import { makeToolOperations } from "./tools.ts";
 import { BotRuntime } from "./BotRuntime.ts";
-import { buildPacket, chatPreview, RECENT_CHAT_LIMIT, type Notebook } from "./packet.ts";
+import {
+  attachmentLabels,
+  buildPacket,
+  chatPreview,
+  RECENT_CHAT_LIMIT,
+  type Notebook,
+} from "./packet.ts";
 import { nextDueAt } from "./routines.ts";
 import { briefFor, listInstances } from "./connectors/registry.ts";
 import {
@@ -153,7 +165,7 @@ const listBots = Effect.fn("ForkBot.listBots")(function* () {
           : null,
         unread: yield* store!.unseenCount(bot.id),
         questions: (yield* store!.openQuestions(bot.id)).length,
-        workThreadId: bot.workThreadId,
+        workThreadId: bot.workProjectId === null ? null : bot.workThreadId,
       };
     }),
   );
@@ -260,6 +272,7 @@ const readBot = Effect.fn("ForkBot.readBot")(function* (params: URLSearchParams)
     // A count from an earlier day is spent: today starts at zero.
     bot: {
       ...bot,
+      workThreadId: bot.workProjectId === null ? null : bot.workThreadId,
       turnsToday:
         bot.lastTurnDay ===
         localDay(yield* DateTime.nowInCurrentZone.pipe(DateTime.withCurrentZoneLocal))
@@ -405,15 +418,17 @@ const BotIdInput = Schema.Struct({ botId: Schema.String });
 /** Its threads stay as ordinary threads; only the bot and its notebook go. */
 const deleteBot = Effect.fn("ForkBot.deleteBot")(function* (input: unknown) {
   const runtime = yield* BotRuntime;
-  const bot = yield* requireBot((yield* decode(BotIdInput, input)).botId);
-  const store = yield* runtime.store;
-  yield* runtime.turnLock.withPermit(
+  const { botId } = yield* decode(BotIdInput, input);
+  const bot = yield* runtime.turnLock.withPermit(
     Effect.gen(function* () {
+      const bot = yield* requireBot(botId);
+      const store = yield* runtime.store;
       yield* store.deleteBot(bot.id);
       if (bot.workThreadId !== null) runtime.workThreads.delete(bot.workThreadId);
       for (const [threadId, owner] of runtime.ownedThreads) {
         if (owner === bot.id) runtime.ownedThreads.delete(threadId);
       }
+      return bot;
     }),
   );
   yield* runtime.files.removeBot(runtime.botsDir, bot.id);
@@ -421,57 +436,131 @@ const deleteBot = Effect.fn("ForkBot.deleteBot")(function* (input: unknown) {
   return {};
 });
 
-const MessageInput = Schema.Struct({ botId: Schema.String, text: Schema.String });
+const MessageInput = Schema.Struct({
+  botId: Schema.String,
+  text: Schema.String,
+  attachments: Schema.optional(Schema.Array(ChatAttachment)),
+});
 
 const sendMessage = Effect.fn("ForkBot.sendMessage")(function* (input: unknown) {
   const runtime = yield* BotRuntime;
   const decoded = yield* decode(MessageInput, input);
-  const bot = yield* requireBot(decoded.botId);
   const text = decoded.text.trim();
-  if (text === "" || text.length > MESSAGE_CHARS) {
-    return yield* badRequest(`Write 1 to ${MESSAGE_CHARS} characters.`, "text");
-  }
+  const attachments = decoded.attachments ?? [];
   const messageId = newId("msg");
-  yield* (yield* runtime.store).addChat({
-    id: messageId,
-    botId: bot.id,
-    role: "user",
-    text,
-    createdAt: yield* nowIso,
-  });
-  runtime.publish(bot.id);
-  if (!(yield* steer(bot, messageId, text))) yield* wake(bot.id);
+  const steered = yield* runtime.turnLock.withPermit(
+    Effect.gen(function* () {
+      const bot = yield* requireBot(decoded.botId);
+      if (text.length > MESSAGE_CHARS) {
+        return yield* badRequest(`Write 1 to ${MESSAGE_CHARS} characters.`, "text");
+      }
+      if (text === "" && attachments.length === 0) {
+        return yield* badRequest("Write a message or attach a file.", "text");
+      }
+      const limitError = getProviderAttachmentLimitError(attachments);
+      if (limitError !== undefined) return yield* badRequest(limitError, "attachments");
+      if (
+        attachments.some((attachment) => !AttachmentClaims.attachmentIsPendingUpload(attachment))
+      ) {
+        return yield* badRequest("Message attachments must be pending uploads.", "attachments");
+      }
+
+      const store = yield* runtime.store;
+      const message = {
+        id: messageId,
+        botId: bot.id,
+        role: "user" as const,
+        text,
+        createdAt: yield* nowIso,
+      };
+      const savedAttachments = yield* Effect.uninterruptibleMask((restore) =>
+        Effect.gen(function* () {
+          if (attachments.length === 0) {
+            yield* store.addChat(message);
+            return attachments;
+          }
+          const threadId = bot.workThreadId ?? newId("fork-bot");
+          if (bot.workThreadId === null) yield* store.setWorkThread(bot.id, threadId, null);
+          const claimed = yield* restore(
+            AttachmentClaims.claimPendingAttachments({ threadId, attachments }),
+          ).pipe(
+            Effect.mapError((cause) =>
+              badRequest("Could not claim the message attachments.", "attachments", cause),
+            ),
+          );
+          yield* store
+            .addChat({ ...message, attachments: claimed.attachments })
+            .pipe(
+              Effect.onError(() =>
+                AttachmentClaims.releaseClaimedAttachments(claimed.claimedPaths),
+              ),
+            );
+          return claimed.attachments;
+        }),
+      );
+      runtime.publish(bot.id);
+      return yield* steer(bot, messageId, text, savedAttachments);
+    }),
+  );
+  if (!steered) yield* wake(decoded.botId);
   return { messageId };
 });
 
+const activeSteeringAcceptsAttachments = Effect.fn("ForkBot.activeSteeringAcceptsAttachments")(
+  function* (turn: Turn) {
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const records = yield* threads
+      .getThreadRecords(ThreadId.make(turn.threadId), ["runs", "providerThreads"], {
+        runIds: [RunId.make(turn.runId)],
+      })
+      .pipe(Effect.option);
+    if (Option.isNone(records)) return undefined;
+    const run = records.value.runs.find(({ id }) => id === turn.runId);
+    const providerThread = records.value.providerThreads.find(
+      ({ id }) => id === run?.providerThreadId,
+    );
+    if (providerThread?.providerSessionId == null) return undefined;
+    const sessions = yield* ProviderSessions.ProviderSessionManagerV2;
+    const session = yield* sessions
+      .get(providerThread.providerSessionId)
+      .pipe(Effect.orElseSucceed(() => Option.none()));
+    return Option.getOrNull(session)?.providerSession.capabilities.turns
+      .activeSteeringAcceptsAttachments;
+  },
+);
+
 /** A message that arrives mid-turn joins that turn; false when there is none to join. */
-const steer = Effect.fn("ForkBot.steer")(function* (bot: Bot, messageId: string, text: string) {
+const steer = Effect.fn("ForkBot.steer")(function* (
+  bot: Bot,
+  messageId: string,
+  text: string,
+  attachments: ReadonlyArray<ChatAttachment>,
+) {
   const runtime = yield* BotRuntime;
   const threads = yield* ThreadManagement.ThreadManagementService;
-  return yield* runtime.turnLock.withPermit(
-    Effect.gen(function* () {
-      const store = yield* runtime.store;
-      const turn = yield* store.getTurn(bot.id);
-      if (turn === null || bot.workProjectId === null) return false;
-      const sent = yield* Effect.result(
-        threads.sendToThread({
-          projectId: ProjectId.make(bot.workProjectId),
-          commandId: CommandId.make(newId("fork-bot")),
-          threadId: ThreadId.make(turn.threadId),
-          messageId: MessageId.make(NodeCrypto.randomUUID()),
-          text: `The user, while you work:\n${expandAssistantCitationsForProvider(text)}`,
-          attachments: [],
-          mode: "steer",
-          createdBy: "system",
-          creationSource: "server",
-        }),
-      );
-      if (Result.isFailure(sent) || sent.success.delivery !== "steered") return false;
-      yield* store.markAnswered(bot.id, turn.runId, [messageId]);
-      runtime.publish(bot.id);
-      return true;
+  const store = yield* runtime.store;
+  const turn = yield* store.getTurn(bot.id);
+  if (turn === null || bot.workProjectId === null) return false;
+  if (attachments.length > 0 && (yield* activeSteeringAcceptsAttachments(turn)) === false)
+    return false;
+  const { attachmentsDir } = yield* ServerConfig.ServerConfig;
+  const sent = yield* Effect.result(
+    threads.sendToThread({
+      projectId: ProjectId.make(bot.workProjectId),
+      commandId: CommandId.make(newId("fork-bot")),
+      threadId: ThreadId.make(turn.threadId),
+      messageId: MessageId.make(NodeCrypto.randomUUID()),
+      text: `The user, while you work:\n${expandAssistantCitationsForProvider(text)}${attachmentLabels(attachments, attachmentsDir)}`,
+      attachments,
+      mode: "steer",
+      createdBy: "system",
+      creationSource: "server",
     }),
   );
+  if (Result.isFailure(sent) || sent.success.delivery !== "steered") return false;
+  yield* store.markAnswered(bot.id, turn.runId, [messageId]);
+  runtime.publish(bot.id);
+  return true;
 });
 
 const postError = Effect.fn("ForkBot.postError")(function* (botId: string, text: string) {
@@ -519,7 +608,7 @@ const threadModelFor = Effect.fn("ForkBot.threadModelFor")(function* (bot: Bot) 
  * sets the composer's mode, so each turn re-applies the bot's.
  */
 const alignWorkThreadMode = Effect.fn("ForkBot.alignWorkThreadMode")(function* (bot: Bot) {
-  if (bot.workThreadId === null) return;
+  if (bot.workThreadId === null || bot.workProjectId === null) return;
   const threads = yield* ThreadManagement.ThreadManagementService;
   const threadId = ThreadId.make(bot.workThreadId);
   const shell = yield* threads.getThreadShell(threadId);
@@ -537,6 +626,7 @@ const alignWorkThreadMode = Effect.fn("ForkBot.alignWorkThreadMode")(function* (
 const dispatch = Effect.fn("ForkBot.dispatch")(function* (
   bot: Bot,
   packet: string,
+  attachments: ReadonlyArray<ChatAttachment>,
   freshContext: boolean,
 ) {
   const runtime = yield* BotRuntime;
@@ -556,7 +646,7 @@ const dispatch = Effect.fn("ForkBot.dispatch")(function* (
       threadId: ThreadId.make(bot.workThreadId),
       messageId,
       text: packet,
-      attachments: [],
+      attachments,
       modelSelection,
       mode: "queue",
       ...(freshContext ? { freshContext: true } : {}),
@@ -568,7 +658,7 @@ const dispatch = Effect.fn("ForkBot.dispatch")(function* (
   const { projectId } = yield* (yield* ManagedProjectFolders).ensureScratchProject;
   const launched = yield* ThreadMessageIntake.launchThread({
     commandId,
-    threadId: ThreadId.make(commandId),
+    threadId: ThreadId.make(bot.workThreadId ?? commandId),
     projectId,
     title: workThreadTitle(bot.name),
     modelSelection,
@@ -578,7 +668,7 @@ const dispatch = Effect.fn("ForkBot.dispatch")(function* (
       type: "existing_worktree",
       worktreePath: runtime.files.workspacePath(runtime.botsDir, bot.id),
     },
-    initialMessage: { messageId, text: packet, attachments: [] },
+    initialMessage: { messageId, text: packet, attachments },
     createdBy: "system",
     creationSource: "server",
   });
@@ -641,9 +731,10 @@ const wake = Effect.fn("ForkBot.wake")(function* (botId: string) {
           seenModel !== null &&
           seenModel.instanceId !== bot.modelSelection.instanceId);
       const seen =
-        freshContext || bot.workThreadId === null
+        freshContext || bot.workProjectId === null
           ? null
           : yield* store.seenPacket(botId, bot.modelSelection);
+      const { attachmentsDir } = yield* ServerConfig.ServerConfig;
       const packet = buildPacket(
         {
           name: bot.name,
@@ -658,6 +749,7 @@ const wake = Effect.fn("ForkBot.wake")(function* (botId: string) {
           questions: yield* store.openQuestions(botId),
           recentChat: answered,
           newMessages: waiting,
+          attachmentsDir,
           events: queued.map((event) => event.text),
           now: DateTime.toDateUtc(now),
           firstTurnToday,
@@ -667,7 +759,7 @@ const wake = Effect.fn("ForkBot.wake")(function* (botId: string) {
         seen,
       );
       const started = yield* Effect.result(
-        dispatch(bot, packet.text, freshContext).pipe(
+        dispatch(bot, packet.text, packet.attachments, freshContext).pipe(
           Effect.catchTags({ BotStoreError: Effect.die }),
         ),
       );
@@ -1160,7 +1252,7 @@ const saveSettings = Effect.fn("ForkBot.saveSettings")(function* (input: unknown
  * which only a fresh packet repeats, so it hears of the new one.
  */
 const renamed = Effect.fn("ForkBot.renamed")(function* (bot: Bot, name: string) {
-  if (bot.workThreadId !== null) {
+  if (bot.workThreadId !== null && bot.workProjectId !== null) {
     yield* (yield* ThreadManagement.ThreadManagementService)
       .dispatch({
         type: "thread.metadata.update",

@@ -362,7 +362,7 @@ nothing is tracked.
 
 ### Attachments (planned)
 
-Status: designed, not built. Build it in the order of [Attachment steps](#attachment-steps).
+The server supports attachments. Client work follows the order in [Attachment steps](#attachment-steps).
 
 The user's messages to a bot carry images and files the way a thread message does. Nothing new
 moves bytes: the bot chat reuses upstream's attachment pipeline end to end.
@@ -370,7 +370,7 @@ moves bytes: the bot chat reuses upstream's attachment pipeline end to end.
 - **Upload.** Clients upload exactly as their thread composers do: `attachmentsCreateUploadUrl`,
   then the bytes, which yields a pending `ChatAttachment`. The upload is not tied to a thread.
 - **Send.** `/bots/send` takes `{ botId, text, attachments? }`. A message needs text or at least
-  one attachment. Limits are upstream's `getProviderAttachmentLimitError`.
+  one pending upload. Limits are upstream's `getProviderAttachmentLimitError`.
 - **Claim at send, not at wake.** Pending uploads expire, and a message may wait in the wake queue
   for a long time (budget, pause, a running turn). So `sendMessage` claims the attachments right
   away through `AttachmentClaims.claimPendingAttachments`, against the bot's work thread id. A bot
@@ -378,30 +378,30 @@ moves bytes: the bot chat reuses upstream's attachment pipeline end to end.
   under it. The claimed, persisted attachments go in a new `chat.attachments` column (JSON,
   `NULL` when none).
 - **Dispatch.** `dispatch` passes the attachments of the messages the packet answers as the work
-  message's `attachments`, in message order, in place of today's `[]`. Persisted attachments pass
-  through the claim step untouched. The packet's line for each message also lists its attachments
+  message's `attachments`, in message order. Persisted attachments keep their original IDs and
+  paths. The packet's line for each message also lists its attachments
   by name and server path, so the bot knows which message carried what, and a later turn, or a
   fresh day's session, can read an old file with its shell.
 - **Over the limit.** When the merged messages exceed one message's attachment limit, the first
   ones that fit go natively and the rest go by path only, which the packet says.
-- **Steering.** A message with attachments joins a running turn only when the work thread's
-  provider has `activeSteeringAcceptsAttachments`; otherwise it waits for the next turn.
-- **Display.** `/bots/detail` returns each chat message's attachments; clients resolve them with
-  `resolveAssetUrl` and show them as thread messages do.
-- **Delete.** Deleting a bot removes the attachment files its chat claimed.
+- **Steering.** A message with attachments waits for the next turn if the work thread's
+  provider explicitly sets `activeSteeringAcceptsAttachments` to false.
+- **Display.** `GET /api/fork/bots/bot` returns each chat message's attachments. Clients resolve
+  them with `resolveAssetUrl` and show them as thread messages do.
+- **Delete.** Deleting a bot preserves the work thread and its files, with existing thread-deletion cleanup taking care of attachments referenced by its messages.
 
 The bot does not send files to the user in this step; `say` stays text plus renders.
 
-Tests: `sendMessage` with attachments only, with text and attachments, and with an expired
-upload; `dispatch` merging several messages' attachments, the over-limit fallback, and the packet
-lines; steering a message with attachments into a provider that refuses them; delete cleanup.
+Server tests cover attachment-only and mixed messages, rejecting a missing upload without
+posting, merging attachments across messages, packet paths and the over-limit fallback, and
+deferring attachments when the active provider refuses them.
 
 ### Attachment steps
 
 Each step is one `feat(bot)` commit and is usable on its own.
 
-1. **Server.** The column, claim at send, dispatch, packet lines, steering fallback, delete
-   cleanup, and the tests above.
+1. **Server.** The column, claim at send, dispatch, packet lines, steering fallback, and the
+   tests above.
 2. **Web and desktop.** `BotComposer` gets the thread composer's attachment button, paste
    (today `onPaste` does nothing), and drag and drop, with upstream's attachment strip and
    `attachmentUploadQueue` for progress, removal, and retry. Per-bot drafts keep their

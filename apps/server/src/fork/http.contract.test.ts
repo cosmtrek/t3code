@@ -18,6 +18,7 @@ import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as Project from "../project/ProjectService.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
+import * as ProviderSessions from "../orchestration-v2/ProviderSessionManager.ts";
 import * as DocumentText from "../provider/DocumentText.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -116,6 +117,7 @@ const fixture = Effect.fn("Test.forkHttp")(function* (
     Layer.mock(Project.ProjectService)({ listShells: () => Effect.succeed([]) }),
     Layer.mock(ThreadManagement.ThreadManagementService)({}),
     Layer.mock(ThreadLaunch.ThreadLaunchService)({}),
+    Layer.mock(ProviderSessions.ProviderSessionManagerV2)({}),
     Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/fixture" }),
     Layer.mock(ProviderRegistry.ProviderRegistry)({}),
     Layer.mock(DocumentText.DocumentText)({}),

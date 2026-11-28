@@ -42,6 +42,7 @@ const input = (patch: Partial<PacketInput>): PacketInput => ({
   questions: [],
   recentChat: [],
   newMessages: [],
+  attachmentsDir: "/attachments",
   events: [],
   now: NOW,
   firstTurnToday: false,

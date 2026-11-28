@@ -174,7 +174,10 @@ describe("BotStore", () => {
         expect(yield* reopened.dueMentions("2026-12-01")).toEqual([]);
         const raw = new NodeSqlite.DatabaseSync(file);
         try {
-          expect(raw.prepare("PRAGMA user_version").get()?.user_version).toBe(10);
+          expect(raw.prepare("PRAGMA user_version").get()?.user_version).toBe(11);
+          expect(
+            raw.prepare("SELECT attachments FROM chat WHERE id = 'reply'").get()?.attachments,
+          ).toBeNull();
           expect(
             raw.prepare("SELECT model_selection, settings FROM bots WHERE id = 'old'").get(),
           ).toEqual({

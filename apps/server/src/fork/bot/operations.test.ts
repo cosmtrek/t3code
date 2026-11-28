@@ -7,7 +7,13 @@ import * as Cause from "effect/Cause";
 import * as Exit from "effect/Exit";
 import * as NodePath from "node:path";
 
-import { ProjectId, type OrchestrationV2RunStatus } from "@t3tools/contracts";
+import {
+  ChatAttachmentId,
+  ProjectId,
+  PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
+  type ChatAttachment,
+  type OrchestrationV2RunStatus,
+} from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -24,6 +30,12 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Chat from "./connectors/chat/chat.ts";
 
 import * as ServerConfig from "../../config.ts";
+import {
+  createPendingAttachmentId,
+  parseThreadSegmentFromAttachmentId,
+  resolveAttachmentPath,
+} from "../../attachmentStore.ts";
+import * as ProviderSessions from "../../orchestration-v2/ProviderSessionManager.ts";
 import * as ThreadLaunch from "../../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../../orchestration-v2/ThreadManagementService.ts";
 import * as Project from "../../project/ProjectService.ts";
@@ -82,6 +94,9 @@ interface Harness {
   readonly bot: Bots.BotOperations["Service"];
   /** Every packet the bot was sent, launch or send, in order. */
   readonly packets: string[];
+  readonly packetAttachments: Array<ReadonlyArray<ChatAttachment>>;
+  readonly steeredAttachments: Array<ReadonlyArray<ChatAttachment>>;
+  readonly attachmentsDir: string;
   /** Thread id and run id of each turn, in order. */
   readonly runs: Array<{ readonly threadId: string; readonly runId: string }>;
   /** Runs and their assistant replies, as T3 would answer for them. */
@@ -110,6 +125,7 @@ interface Harness {
   readonly usage: Map<string, { usedTokens: number; maxTokens: number }>;
   /** What T3 answers a steer with: a provider turn to join, or only the queue. */
   steerDelivery: "steered" | "queued";
+  steeringAcceptsAttachments?: boolean;
   /** Projects `thread start` may name, and whether each worker launch saw its thread owned. */
   readonly projects: Array<{ id: string; title: string; workspaceRoot: string }>;
   readonly ownedAtLaunch: boolean[];
@@ -131,6 +147,7 @@ type HarnessServices =
   | BotRuntime
   | ThreadManagement.ThreadManagementService
   | ThreadLaunch.ThreadLaunchService
+  | ProviderSessions.ProviderSessionManagerV2
   | ManagedProjectFolders
   | ProviderRegistry.ProviderRegistry
   | ServerConfig.ServerConfig
@@ -169,6 +186,9 @@ const harness = (providedStore?: BotStore.BotStore["Service"]) =>
       subscribe: () => () => undefined,
     };
     const packets: string[] = [];
+    const attachmentsDir = NodePath.join(botsDir, "attachments");
+    const packetAttachments: Harness["packetAttachments"] = [];
+    const steeredAttachments: Harness["steeredAttachments"] = [];
     const runs: Array<{ threadId: string; runId: string }> = [];
     const runStatus = new Map<string, OrchestrationV2RunStatus>();
     const replies = new Map<string, string>();
@@ -212,9 +232,11 @@ const harness = (providedStore?: BotStore.BotStore["Service"]) =>
         sendToThread: (input) => {
           // No turn is ever mid-provider-turn here, so a steer lands in the queue as T3 would.
           if (input.mode === "steer") {
+            steeredAttachments.push(input.attachments);
             return Effect.succeed({ delivery: h.steerDelivery, run: { id: "steer" } } as never);
           }
           packets.push(input.text);
+          packetAttachments.push(input.attachments);
           sends.push({ mode: input.mode, freshContext: input.freshContext === true });
           return Effect.succeed({
             delivery: "queued",
@@ -228,6 +250,11 @@ const harness = (providedStore?: BotStore.BotStore["Service"]) =>
             return Effect.fail("missing" as never);
           return Effect.succeed({ ...shell, runtimeMode, pendingRuntimeRequest: null } as never);
         },
+        getThreadRecords: (_threadId, _fields, filter) =>
+          Effect.succeed({
+            runs: (filter?.runIds ?? []).map((id) => ({ id, providerThreadId: "pt" })),
+            providerThreads: [{ id: "pt", providerSessionId: "ps" }],
+          } as never),
         getProjectThreadRecords: (input, _fields, filter) =>
           Effect.succeed({
             thread: { activeProviderThreadId: "pt" },
@@ -271,6 +298,18 @@ const harness = (providedStore?: BotStore.BotStore["Service"]) =>
             ),
           } as never),
       }),
+      Layer.mock(ProviderSessions.ProviderSessionManagerV2)({
+        get: () =>
+          Effect.succeedSome({
+            providerSession: {
+              capabilities: {
+                turns: {
+                  activeSteeringAcceptsAttachments: h.steeringAcceptsAttachments,
+                },
+              },
+            },
+          } as never),
+      }),
       Layer.mock(ThreadLaunch.ThreadLaunchService)({
         launch: (input) => {
           if (input.projectId !== SCRATCH) {
@@ -279,6 +318,7 @@ const harness = (providedStore?: BotStore.BotStore["Service"]) =>
               return Effect.fail({ message: "no" } as never);
           }
           packets.push(input.initialMessage?.text ?? "");
+          packetAttachments.push(input.initialMessage?.attachments ?? []);
           modes.push(input.runtimeMode);
           threadModes.set(input.threadId!, input.runtimeMode);
           models.push(input.modelSelection);
@@ -293,7 +333,7 @@ const harness = (providedStore?: BotStore.BotStore["Service"]) =>
         namedProjectsRoot: botsDir,
         ensureScratchProject: Effect.succeed({ projectId: SCRATCH }),
       }),
-      Layer.mock(DocumentText.DocumentText)({}),
+      Layer.mock(DocumentText.DocumentText)({ ensure: () => Effect.undefined }),
       Layer.mock(Project.ProjectService)({ listShells: () => Effect.succeed(projects as never) }),
       // The model's provider, like Antigravity, offers every mode but auto.
       Layer.mock(ProviderRegistry.ProviderRegistry)({
@@ -305,13 +345,16 @@ const harness = (providedStore?: BotStore.BotStore["Service"]) =>
           { instanceId: "codex", supportedRuntimeModes: ["auto", "full-access"] },
         ] as never),
       }),
-      Layer.succeed(ServerConfig.ServerConfig, {} as never),
-      FileSystem.layerNoop({}),
+      Layer.succeed(ServerConfig.ServerConfig, { attachmentsDir } as never),
+      NodeServices.layer,
     );
     const h: Harness = {
       bot,
       runtime,
       packets,
+      attachmentsDir,
+      packetAttachments,
+      steeredAttachments,
       runs,
       runStatus,
       replies,
@@ -337,6 +380,29 @@ const chatOf = Effect.fn("Test.chatOf")(function* (h: Harness, botId: string) {
     message.role,
     message.text,
   ]);
+});
+
+const pendingAttachment = (name: string): ChatAttachment => {
+  const image = name.endsWith(".png");
+  return {
+    type: image ? "image" : "file",
+    id: ChatAttachmentId.make(createPendingAttachmentId(image ? undefined : "txt")),
+    name,
+    mimeType: image ? "image/png" : "text/plain",
+    sizeBytes: 1,
+  };
+};
+
+const stageAttachments = Effect.fn("Test.stageAttachments")(function* (
+  h: Harness,
+  attachments: ReadonlyArray<ChatAttachment>,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  yield* fs.makeDirectory(h.attachmentsDir, { recursive: true });
+  for (const attachment of attachments) {
+    const path = resolveAttachmentPath({ attachmentsDir: h.attachmentsDir, attachment });
+    yield* fs.writeFileString(path!, "x");
+  }
 });
 
 /** T3 ends the run with this reply, as the domain event follower would report it. */
@@ -465,6 +531,148 @@ describe("bot creation", () => {
         expect(h.runs).toEqual([]);
       }),
     ),
+  );
+});
+
+describe("bot chat attachments", () => {
+  it.effect(
+    "claims attachments-only and mixed messages before launch, then sends them in chat order",
+    () =>
+      withHarness((h) =>
+        Effect.gen(function* () {
+          const { botId } = yield* h.bot.createBot({ name: "Bot", modelSelection: MODEL });
+          yield* h.bot.setPaused({ botId, paused: true });
+          const image = pendingAttachment("draft.png");
+          const file = pendingAttachment("notes.txt");
+          yield* stageAttachments(h, [image, file]);
+          const first = yield* h.bot.sendMessage({ botId, text: " ", attachments: [image] });
+          const second = yield* h.bot.sendMessage({
+            botId,
+            text: "  See notes.  ",
+            attachments: [file],
+          });
+          const reserved = yield* h.runtime.existingStore()!.getBot(botId);
+          const detail = yield* h.bot.readBot(new URLSearchParams({ botId }));
+          expect(detail.bot.workProjectId).toBeNull();
+          expect(detail.bot.workThreadId).toBeNull();
+          expect((yield* h.bot.listBots()).bots[0]?.workThreadId).toBeNull();
+          expect(reserved?.workThreadId).toEqual(expect.any(String));
+          expect(detail.chat.map(({ id, text }) => ({ id, text }))).toEqual([
+            { id: first.messageId, text: "" },
+            { id: second.messageId, text: "See notes." },
+          ]);
+          expect(h.runs).toHaveLength(0);
+          const claimed = detail.chat.flatMap(({ attachments }) => attachments ?? []);
+          expect(claimed.map(({ name }) => name)).toEqual(["draft.png", "notes.txt"]);
+          const fs = yield* FileSystem.FileSystem;
+          const paths = [];
+          for (const attachment of claimed) {
+            expect(parseThreadSegmentFromAttachmentId(attachment.id)).toBe(reserved?.workThreadId);
+            const path = resolveAttachmentPath({ attachmentsDir: h.attachmentsDir, attachment });
+            expect(yield* fs.readFileString(path!)).toBe("x");
+            paths.push(path);
+          }
+          yield* h.bot.setPaused({ botId, paused: false });
+          expect(h.runs[0]?.threadId).toBe(reserved?.workThreadId);
+          expect((yield* h.bot.readBot(new URLSearchParams({ botId }))).bot.workThreadId).toBe(
+            reserved?.workThreadId,
+          );
+          expect(h.packetAttachments[0]).toEqual(claimed);
+          expect(h.packets[0]).toContain(`[attachment: "draft.png" ("${paths[0]}")]`);
+          expect(h.packets[0]).toContain(`See notes. [attachment: "notes.txt" ("${paths[1]}")]`);
+        }),
+      ),
+  );
+
+  it.effect("rejects a missing pending upload without posting or starting work", () =>
+    withHarness((h) =>
+      Effect.gen(function* () {
+        const { botId } = yield* h.bot.createBot({ name: "Bot", modelSelection: MODEL });
+        const failure = yield* httpFailure(
+          h.bot.sendMessage({
+            botId,
+            text: "Look",
+            attachments: [pendingAttachment("missing.png")],
+          }),
+        );
+        expect(failure).toMatchObject({ status: 400, code: "bad_request", field: "attachments" });
+        expect(yield* chatOf(h, botId)).toEqual([]);
+        expect(h.runs).toHaveLength(0);
+      }),
+    ),
+  );
+
+  it.effect("rejects another thread's stored attachment id as a new bot upload", () =>
+    withHarness((h) =>
+      Effect.gen(function* () {
+        const { botId } = yield* h.bot.createBot({ name: "Bot", modelSelection: MODEL });
+        const pending = pendingAttachment("notes.txt");
+        const stored = {
+          ...pending,
+          id: ChatAttachmentId.make(pending.id.replace(/^pending-/, "other-thread-")),
+        };
+        yield* stageAttachments(h, [stored]);
+        const failure = yield* httpFailure(
+          h.bot.sendMessage({ botId, text: "Look", attachments: [stored] }),
+        );
+        expect(failure).toMatchObject({ status: 400, code: "bad_request", field: "attachments" });
+        expect(yield* chatOf(h, botId)).toEqual([]);
+      }),
+    ),
+  );
+
+  it.effect("keeps over-limit attachments as paths in a merged packet", () =>
+    withHarness((h) =>
+      Effect.gen(function* () {
+        const { botId } = yield* h.bot.createBot({ name: "Bot", modelSelection: MODEL });
+        yield* h.bot.setPaused({ botId, paused: true });
+        const first = Array.from({ length: PROVIDER_SEND_TURN_MAX_ATTACHMENTS - 1 }, (_, index) =>
+          pendingAttachment(`file-${index}.txt`),
+        );
+        const second = [pendingAttachment("last-native.txt"), pendingAttachment("overflow.txt")];
+        yield* stageAttachments(h, [...first, ...second]);
+        yield* h.bot.sendMessage({ botId, text: "First", attachments: first });
+        yield* h.bot.sendMessage({ botId, text: "Second", attachments: second });
+        const detail = yield* h.bot.readBot(new URLSearchParams({ botId }));
+        const [native, overflow] = detail.chat[1]!.attachments!;
+        const overflowPath = resolveAttachmentPath({
+          attachmentsDir: h.attachmentsDir,
+          attachment: overflow!,
+        });
+        yield* h.bot.setPaused({ botId, paused: false });
+        expect(h.packetAttachments[0]).toEqual([...detail.chat[0]!.attachments!, native]);
+        expect(h.packets[0]).toContain(
+          `[attachment: "overflow.txt" (path only: "${overflowPath}")]`,
+        );
+      }),
+    ),
+  );
+
+  it.effect(
+    "holds attachments for the next turn only when the active provider explicitly refuses them",
+    () =>
+      withHarness((h) =>
+        Effect.gen(function* () {
+          const { botId } = yield* h.bot.createBot({ name: "Bot", modelSelection: MODEL });
+          yield* h.bot.sendMessage({ botId, text: "Start." });
+          h.steerDelivery = "steered";
+          const supported = pendingAttachment("steer.png");
+          const deferred = pendingAttachment("later.png");
+          yield* stageAttachments(h, [supported, deferred]);
+          yield* h.bot.sendMessage({ botId, text: "", attachments: [supported] });
+          h.steeringAcceptsAttachments = false;
+          yield* h.bot.sendMessage({ botId, text: "Next turn", attachments: [deferred] });
+          const store = h.runtime.existingStore()!;
+          const chat = yield* store.recentChat(botId, 10);
+          expect(chat[1]?.turnRunId).toBe(h.runs[0]!.runId);
+          expect(h.steeredAttachments).toEqual([chat[1]!.attachments]);
+          expect(yield* store.waitingMessages(botId)).toEqual([chat[2]]);
+          yield* endRun(h, botId, 0, "Done.");
+          expect(h.runs).toHaveLength(2);
+          expect(h.packetAttachments[1]).toEqual(chat[2]?.attachments);
+          expect(yield* store.waitingMessages(botId)).toEqual([]);
+        }),
+      ),
   );
 });
 

@@ -5,7 +5,7 @@
  */
 import * as NodeSqlite from "node:sqlite";
 
-import type { ModelSelection, RuntimeMode } from "@t3tools/contracts";
+import type { ChatAttachment, ModelSelection, RuntimeMode } from "@t3tools/contracts";
 import type { HtmlRenderReference } from "@t3tools/shared/htmlRender";
 
 import * as Context from "effect/Context";
@@ -21,7 +21,7 @@ export interface Bot {
   readonly name: string;
   readonly modelSelection: ModelSelection;
   readonly createdAt: string;
-  /** Its one work thread, launched on its first turn. */
+  /** Its work thread id, possibly reserved before the thread is launched. */
   readonly workThreadId: string | null;
   readonly workProjectId: string | null;
   /** The local day of its last turn; a new day starts a fresh provider session. */
@@ -123,6 +123,7 @@ export interface ChatMessage {
   readonly turnRunId: string | null;
   /** Pages its work thread showed with `html_render`, shown above the text. */
   readonly renders?: ReadonlyArray<HtmlRenderReference>;
+  readonly attachments?: ReadonlyArray<ChatAttachment>;
 }
 
 export interface Turn {
@@ -334,6 +335,7 @@ const MIGRATIONS: ReadonlyArray<string> = [
   `ALTER TABLE chat ADD COLUMN renders TEXT;`,
   `ALTER TABLE bots ADD COLUMN working_since TEXT;
    UPDATE bots SET working_since = (SELECT started_at FROM turns WHERE turns.bot_id = bots.id);`,
+  `ALTER TABLE chat ADD COLUMN attachments TEXT;`,
 ];
 
 type Row = Record<string, NodeSqlite.SQLOutputValue>;
@@ -367,6 +369,9 @@ function toChat(row: Row): ChatMessage {
     ...(row.renders === null || row.renders === undefined
       ? {}
       : { renders: JSON.parse(text(row, "renders")) as ReadonlyArray<HtmlRenderReference> }),
+    ...(row.attachments === null || row.attachments === undefined
+      ? {}
+      : { attachments: JSON.parse(text(row, "attachments")) as ReadonlyArray<ChatAttachment> }),
   };
 }
 
@@ -803,7 +808,7 @@ class BotDatabase {
       );
   }
 
-  setWorkThread(id: string, threadId: string, projectId: string) {
+  setWorkThread(id: string, threadId: string, projectId: string | null) {
     this.db
       .prepare("UPDATE bots SET work_thread_id = ?, work_project_id = ? WHERE id = ?")
       .run(threadId, projectId, id);
@@ -812,8 +817,8 @@ class BotDatabase {
   addChat(message: Omit<ChatMessage, "turnRunId">) {
     this.db
       .prepare(
-        `INSERT INTO chat (id, bot_id, seq, role, text, created_at, renders)
-         VALUES (?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM chat WHERE bot_id = ?), ?, ?, ?, ?)`,
+        `INSERT INTO chat (id, bot_id, seq, role, text, created_at, renders, attachments)
+         VALUES (?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM chat WHERE bot_id = ?), ?, ?, ?, ?, ?)`,
       )
       .run(
         message.id,
@@ -825,6 +830,9 @@ class BotDatabase {
         message.renders === undefined || message.renders.length === 0
           ? null
           : JSON.stringify(message.renders),
+        message.attachments === undefined || message.attachments.length === 0
+          ? null
+          : JSON.stringify(message.attachments),
       );
   }
 

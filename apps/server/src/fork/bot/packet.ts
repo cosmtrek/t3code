@@ -3,11 +3,13 @@
  * earlier session left; within a session, only what changed. Pure, so its shape and caps are
  * tested without a server.
  */
+import { getProviderAttachmentLimitError, type ChatAttachment } from "@t3tools/contracts";
 import {
   collectAssistantCitations,
   expandAssistantCitationsForProvider,
 } from "@t3tools/shared/assistantCitations";
 
+import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { describeSchedule } from "./routines.ts";
 import type { Skill } from "./BotFiles.ts";
 import type { ChatMessage, Item, MemoryNote, OwnedThread, Question, Routine } from "./store.ts";
@@ -48,6 +50,7 @@ export interface PacketInput {
   readonly recentChat: ReadonlyArray<ChatMessage>;
   /** User messages this turn answers, oldest first. */
   readonly newMessages: ReadonlyArray<ChatMessage>;
+  readonly attachmentsDir: string;
   /** What happened since the last turn, oldest first. */
   readonly events: ReadonlyArray<string>;
   /** Set on the first turn of a day: list items untouched for a week. */
@@ -66,14 +69,32 @@ const speaker = (message: ChatMessage) =>
   message.role === "user" ? "the user" : message.role === "bot" ? "you" : "error";
 
 /** Citations expand as they do for a thread turn; only the user's own words are cut. */
-const line = (message: ChatMessage) => {
+const line = (
+  message: ChatMessage,
+  attachmentsDir: string,
+  nativeIds?: ReadonlySet<ChatAttachment["id"]>,
+) => {
   const expanded = expandAssistantCitationsForProvider(message.text);
   const data = expanded.indexOf("\n\n<assistant_citations>");
   const words = data === -1 ? expanded : expanded.slice(0, data);
   const citations = data === -1 ? "" : expanded.slice(data);
   const pages = (message.renders ?? []).map((render) => ` [page shown: ${render.title}]`).join("");
-  return `- ${speaker(message)} (${message.createdAt}):${pages} ${clip(words)}${citations}`;
+  return `- ${speaker(message)} (${message.createdAt}):${pages} ${clip(words)}${attachmentLabels(message.attachments ?? [], attachmentsDir, nativeIds)}${citations}`;
 };
+
+export function attachmentLabels(
+  attachments: ReadonlyArray<ChatAttachment>,
+  attachmentsDir: string,
+  nativeIds?: ReadonlySet<ChatAttachment["id"]>,
+): string {
+  return attachments
+    .map((attachment) => {
+      const path = resolveAttachmentPath({ attachmentsDir, attachment });
+      const delivery = nativeIds?.has(attachment.id) === false ? "path only: " : "";
+      return ` [attachment: ${JSON.stringify(attachment.name)} (${delivery}${path === null ? "path unavailable" : JSON.stringify(path)})]`;
+    })
+    .join("");
+}
 
 /** A message as one line of plain text, its citations as their quoted words and comments. */
 export function chatPreview(text: string): string {
@@ -136,6 +157,7 @@ export type PacketSections = Readonly<
 export interface Packet {
   readonly text: string;
   readonly sections: PacketSections;
+  readonly attachments: ReadonlyArray<ChatAttachment>;
 }
 
 /**
@@ -143,6 +165,19 @@ export interface Packet {
  * a session that holds the earlier turns: changed sections, events, and the new messages.
  */
 export function buildPacket(input: PacketInput, seen: PacketSections | null = null): Packet {
+  const attachments: ChatAttachment[] = [];
+  const nativeIds = new Set<ChatAttachment["id"]>();
+  for (const message of input.newMessages) {
+    for (const attachment of message.attachments ?? []) {
+      if (
+        nativeIds.has(attachment.id) ||
+        getProviderAttachmentLimitError([...attachments, attachment])
+      )
+        continue;
+      attachments.push(attachment);
+      nativeIds.add(attachment.id);
+    }
+  }
   const role = input.role.trim();
   const recent = input.recentChat
     .slice(-RECENT_CHAT_LIMIT)
@@ -247,7 +282,13 @@ export function buildPacket(input: PacketInput, seen: PacketSections | null = nu
         ]
       : []),
     // A continuing session already holds the chat; only a fresh one needs it back.
-    ...(fresh && recent.length > 0 ? ["", "Recent chat with the user:", ...recent.map(line)] : []),
+    ...(fresh && recent.length > 0
+      ? [
+          "",
+          "Recent chat with the user:",
+          ...recent.map((message) => line(message, input.attachmentsDir)),
+        ]
+      : []),
     ...(events.length > 0
       ? [
           "",
@@ -257,8 +298,12 @@ export function buildPacket(input: PacketInput, seen: PacketSections | null = nu
         ]
       : []),
     ...(input.newMessages.length > 0
-      ? ["", "New from the user:", ...input.newMessages.map(line)]
+      ? [
+          "",
+          "New from the user:",
+          ...input.newMessages.map((message) => line(message, input.attachmentsDir, nativeIds)),
+        ]
       : []),
   ].join("\n");
-  return { text, sections };
+  return { text, sections, attachments };
 }

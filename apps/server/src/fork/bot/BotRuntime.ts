@@ -121,7 +121,8 @@ const make = Effect.gen(function* () {
   }).pipe(Effect.mapError((cause) => new BotRuntimeError({ cause })));
   const workThreads = new Map<string, string>();
   for (const bot of restored.bots) {
-    if (bot.workThreadId !== null) workThreads.set(bot.workThreadId, bot.id);
+    if (bot.workThreadId !== null && bot.workProjectId !== null)
+      workThreads.set(bot.workThreadId, bot.id);
   }
   const ownedThreads = new Map(
     restored.threads.map((thread) => [thread.threadId, thread.botId] as const),
