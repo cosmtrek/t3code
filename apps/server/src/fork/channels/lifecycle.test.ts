@@ -407,7 +407,21 @@ describe("HTTP transport boundaries", () => {
         ),
       ).toThrow(`The adapter answered with ${size + 1} bytes, more than allowed.`);
       expect(cancelled).toBe(true);
-      _fetch.mockResolvedValue(new Response(new Uint8Array(size + 1)));
+      // Keep the actual byte count without copying a full-size buffer into the Response.
+      const chunk = new Uint8Array(1024 * 1024);
+      let remaining = size + 1;
+      _fetch.mockResolvedValue(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              const length = Math.min(remaining, chunk.byteLength);
+              controller.enqueue(chunk.subarray(0, length));
+              remaining -= length;
+              if (remaining === 0) controller.close();
+            },
+          }),
+        ),
+      );
       expect(
         thrown(
           yield* transport.request({ method: "GET", path: "/media", token: null, media }).pipe(
