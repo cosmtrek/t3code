@@ -93,7 +93,10 @@ function setup(count = 0) {
 it("toggles whole headers and keeps their action buttons independent", async () => {
   setup();
   await using screen = await render(
-    <ForkSidebarGroups bots={[{ environmentId, label: "Remote machine", bots: [bot] }]} />,
+    <ForkSidebarGroups
+      bots={[{ environmentId, label: "Remote machine", bots: [bot] }]}
+      projectScope={[]}
+    />,
   );
   const bots = screen.getByRole("button", { name: /^Bots/ });
   await bots.click();
@@ -116,7 +119,7 @@ it.each([0, 1, SIDEBAR_INBOX_ROWS, SIDEBAR_INBOX_ROWS + 1])(
   "offers the complete inbox at the correct boundary: %s",
   async (count) => {
     setup(count);
-    await using screen = await render(<ForkSidebarGroups bots={[]} />);
+    await using screen = await render(<ForkSidebarGroups bots={[]} projectScope={[]} />);
     const footer = screen.getByRole("button", {
       name: count === 0 ? "All conversations" : "1 more",
       exact: true,
@@ -145,6 +148,7 @@ it("reveals full bot context on hover even when its provider is unavailable", as
           bots: [{ ...bot, lastMessage: { ...bot.lastMessage!, text }, paused: true }],
         },
       ]}
+      projectScope={[]}
     />,
   );
   const row = screen.getByRole("button", { name: /Release watcher/ });
@@ -189,7 +193,10 @@ it("resolves the provider within the bot's environment and keeps its icon beside
     ]),
   );
   await using screen = await render(
-    <ForkSidebarGroups bots={[{ environmentId, label: "Remote machine", bots: [bot] }]} />,
+    <ForkSidebarGroups
+      bots={[{ environmentId, label: "Remote machine", bots: [bot] }]}
+      projectScope={[]}
+    />,
   );
   const row = screen.getByRole("button", { name: /Release watcher/ });
   expect(row.element().querySelector("[data-provider-accent-color]")).not.toBeNull();
@@ -216,6 +223,7 @@ it.each([
   await using screen = await render(
     <ForkSidebarGroups
       bots={[{ environmentId, label: "Hidden environment prefix", bots: [{ ...bot, ...changes }] }]}
+      projectScope={[]}
     />,
   );
   const preview = screen.getByText(
@@ -236,4 +244,28 @@ it.each([
     await expect
       .element(screen.getByText("Release watcher", { exact: true }))
       .toHaveClass("text-muted-foreground");
+});
+
+it("narrows bots and inbox to the environments of the chosen projects", async () => {
+  setup(1);
+  const other = EnvironmentId.make("other-environment");
+  const listings = [
+    { environmentId, label: "Remote machine", bots: [bot] },
+    {
+      environmentId: other,
+      label: "Other machine",
+      bots: [{ ...bot, id: "other", name: "Other bot" }],
+    },
+  ];
+  await using screen = await render(
+    <ForkSidebarGroups
+      bots={listings}
+      projectScope={[{ memberProjectRefs: [{ environmentId: other }] }]}
+    />,
+  );
+  await expect.element(screen.getByRole("button", { name: /Other bot/ })).toBeVisible();
+  await expect
+    .element(screen.getByRole("button", { name: /Release watcher/ }))
+    .not.toBeInTheDocument();
+  await expect.element(screen.getByRole("button", { name: /^Inbox/ })).not.toBeInTheDocument();
 });

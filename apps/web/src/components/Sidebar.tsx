@@ -3345,7 +3345,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         }
       >
         <SidebarGroup className="flex-1" role="presentation">
-          {isSearchingThreads ? null : <ForkSidebarGroups bots={botListings} />}
+          {isSearchingThreads ? null : (
+            <ForkSidebarGroups bots={botListings} projectScope={chosenProjectGroups} />
+          )}
           {isSearchingThreads ? (
             threadSearchResults.length > 0 ? (
               <DndContext

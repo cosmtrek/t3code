@@ -350,6 +350,10 @@ export function HomeScreen(props: HomeScreenProps) {
     pickableProjectGroups(projectScopes),
     v2ProjectScopeKey,
   );
+  const botEnvironmentIds =
+    props.selectedEnvironmentId !== null
+      ? [props.selectedEnvironmentId]
+      : (v2ScopedProjectGroup?.projectRefs.map((projectRef) => projectRef.environmentId) ?? null);
   const threadSearch = useThreadSearch(
     searchEnvironmentIds,
     props.searchQuery,
@@ -705,7 +709,7 @@ export function HomeScreen(props: HomeScreenProps) {
           onProjectChange={props.onProjectChange}
         />
       ) : null}
-      <ForkBotsGroup searching={hasSearchQuery} />
+      <ForkBotsGroup searching={hasSearchQuery} environmentIds={botEnvironmentIds} />
     </>
   );
 
@@ -754,7 +758,7 @@ export function HomeScreen(props: HomeScreenProps) {
     return (
       <ScreenContent surface="screen">
         {listHeader}
-        <ForkBotsGroup searching={hasSearchQuery} />
+        <ForkBotsGroup searching={hasSearchQuery} environmentIds={botEnvironmentIds} />
         <View
           className="flex-1 items-center justify-center px-4"
           style={{ paddingBottom: insets.bottom }}

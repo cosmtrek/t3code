@@ -233,7 +233,7 @@ const LEGACY_MENU_ACTIONS: MenuAction[] = [
   },
 ];
 
-export function ThreadListV2Section(props: {
+function ThreadListV2Section(props: {
   readonly label: string;
   readonly pane?: "screen" | "sidebar";
   readonly tone?: "default" | "snoozed";

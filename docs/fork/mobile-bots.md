@@ -53,18 +53,20 @@ their own.
 
 The group follows the desktop group's rules, built from the mobile app's own parts.
 
-- **Header.** "Bots", with no count, like the list's other shelf headers. Tapping it collapses the
-  group, and the choice is remembered on the device. When no environment has a bot, there is no
-  group.
-- **Rows.** Each bot gets one row, built from the thread row's parts:
-  - `getThreadListV2RowAppearance` and `THREAD_LIST_V2_ROW_CONTENT_CLASS_NAME` for spacing,
-    dividers, and colors, so Android gets its own row look without a platform branch;
-  - the section header `ThreadListV2Section` for the group header, exported for this.
-
-  The bot's initial fills a two-line avatar. Line 1 is the name and one status; line 2 is the last
-  message and the bot's provider icon, as on desktop. The environment name stays out of the row
-  (host names are long and would hide the message); screen readers still hear it. Rows have no
-  swipe actions.
+- **Header.** "Bots" and a collapse chevron, with no count and no rule: the card below already
+  groups the rows, as the grouped lists in Settings do. Tapping it collapses the group, and the
+  choice is remembered on the device. The group follows the list's environment filter (a project
+  filter narrows it to that project's environments); when no environment in view has a bot, there
+  is no group.
+- **Card.** The rows sit on a `grouped-card` surface with the Settings group radius, so the threads
+  below do not read as part of the group. The list itself is already a raised sheet; the card is
+  one step off it in every theme, including Absolutely, whose dark card is darker than its sheet.
+  Rows paint the card color rather than the screen color; Android rows are rounded blocks inside
+  the card, iOS rows run edge to edge with dividers.
+- **Rows.** The bot's initial fills a two-line avatar in the theme's primary tint. Line 1 is the
+  name and one status; line 2 is the last message and the bot's provider icon, as on desktop. The
+  environment name stays out of the row (host names are long and would hide the message); screen
+  readers still hear it. Rows have no swipe actions.
 
 - **Status.** The status is the most pressing of these:
   1. a waiting question (Input);

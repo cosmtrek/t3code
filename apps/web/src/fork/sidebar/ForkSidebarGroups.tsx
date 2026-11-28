@@ -99,13 +99,49 @@ const DOT_ORDER: ReadonlyArray<GroupDot> = ["attention", "failed", "unread", "wo
 const BOTS_COLLAPSED_KEY = "t3code:fork-sidebar-bots-collapsed";
 const INBOX_COLLAPSED_KEY = "t3code:fork-sidebar-inbox-collapsed";
 
-/** Bots and the inbox's waiting conversations, pinned above the projects. */
-export function ForkSidebarGroups({ bots }: { readonly bots: ReadonlyArray<EnvironmentBots> }) {
+/**
+ * Bots and the inbox's waiting conversations, pinned above the projects. Both belong to an
+ * environment, so a project scope narrows them to its projects' environments.
+ */
+export function ForkSidebarGroups({
+  bots,
+  projectScope,
+}: {
+  readonly bots: ReadonlyArray<EnvironmentBots>;
+  readonly projectScope: ReadonlyArray<{
+    readonly memberProjectRefs: ReadonlyArray<{ readonly environmentId: EnvironmentId }>;
+  }>;
+}) {
+  const inScope = scopeFilter(projectScope);
+  const shownBots = bots.filter((listing) => inScope(listing.environmentId));
   return (
     <ul role="presentation" className="mb-2 flex flex-col">
-      {bots.length > 0 ? <BotsGroup listings={bots} /> : null}
-      <InboxGroup />
+      {shownBots.length > 0 ? <BotsGroup listings={shownBots} /> : null}
+      <InboxGroup inScope={inScope} />
     </ul>
+  );
+}
+
+function scopeFilter(
+  projectScope: ReadonlyArray<{
+    readonly memberProjectRefs: ReadonlyArray<{ readonly environmentId: EnvironmentId }>;
+  }>,
+): (environmentId: EnvironmentId) => boolean {
+  if (projectScope.length === 0) return () => true;
+  const environments = new Set(
+    projectScope.flatMap((project) => project.memberProjectRefs.map((ref) => ref.environmentId)),
+  );
+  return (environmentId) => environments.has(environmentId);
+}
+
+/** The group's rows on a raised panel, so the threads below do not read as part of it. */
+function GroupPanel({ children }: { readonly children: ReactNode }) {
+  return (
+    <li className="mt-0.5 list-none">
+      <ul role="presentation" className="flex flex-col rounded-lg bg-sidebar-control-surface p-0.5">
+        {children}
+      </ul>
+    </li>
   );
 }
 
@@ -431,9 +467,9 @@ function BotsGroup({ listings }: { readonly listings: ReadonlyArray<EnvironmentB
         onToggle={() => setCollapsed((value) => !value)}
         action={newBot}
       />
-      {collapsed
-        ? null
-        : rows.map(({ listing, bot, status }) => (
+      {collapsed ? null : (
+        <GroupPanel>
+          {rows.map(({ listing, bot, status }) => (
             <BotRow
               key={`${listing.environmentId}:${bot.id}`}
               listing={listing}
@@ -448,6 +484,8 @@ function BotsGroup({ listings }: { readonly listings: ReadonlyArray<EnvironmentB
               onClick={() => open(listing.environmentId, bot.id)}
             />
           ))}
+        </GroupPanel>
+      )}
       {creatingIn === null ? null : (
         <CreateBotDialog
           environmentId={creatingIn}
@@ -516,10 +554,10 @@ function useBlockedThreads(): ReadonlyMap<EnvironmentId, ReadonlySet<string>> {
   return blocked;
 }
 
-function InboxGroup() {
+function InboxGroup({ inScope }: { readonly inScope: (environmentId: EnvironmentId) => boolean }) {
   const navigate = useNavigate();
   const closeMobile = useCloseMobileSidebar();
-  const inboxes = useInboxOverviews();
+  const inboxes = useInboxOverviews().filter((inbox) => inScope(inbox.environmentId));
   const blocked = useBlockedThreads();
   const now = minuteToMs(useNowMinute());
   const [collapsed, setCollapsed] = useLocalStorage(INBOX_COLLAPSED_KEY, false, Schema.Boolean);
@@ -562,7 +600,7 @@ function InboxGroup() {
         onToggle={() => setCollapsed((value) => !value)}
       />
       {collapsed ? null : (
-        <>
+        <GroupPanel>
           {shown.map((item) => (
             <GroupRow
               key={`${item.environmentId}:${item.channelId}:${item.conversation.id}`}
@@ -607,7 +645,7 @@ function InboxGroup() {
               </button>
             </li>
           ) : null}
-        </>
+        </GroupPanel>
       )}
     </>
   );

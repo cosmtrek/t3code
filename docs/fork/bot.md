@@ -95,7 +95,9 @@ The notebook stays small, because every turn reads it:
 ## Talking to a bot
 
 Each bot has its own page, opened from its row in the sidebar's Bots group, pinned above the
-projects; it is not a place in the inbox.
+projects on a panel of its own; it is not a place in the inbox. A bot belongs to an environment, so
+a project scope in the sidebar shows only the bots (and inbox conversations) of its projects'
+environments.
 A bot spans projects and works for users with no chat adapter at all; the inbox stays a mirror of
 the chat app. Where the user talks to a bot and what the bot can read are separate: any bot can
 read any conversation of the chat channel through the service, whatever page the user is on.

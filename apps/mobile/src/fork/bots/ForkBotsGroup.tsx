@@ -10,7 +10,7 @@ import { plainPreview } from "@t3tools/fork-client/text";
 import { useNavigationState } from "@react-navigation/native";
 import { useMessages } from "gt-react-native";
 import { useSyncExternalStore } from "react";
-import { View } from "react-native";
+import { Platform, Pressable, View, type ViewStyle } from "react-native";
 
 import { ProviderInstanceIcon } from "../../components/ProviderIcon";
 import { RelativeTime } from "../../components/RelativeTime";
@@ -19,12 +19,8 @@ import { AppText as Text } from "../../components/ui/AppText";
 import { usePaneRole } from "../../components/ui/Pane";
 import { RowPressable } from "../../components/ui/RowPressable";
 import { useSelectWorkspaceDetail } from "../../features/layout/workspace/useSelectWorkspaceDetail";
+import { STATUS_LABEL_BY_STATUS } from "../../features/threads/thread-list-v2-items";
 import {
-  STATUS_LABEL_BY_STATUS,
-  ThreadListV2Section,
-} from "../../features/threads/thread-list-v2-items";
-import {
-  THREAD_LIST_V2_ROW_CONTENT_CLASS_NAME,
   THREAD_LIST_V2_ROW_DIVIDERS,
   getThreadListV2RowAppearance,
   selectedThreadRowColors,
@@ -34,6 +30,7 @@ import {
   type ThreadListV2Status,
 } from "../../features/threads/threadListV2";
 import { cn } from "../../lib/cn";
+import { MOBILE_SHAPE } from "../../lib/designTokens";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import { useEnvironmentServerConfig } from "../../state/entities";
 import { steadyNavigationThreadShellsAtom } from "../../state/threads";
@@ -58,12 +55,25 @@ const subscribeCollapsed = (listener: () => void) =>
   subscribeForkPreference(COLLAPSED_KEY, listener);
 const readCollapsed = () => readForkPreference(COLLAPSED_KEY) === true;
 
+const CARD_RADIUS = Platform.OS === "android" ? MOBILE_SHAPE.group.android : MOBILE_SHAPE.group.ios;
+/** Android rows are rounded blocks inside the card; iOS rows run edge to edge with dividers. */
+const ROW_RADIUS = Platform.OS === "android" ? 20 : 0;
+
 /**
- * The bots of every connected environment, pinned above the thread list as on desktop. It hides
- * while the user searches the list, and is absent when no environment has a bot.
+ * The bots of every connected environment, pinned above the thread list in a card of their own,
+ * so the threads below do not read as part of the group. It follows the list's environment
+ * filter (null shows every environment), hides while the user searches, and is absent when no
+ * environment in view has a bot.
  */
-export function ForkBotsGroup(props: { readonly searching: boolean }) {
-  const listings = useBotListings();
+export function ForkBotsGroup(props: {
+  readonly searching: boolean;
+  readonly environmentIds: ReadonlyArray<EnvironmentId> | null;
+}) {
+  const allListings = useBotListings();
+  const listings =
+    props.environmentIds === null
+      ? allListings
+      : allListings.filter((listing) => props.environmentIds?.includes(listing.environmentId));
   const pane = usePaneRole() === "sidebar" ? "sidebar" : "screen";
   const collapsed = useSyncExternalStore(subscribeCollapsed, readCollapsed);
   const blocked = useBlockedWorkThreads(listings);
@@ -89,21 +99,47 @@ export function ForkBotsGroup(props: { readonly searching: boolean }) {
   const toggle = () => {
     writeForkPreference(COLLAPSED_KEY, !readCollapsed());
   };
+  const sidebarPane = pane === "sidebar";
   return (
     <View>
-      <ThreadListV2Section
-        label="Bots"
-        pane={pane}
-        disclosure={{
-          expanded: !collapsed,
-          onToggle: toggle,
-          accessibilityLabel: rows.length === 1 ? "1 bot" : `${rows.length} bots`,
-          accessibilityHint: collapsed ? "Expands the bots." : "Collapses the bots.",
-        }}
-      />
-      {collapsed
-        ? null
-        : rows.map(({ listing, bot, status }, index) => (
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={rows.length === 1 ? "Bots, 1 bot" : `Bots, ${rows.length} bots`}
+        accessibilityHint={collapsed ? "Expands the bots." : "Collapses the bots."}
+        accessibilityState={{ expanded: !collapsed }}
+        className={cn("mb-1.5 mt-4 flex-row items-center gap-1.5", sidebarPane ? "px-3" : "px-5")}
+        hitSlop={8}
+        onPress={toggle}
+      >
+        <Text
+          className={cn(
+            "text-xs font-t3-medium",
+            sidebarPane ? "text-drawer-foreground-muted" : "text-foreground-tertiary",
+          )}
+        >
+          Bots
+        </Text>
+        <SymbolView
+          name="chevron.down"
+          size={10}
+          tintColorClassName={
+            sidebarPane ? "accent-drawer-foreground-muted" : "accent-foreground-muted"
+          }
+          type="monochrome"
+          weight="semibold"
+          style={collapsed ? { transform: [{ rotate: "-90deg" }] } : undefined}
+        />
+      </Pressable>
+      {collapsed ? null : (
+        <View
+          className={cn(
+            "mb-3 overflow-hidden border-continuous bg-grouped-card",
+            sidebarPane ? "mx-2" : "mx-3",
+            Platform.OS === "android" && "p-1",
+          )}
+          style={{ borderRadius: CARD_RADIUS }}
+        >
+          {rows.map(({ listing, bot, status }, index) => (
             <BotRow
               key={`${listing.environmentId}:${bot.id}`}
               listing={listing}
@@ -115,6 +151,8 @@ export function ForkBotsGroup(props: { readonly searching: boolean }) {
               showTrailingDivider={index < rows.length - 1}
             />
           ))}
+        </View>
+      )}
     </View>
   );
 }
@@ -167,6 +205,8 @@ function BotRow(props: {
   const appearance = getThreadListV2RowAppearance(theme, sidebarPane, props.selected);
   const { bot, status, selected } = props;
   const provider = useBotProvider(props.listing.environmentId, bot);
+  const surfaceColor = selected ? theme["--color-thread-selected"] : theme["--color-grouped-card"];
+  const rowStyle: ViewStyle = { backgroundColor: surfaceColor, borderRadius: ROW_RADIUS };
   const recede = !selected && status.kind === "working";
   const preview = bot.lastMessage
     ? `${bot.lastMessage.role === "user" ? "You: " : ""}${plainPreview(bot.lastMessage.text)}`
@@ -234,7 +274,7 @@ function BotRow(props: {
               displayName={provider.displayName}
               accentColor={provider.accentColor}
               showBadge={provider.showBadge}
-              surfaceColor={appearance.providerIconSurfaceColor}
+              surfaceColor={surfaceColor}
             />
           ) : null}
         </View>
@@ -244,8 +284,8 @@ function BotRow(props: {
 
   return (
     <View
-      className={status.kind === "paused" ? "opacity-60" : undefined}
-      style={appearance.swipeContainerStyle}
+      className={cn("overflow-hidden", status.kind === "paused" && "opacity-60")}
+      style={{ borderRadius: ROW_RADIUS }}
     >
       <RowPressable
         accessibilityRole="button"
@@ -253,10 +293,9 @@ function BotRow(props: {
           .filter(Boolean)
           .join(", ")}
         accessibilityState={{ selected }}
-        className={appearance.className}
         interactionClassName={appearance.interactionClassName}
         interactionOpacity={appearance.interactionOpacity}
-        style={appearance.cardStyle}
+        style={rowStyle}
         onPress={() =>
           selectDetail({
             name: "Bot",
@@ -264,16 +303,10 @@ function BotRow(props: {
           })
         }
       >
-        {sidebarPane ? (
-          content
-        ) : (
-          <View>
-            <View className={THREAD_LIST_V2_ROW_CONTENT_CLASS_NAME}>{content}</View>
-            {THREAD_LIST_V2_ROW_DIVIDERS && props.showTrailingDivider ? (
-              <View className="ml-5 h-px bg-border-subtle" />
-            ) : null}
-          </View>
-        )}
+        <View className={Platform.OS === "android" ? "px-3 py-2.5" : "px-4 py-2.5"}>{content}</View>
+        {THREAD_LIST_V2_ROW_DIVIDERS && props.showTrailingDivider ? (
+          <View className="ml-16 h-px bg-border-subtle" />
+        ) : null}
       </RowPressable>
     </View>
   );
