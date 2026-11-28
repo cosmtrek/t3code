@@ -185,8 +185,15 @@ both as release `vX.Y.Z-r.N` with a `SHA256SUMS` file, the layout `t3 update` ex
 previous `-r.N` release, matched by patch-id so a rebase onto a new upstream tag does not relist
 them. `(fork)`-scoped commits are left out, so keep that scope for fork-only docs and CI.
 
+`scripts/t3fork` wraps the release and the local switch below. `t3fork release` checks that local
+`r/main` matches origin, picks the next `X.Y.Z-r.N` (and, with `--android`, the next mobile patch
+version), and starts the workflows; `--dry-run` prints the plan, `--watch` waits for the runs.
+`t3fork upgrade [version]` switches this machine's service to a fork release (latest by default) in
+a detached unit, because the restart ends the session that started it; `t3fork status` checks it.
+
 ```bash
-gh workflow run fork-cli-release.yml -R cosmtrek/t3code --ref r/main -f version=0.1.9-r.1
+scripts/t3fork release --android --dry-run
+gh workflow run fork-cli-release.yml -R cosmtrek/t3code --ref r/main -f version=0.1.9-r.1  # by hand
 gh run watch -R cosmtrek/t3code
 ```
 
