@@ -1,4 +1,10 @@
 import { useAtomValue } from "@effect/atom-react";
+import {
+  normalizeProviderAccentColor,
+  resolveProviderInstanceDisplayName,
+  shouldShowInstanceBadge,
+} from "@t3tools/client-runtime/state/provider-instance-display";
+import type { EnvironmentId } from "@t3tools/contracts";
 import { botRowStatus, type BotRowStatus, type BotSummary } from "@t3tools/fork-client/bots";
 import { plainPreview } from "@t3tools/fork-client/text";
 import { useNavigationState } from "@react-navigation/native";
@@ -6,6 +12,7 @@ import { useMessages } from "gt-react-native";
 import { useSyncExternalStore } from "react";
 import { View } from "react-native";
 
+import { ProviderInstanceIcon } from "../../components/ProviderIcon";
 import { RelativeTime } from "../../components/RelativeTime";
 import { SymbolView } from "../../components/ui/AppSymbol";
 import { AppText as Text } from "../../components/ui/AppText";
@@ -28,6 +35,7 @@ import {
 } from "../../features/threads/threadListV2";
 import { cn } from "../../lib/cn";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
+import { useEnvironmentServerConfig } from "../../state/entities";
 import { steadyNavigationThreadShellsAtom } from "../../state/threads";
 import {
   readForkPreference,
@@ -158,6 +166,7 @@ function BotRow(props: {
   const sidebarPane = props.pane === "sidebar";
   const appearance = getThreadListV2RowAppearance(theme, sidebarPane, props.selected);
   const { bot, status, selected } = props;
+  const provider = useBotProvider(props.listing.environmentId, bot);
   const recede = !selected && status.kind === "working";
   const preview = bot.lastMessage
     ? `${bot.lastMessage.role === "user" ? "You: " : ""}${plainPreview(bot.lastMessage.text)}`
@@ -170,46 +179,61 @@ function BotRow(props: {
     : appearance.mutedForegroundClassName;
 
   const content = (
-    <View>
-      <View className="flex-row items-center gap-2.5">
-        <View className="size-5 items-center justify-center rounded-full bg-subtle">
-          <Text className={cn("text-[11px] font-t3-bold", muted)}>
-            {bot.name.slice(0, 1).toUpperCase()}
-          </Text>
-        </View>
-        <Text
-          className={cn(
-            "flex-1 text-base",
-            !recede && "font-t3-medium",
-            foreground,
-            recede && "opacity-55",
-          )}
-          numberOfLines={1}
-        >
-          {bot.name}
+    <View className="flex-row items-center gap-3">
+      <View className="size-9 items-center justify-center rounded-full bg-subtle">
+        <Text className={cn("text-sm font-t3-bold", muted)}>
+          {bot.name.slice(0, 1).toUpperCase()}
         </Text>
-        <BotStatus
-          status={status}
-          selected={selected}
-          tertiary={appearance.tertiaryForegroundClassName}
-        />
       </View>
-      <Text
-        className={cn(
-          "mt-1 pl-[30px] text-sm",
-          bot.lastMessage === null
-            ? muted
-            : bot.lastMessage.role === "error"
-              ? "text-danger-foreground"
-              : status.kind === "question" || status.kind === "unread"
-                ? foreground
-                : muted,
-          bot.lastMessage === null && "italic",
-        )}
-        numberOfLines={1}
-      >
-        {props.environmentLabel ? `${props.environmentLabel} · ${preview}` : preview}
-      </Text>
+      <View className="min-w-0 flex-1">
+        <View className="flex-row items-center gap-2">
+          <Text
+            className={cn(
+              "flex-1 text-base",
+              !recede && "font-t3-medium",
+              foreground,
+              recede && "opacity-55",
+            )}
+            numberOfLines={1}
+          >
+            {bot.name}
+          </Text>
+          <BotStatus
+            status={status}
+            selected={selected}
+            tertiary={appearance.tertiaryForegroundClassName}
+          />
+        </View>
+        <View className="mt-0.5 flex-row items-center gap-2">
+          <Text
+            className={cn(
+              "flex-1 text-sm",
+              bot.lastMessage === null
+                ? muted
+                : bot.lastMessage.role === "error"
+                  ? "text-danger-foreground"
+                  : status.kind === "question" || status.kind === "unread"
+                    ? foreground
+                    : muted,
+              bot.lastMessage === null && "italic",
+            )}
+            numberOfLines={1}
+          >
+            {preview}
+          </Text>
+          {provider ? (
+            <ProviderInstanceIcon
+              iconUrl={provider.iconUrl}
+              provider={provider.driverKind}
+              size={14}
+              displayName={provider.displayName}
+              accentColor={provider.accentColor}
+              showBadge={provider.showBadge}
+              surfaceColor={appearance.providerIconSurfaceColor}
+            />
+          ) : null}
+        </View>
+      </View>
     </View>
   );
 
@@ -248,6 +272,28 @@ function BotRow(props: {
       </RowPressable>
     </View>
   );
+}
+
+/** The bot's provider instance, shown beside its preview as on desktop. */
+function useBotProvider(environmentId: EnvironmentId, bot: BotSummary) {
+  const providers = useEnvironmentServerConfig(environmentId)?.providers ?? [];
+  const snapshot = providers.find(
+    (candidate) => candidate.instanceId === bot.modelSelection.instanceId,
+  );
+  if (!snapshot) return null;
+  const entry = {
+    driverKind: snapshot.driver,
+    displayName: resolveProviderInstanceDisplayName(snapshot),
+    accentColor: normalizeProviderAccentColor(snapshot.accentColor),
+    iconUrl: snapshot.iconUrl,
+  };
+  return {
+    ...entry,
+    showBadge: shouldShowInstanceBadge(
+      { ...entry, enabled: snapshot.enabled },
+      providers.map((candidate) => ({ driverKind: candidate.driver, enabled: candidate.enabled })),
+    ),
+  };
 }
 
 /** The status's words; Working, the blocked statuses and Input are the thread list's own. */

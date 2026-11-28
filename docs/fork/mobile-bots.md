@@ -61,8 +61,10 @@ The group follows the desktop group's rules, built from the mobile app's own par
     dividers, and colors, so Android gets its own row look without a platform branch;
   - the section header `ThreadListV2Section` for the group header, exported for this.
 
-  Line 1 is the name and one status. Line 2 is the last message, prefixed by the environment name
-  when more than one environment has bots. Rows have no swipe actions.
+  The bot's initial fills a two-line avatar. Line 1 is the name and one status; line 2 is the last
+  message and the bot's provider icon, as on desktop. The environment name stays out of the row
+  (host names are long and would hide the message); screen readers still hear it. Rows have no
+  swipe actions.
 
 - **Status.** The status is the most pressing of these:
   1. a waiting question (Input);
