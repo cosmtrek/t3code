@@ -112,6 +112,9 @@ read any conversation of the chat channel through the service, whatever page the
   reply.
 - The user can write while a turn runs. The message joins that turn instead of waiting for it to
   end.
+- A message can carry images and files (planned, see
+  [Attachments](./bot-architecture.md#attachments-planned)), as a thread message can. The bot sees
+  the images and can read every file again on a later day.
 - The chat is a log, not the bot's memory. A turn sees the recent messages plus the notebook.
 
 Bots and the inbox connect so each signal still has one place:

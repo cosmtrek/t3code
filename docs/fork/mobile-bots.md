@@ -120,7 +120,8 @@ The screen's parts:
 - **Working.** While the bot works, a row shows its current step and opens that thread when
   tapped.
 - **Paused.** A paused bot shows a notice above the composer with a Resume button.
-- **Composer.** Built on `ComposerSurface`, without the model and attachment controls. The user can
+- **Composer.** Built on `ComposerSurface`, without the model controls. Attachments are planned;
+  see [Attachments](#attachments-planned). The user can
   write while a turn runs, as on desktop. Drafts are kept per bot on the device.
 - **Seen.** Opening the screen marks the bot's posts seen, the same call the desktop page makes.
 
@@ -148,6 +149,47 @@ Native has no `EventSource`, so the mobile client reads the stream with a small 
 `XMLHttpRequest`, without adding a dependency. It refetches on bot events, on reconnect, and when
 the app returns to the foreground, since the stream does not survive the background. A slow poll
 keeps the work thread's state current, as on desktop.
+
+### Attachments (planned)
+
+Status: designed, not built. It needs the server step of
+[Attachments](./bot-architecture.md#attachments-planned) first.
+
+```text
+┌ Release Watcher ─────────────────┐
+│  …chat…                           │
+│              ┌──────┐ ┌──────┐    │  ← user message: image grid
+│              │ img  │ │ img  │    │
+│              └──────┘ └──────┘    │
+│              📄 crash.log · 12 KB  │  ← file chip, opens AttachmentFileScreen
+├───────────────────────────────────┤
+│ [img ×][img ×][📄 log ×]           │  ← ComposerAttachmentStrip: progress, failure
+│ ＋  Message Release Watcher    ⬆  │
+└───────────────────────────────────┘
+   ＋ → Photo library / Camera / File / Paste image
+```
+
+- **Composer.** The thread composer's attachment parts, not new ones: `ComposerAttachmentStrip`,
+  `useComposerAttachmentActions` (library, camera, files, clipboard), and
+  `composerAttachmentUploadQueue`. Their state is keyed by draft key; the bot's draft key starts
+  with its environment id (`<environmentId>:bot:<botId>`) so `composerDraftEnvironmentId` resolves
+  the upload's environment. Check that before building; if the draft store needs more, the change
+  belongs in a seam, not a copy.
+- **Where the button goes.** `IssueCommentComposer` gets an optional attachment slot (the ＋
+  button and the strip), the same kind of seam as its optional `copy`. If the attachment hooks
+  turn out to be bound to a thread's composer state, the bot screen composes its own small
+  composer from `ComposerSurface` and these parts instead. Decide when building, and record which.
+- **Sending.** A message with only attachments can be sent. The send waits for uploads to finish,
+  as the thread composer does; a failed upload keeps the draft.
+- **Messages.** User messages show the thread feed's image tiles and file chips. Images open the
+  shared file preview (`FilePreviewSession`), files open `AttachmentFileScreen`.
+- **Share to a bot (optional, after the above).** `IncomingShareProvider` already imports shares
+  from other apps. Bots become share targets ("Send to Release Watcher"), so a screenshot or log
+  reaches a bot in two taps, the most common reason to message a bot from a phone.
+
+Verify on the Android emulator against dev state: pick from the library, take a photo, attach a
+file, send attachments only, a failed upload, open an image and a file from the chat. Screenshot
+each, and record one video of the flow.
 
 ## Code
 
@@ -181,16 +223,16 @@ Two more constraints apply to mobile code:
 These are the upstream files touched. They go in one `fork(mobile-bots): wire seams` commit and are
 added to the seam check.
 
-| File                                                  | Change                                                 |
-| ----------------------------------------------------- | ------------------------------------------------------ |
-| `apps/mobile/src/features/home/HomeScreen.tsx`        | `<ForkBotsGroup />` in `v2ListHeader`                  |
-| `apps/mobile/src/features/home/HomeRouteScreen.tsx`   | Bot work threads left out of `threads`                 |
-| `apps/mobile/src/Stack.tsx`                           | `Bot` route, `bots/:environmentId/:botId`              |
-| `.../layout/workspace/workspace-detail-selection.ts`  | `Bot` in `WorkspaceDetail` and `IDENTITY`              |
-| `.../threads/thread-list-v2-items.tsx`                | Export `ThreadListV2Section`, `STATUS_LABEL_BY_STATUS` |
-| `.../issues/IssueCommentComposer.tsx`                 | Optional `copy`, so the bot composer reuses it         |
-| `apps/mobile/src/lib/android-workspace-navigation.ts` | `Bot` swaps the detail pane without a push             |
-| `vite.config.ts`                                      | Copy lint exception and theme allowance for fork files |
+| File                                                  | Change                                                                               |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `apps/mobile/src/features/home/HomeScreen.tsx`        | `<ForkBotsGroup />` in `v2ListHeader`                                                |
+| `apps/mobile/src/features/home/HomeRouteScreen.tsx`   | Bot work threads left out of `threads`                                               |
+| `apps/mobile/src/Stack.tsx`                           | `Bot` route, `bots/:environmentId/:botId`                                            |
+| `.../layout/workspace/workspace-detail-selection.ts`  | `Bot` in `WorkspaceDetail` and `IDENTITY`                                            |
+| `.../threads/thread-list-v2-items.tsx`                | Export `ThreadListV2Section`, `STATUS_LABEL_BY_STATUS`                               |
+| `.../issues/IssueCommentComposer.tsx`                 | Optional `copy`, so the bot composer reuses it; planned: an optional attachment slot |
+| `apps/mobile/src/lib/android-workspace-navigation.ts` | `Bot` swaps the detail pane without a push                                           |
+| `vite.config.ts`                                      | Copy lint exception and theme allowance for fork files                               |
 
 ## Build order
 
@@ -201,6 +243,7 @@ added to the seam check.
 4. The bot screen: chat, questions, working row, pause, and composer.
 5. The Notebook sheet.
 6. An Android pass in a real app against dev state, then the iOS tab bar and header check.
+7. Attachments (planned): the composer and message display, then sharing to a bot.
 
 ## Copy
 
