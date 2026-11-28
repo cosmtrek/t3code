@@ -22,7 +22,9 @@ import * as DocumentText from "../../provider/DocumentText.ts";
 import * as Project from "../../project/ProjectService.ts";
 import * as ProviderRegistry from "../../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../../serverSettings.ts";
-import { createTestHub } from "../channels/channelTestkit.ts";
+import { adapt } from "../channels/channelTestkit.ts";
+import * as Hub from "../channels/hub.ts";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import type { AdapterRequest, AdapterResponse } from "../channels/transport.ts";
 import * as Artifacts from "./artifacts.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -203,62 +205,79 @@ const harness = (
 ) =>
   Effect.gen(function* () {
     const store = yield* InboxStore.make(":memory:").pipe(Effect.provide(NodeServices.layer));
-    const h = yield* Effect.promise(() => harnessWith(store, conversations, sendAnswer, config));
+    const h = yield* harnessWith(store, conversations, sendAnswer, config).pipe(
+      Effect.provide(Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer)),
+    );
     // Fixtures are at fixed past times; none should fall before the first-read cutoff.
     if (seedReadCutoff) yield* store.readAllBefore(h.channelId, "2026-01-01T00:00:00.000Z");
     return h;
   });
 
-async function harnessWith(
+const harnessWith = Effect.fn("Test.harnessWith")(function* (
   store: InboxStore.InboxStore["Service"],
   conversations: () => ReadonlyArray<FakeConversation>,
   sendAnswer: () => AdapterResponse,
   config: Record<string, unknown>,
-): Promise<Harness> {
-  const dir = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-inbox-"));
+): Effect.fn.Return<
+  Harness,
+  never,
+  | import("effect/Scope").Scope
+  | import("effect/FileSystem").FileSystem
+  | import("effect/Path").Path
+  | import("effect/http/HttpClient").HttpClient
+> {
+  const dir = yield* Effect.acquireRelease(
+    Effect.promise(() => NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-inbox-"))),
+    (dir) => Effect.promise(() => NodeFSP.rm(dir, { recursive: true, force: true })),
+  );
   const tokenFile = NodePath.join(dir, "token");
-  await NodeFSP.writeFile(tokenFile, `${TOKEN}\n`, { mode: 0o600 });
+  yield* Effect.promise(() => NodeFSP.writeFile(tokenFile, `${TOKEN}\n`, { mode: 0o600 }));
   const handle = fakeAdapter(conversations, sendAnswer, config);
   const requests: string[] = [];
   const posted: unknown[] = [];
   const uploaded: number[] = [];
   const control: { holdListings: Promise<void> | null } = { holdListings: null };
-  const hub = await createTestHub({
+  const hub = yield* Hub.make({
     configPath: NodePath.join(dir, "channels.json"),
-    transportFor: () => ({
-      request: async (request) => {
-        requests.push(request.path);
-        if (control.holdListings !== null && request.path.startsWith("/conversations?")) {
-          await control.holdListings;
-        }
-        if (request.bytes !== undefined) uploaded.push(request.bytes.byteLength);
-        else if (request.method === "POST") posted.push(request.body);
-        return handle(request);
-      },
-      events: () => new Promise(() => undefined),
-    }),
+    transportFor: () =>
+      Effect.succeed(
+        adapt({
+          request: async (request) => {
+            requests.push(request.path);
+            if (control.holdListings !== null && request.path.startsWith("/conversations?")) {
+              await control.holdListings;
+            }
+            if (request.bytes !== undefined) uploaded.push(request.bytes.byteLength);
+            else if (request.method === "POST") posted.push(request.body);
+            return handle(request);
+          },
+          events: () => new Promise(() => undefined),
+        }),
+      ),
     background: false,
   });
-  await hub.start();
+  yield* hub.start().pipe(Effect.orDie);
   channelCounter += 1;
   const channelId = `chat-${channelCounter}`;
-  await hub.save(
-    {
-      id: channelId,
-      kind: "http-adapter",
-      name: "Chat",
-      baseUrl: "http://127.0.0.1:7341",
-      tokenFile,
-      enabled: true,
-    },
-    { create: true },
-  );
+  yield* hub
+    .save(
+      {
+        id: channelId,
+        kind: "http-adapter",
+        name: "Chat",
+        baseUrl: "http://127.0.0.1:7341",
+        tokenFile,
+        enabled: true,
+      },
+      { create: true },
+    )
+    .pipe(Effect.orDie);
   const runtime = {
-    hub: hub.service,
+    hub,
     store,
     channelsDir: dir,
     itemsDir: NodePath.join(dir, "items"),
-    subscribe: hub.service.subscribe,
+    subscribe: hub.subscribe,
   };
   const shells = new Map<string, OrchestrationV2ThreadShell | null>();
   const settledThreads: string[] = [];
@@ -293,7 +312,7 @@ async function harnessWith(
     layer,
     keyOf: (conversationId) => ({ channelId, conversationId }),
   };
-}
+});
 
 const idleShell = (threadId: string) =>
   ({
