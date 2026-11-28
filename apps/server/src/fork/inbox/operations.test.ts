@@ -24,7 +24,10 @@ import * as ProviderRegistry from "../../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import { ChannelHub } from "../channels/hub.ts";
 import type { AdapterRequest, AdapterResponse } from "../channels/transport.ts";
-import { threadContextDir } from "./artifacts.ts";
+import * as Artifacts from "./artifacts.ts";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+const threadContextDir = (itemsDir: string, itemId: string, threadId: string) =>
+  NodePath.join(itemsDir, itemId, threadId.replace(/[^A-Za-z0-9._-]/g, "_"));
 import { delegationIdFor } from "./derive.ts";
 import { InboxRuntime } from "./InboxRuntime.ts";
 import { followLinkedThreads } from "./linkedThreads.ts";
@@ -181,7 +184,10 @@ interface Harness {
   /** Every thread the inbox asked to settle. */
   readonly settledThreads: string[];
   readonly layer: Layer.Layer<
-    InboxRuntime | ThreadManagement.ThreadManagementService | Project.ProjectService
+    | InboxRuntime
+    | Artifacts.Artifacts
+    | ThreadManagement.ThreadManagementService
+    | Project.ProjectService
   >;
   readonly keyOf: (conversationId: string) => {
     readonly channelId: string;
@@ -246,6 +252,7 @@ async function harness(
   const shells = new Map<string, OrchestrationV2ThreadShell | null>();
   const settledThreads: string[] = [];
   const layer = Layer.mergeAll(
+    Artifacts.layer.pipe(Layer.provide(NodeServices.layer)),
     Layer.succeed(InboxRuntime, runtime),
     Layer.mock(ThreadManagement.ThreadManagementService)({
       getThreadShell: (threadId) => Effect.succeed(shells.get(threadId) ?? null),

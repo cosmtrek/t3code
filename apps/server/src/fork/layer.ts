@@ -12,6 +12,7 @@ import { startConnectors } from "./bot/connectors/registry.ts";
 import { followThreads, reconcileThreads } from "./bot/events.ts";
 import { fireDueRoutines, reconcile } from "./bot/operations.ts";
 import { routesLayer } from "./http.ts";
+import * as Artifacts from "./inbox/artifacts.ts";
 import * as InboxRuntime from "./inbox/InboxRuntime.ts";
 import { followLinkedThreads } from "./inbox/linkedThreads.ts";
 
@@ -69,6 +70,7 @@ const botsLayer = Layer.effectDiscard(
 );
 
 export const layer = Layer.mergeAll(routesLayer, linkedThreadsLayer, botsLayer).pipe(
+  Layer.provide(Artifacts.layer),
   Layer.provide(
     Layer.merge(InboxRuntime.layer, BotRuntime.layer.pipe(Layer.provide(BotFiles.layer))),
   ),

@@ -14,6 +14,7 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
+import * as Artifacts from "../inbox/artifacts.ts";
 import * as BotFiles from "./BotFiles.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Chat from "./connectors/chat/chat.ts";
@@ -97,6 +98,7 @@ interface UserMessage {
 }
 
 type HarnessServices =
+  | Artifacts.Artifacts
   | BotRuntime
   | ThreadManagement.ThreadManagementService
   | ThreadLaunch.ThreadLaunchService
@@ -159,6 +161,7 @@ const harness = (store = new BotStore(":memory:")) =>
       return runId;
     };
     const layer = Layer.mergeAll(
+      Artifacts.layer.pipe(Layer.provide(NodeServices.layer)),
       Layer.succeed(BotRuntime, runtime),
       Layer.mock(ThreadManagement.ThreadManagementService)({
         getThreadTitles: () => Effect.succeed({}),

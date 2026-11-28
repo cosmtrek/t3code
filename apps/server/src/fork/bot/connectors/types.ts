@@ -8,12 +8,14 @@ import type * as Scope from "effect/Scope";
 
 import type * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
 import { ForkHttpError } from "../../inbox/operations.ts";
+import type { Artifacts } from "../../inbox/artifacts.ts";
 import type { BotRuntime } from "../BotRuntime.ts";
 import type { notify } from "../operations.ts";
 import type { Bot, ConnectorSettings } from "../store.ts";
 
 /** What a connector may use: the bot's own services, its threads, and waking bots. */
 export type BotServices =
+  | Artifacts
   | BotRuntime
   | ThreadManagement.ThreadManagementService
   | Effect.Services<ReturnType<typeof notify>>;

@@ -5,13 +5,15 @@ import * as NodePath from "node:path";
 import * as NodeSqlite from "node:sqlite";
 
 import { describe, expect, it } from "@effect/vitest";
-import { vi } from "vite-plus/test";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Artifacts from "./artifacts.ts";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as FileSystem from "effect/FileSystem";
+import * as PlatformError from "effect/PlatformError";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 
-vi.mock("node:fs/promises", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("node:fs/promises")>()),
-}));
-
-import { applyFallback, discardDraft, readArtifacts, readSent, recordSent } from "./artifacts.ts";
 import {
   buildContextMarkdown,
   firstMessage,
@@ -521,115 +523,175 @@ describe("context media", () => {
   });
 });
 
+const artifactLayer = Artifacts.layer.pipe(Layer.provideMerge(NodeServices.layer));
+const folder = Effect.promise(() =>
+  NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-artifacts-")),
+);
+const read = (dir: string, file: string) =>
+  Effect.promise(() => NodeFSP.readFile(NodePath.join(dir, file), "utf8").catch(() => null));
+const write = (dir: string, file: string, text: string) =>
+  Effect.promise(() => NodeFSP.writeFile(NodePath.join(dir, file), text));
+
 describe("tagged-reply fallback", () => {
-  const folder = () => NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-artifacts-"));
-  const read = (dir: string, file: string) =>
-    NodeFSP.readFile(NodePath.join(dir, file), "utf8").catch(() => null);
+  it.effect("lets a later run replace what an earlier run's tags wrote", () =>
+    Effect.gen(function* () {
+      const files = yield* Artifacts.Artifacts;
+      const dir = yield* folder;
+      yield* files.applyFallback(dir, "run-1", "first reply");
+      yield* files.applyFallback(dir, "run-2", "corrected reply");
+      expect(yield* files.readArtifacts(dir)).toEqual({ draft: "corrected reply" });
+      yield* write(dir, "draft.md", "edited by the thread\n");
+      yield* files.applyFallback(dir, "run-2", "corrected reply");
+      expect(yield* read(dir, "draft.md")).toBe("edited by the thread\n");
+    }).pipe(Effect.provide(artifactLayer)),
+  );
 
-  it("lets a later run replace what an earlier run's tags wrote", async () => {
-    const dir = await folder();
-    await applyFallback(dir, "run-1", "first reply");
-    await applyFallback(dir, "run-2", "corrected reply");
-    expect(await readArtifacts(dir)).toEqual({ draft: "corrected reply" });
-    // The same run twice is a no-op.
-    await NodeFSP.writeFile(NodePath.join(dir, "draft.md"), "edited by the thread\n");
-    await applyFallback(dir, "run-2", "corrected reply");
-    expect(await read(dir, "draft.md")).toBe("edited by the thread\n");
-  });
+  it.effect("never replaces a file the thread wrote itself", () =>
+    Effect.gen(function* () {
+      const files = yield* Artifacts.Artifacts;
+      const dir = yield* folder;
+      yield* write(dir, "draft.md", "from the file\n");
+      yield* files.applyFallback(dir, "run-1", "from tags");
+      expect(yield* files.readArtifacts(dir)).toEqual({ draft: "from the file" });
+      const owned = yield* folder;
+      yield* files.applyFallback(owned, "run-1", "tagged");
+      yield* write(owned, "draft.md", "rewritten\n");
+      yield* files.applyFallback(owned, "run-2", "newer tags");
+      expect(yield* read(owned, "draft.md")).toBe("rewritten\n");
+    }).pipe(Effect.provide(artifactLayer)),
+  );
 
-  it("never replaces a file the thread wrote itself", async () => {
-    const dir = await folder();
-    await NodeFSP.writeFile(NodePath.join(dir, "draft.md"), "from the file\n");
-    await applyFallback(dir, "run-1", "from tags");
-    expect(await readArtifacts(dir)).toEqual({ draft: "from the file" });
-    // A thread that rewrote a fallback file owns it from then on.
-    const owned = await folder();
-    await applyFallback(owned, "run-1", "tagged");
-    await NodeFSP.writeFile(NodePath.join(owned, "draft.md"), "rewritten\n");
-    await applyFallback(owned, "run-2", "newer tags");
-    expect(await read(owned, "draft.md")).toBe("rewritten\n");
-  });
+  it.effect("keeps a thread's write that lands while the fallback is writing", () =>
+    Effect.gen(function* () {
+      const files = yield* Artifacts.Artifacts;
+      const fs = yield* FileSystem.FileSystem;
+      const dir = yield* folder;
+      yield* files.applyFallback(dir, "run-1", "from tags", {
+        beforeWrite: (file) => write(dir, file, "thread wrote\n"),
+      });
+      expect(yield* read(dir, "draft.md")).toBe("thread wrote\n");
+      yield* write(dir, "draft.md", "x\n");
+      const owned = yield* folder;
+      yield* files.applyFallback(owned, "run-1", "first");
+      yield* files.applyFallback(owned, "run-2", "second", {
+        beforeWrite: (file) => write(owned, file, "thread wrote\n"),
+      });
+      expect(yield* read(owned, "draft.md")).toBe("thread wrote\n");
+      expect((yield* fs.readDirectory(owned)).filter((file) => file.includes(".aside"))).toEqual(
+        [],
+      );
+    }).pipe(Effect.provide(artifactLayer)),
+  );
 
-  it("keeps a thread's write that lands while the fallback is writing", async () => {
-    const dir = await folder();
-    await applyFallback(dir, "run-1", "from tags", {
-      beforeWrite: (file) => NodeFSP.writeFile(NodePath.join(dir, file), "thread wrote\n"),
-    });
-    expect(await read(dir, "draft.md")).toBe("thread wrote\n");
-    // Owned by the inbox, then rewritten mid-replacement: the thread still wins.
-    await NodeFSP.writeFile(NodePath.join(dir, "draft.md"), "x\n");
-    const owned = await folder();
-    await applyFallback(owned, "run-1", "first");
-    await applyFallback(owned, "run-2", "second", {
-      beforeWrite: (file) => NodeFSP.writeFile(NodePath.join(owned, file), "thread wrote\n"),
-    });
-    expect(await read(owned, "draft.md")).toBe("thread wrote\n");
-    expect((await NodeFSP.readdir(owned)).filter((file) => file.includes(".aside"))).toEqual([]);
-  });
+  it.effect("restores the original draft when replacement fails after moving it aside", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const dir = yield* folder;
+      let failed = false;
+      const injected = PlatformError.systemError({
+        _tag: "Unknown",
+        module: "FileSystem",
+        method: "writeFile",
+        pathOrDescriptor: dir,
+        cause: Object.assign(new Error("injected write failure"), { code: "EIO" }),
+      });
+      const files = yield* Artifacts.Artifacts.pipe(
+        Effect.provide(Artifacts.layer),
+        Effect.provideService(
+          FileSystem.FileSystem,
+          FileSystem.FileSystem.of({
+            ...fs,
+            writeFileString: (file, text, options) =>
+              Effect.suspend(() => {
+                if (
+                  file === NodePath.join(dir, "draft.md") &&
+                  text === "replacement\n" &&
+                  !failed
+                ) {
+                  failed = true;
+                  return Effect.fail(injected);
+                }
+                return fs.writeFileString(file, text, options);
+              }),
+          }),
+        ),
+      );
+      yield* files.applyFallback(dir, "run-1", "original reply");
+      const error = yield* Effect.flip(files.applyFallback(dir, "run-2", "replacement"));
+      expect(error.reason.cause).toMatchObject({ code: "EIO" });
+      expect(failed).toBe(true);
+      expect(yield* read(dir, "draft.md")).toBe("original reply\n");
+      expect((yield* fs.readDirectory(dir)).filter((name) => name.endsWith(".aside"))).toEqual([]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
 
-  it("restores the original draft when replacement fails after moving it aside", async () => {
-    const dir = await folder();
-    await applyFallback(dir, "run-1", "original reply");
-    const writeFile = NodeFSP.writeFile;
-    let failed = false;
-    using _write = vi.spyOn(NodeFSP, "writeFile").mockImplementation(async (...args) => {
-      if (args[0] === NodePath.join(dir, "draft.md") && !failed) {
-        failed = true;
-        throw Object.assign(new Error("injected write failure"), { code: "EIO" });
-      }
-      return writeFile(...args);
-    });
-    await expect(applyFallback(dir, "run-2", "replacement")).rejects.toMatchObject({ code: "EIO" });
-    expect(failed).toBe(true);
-    expect(await read(dir, "draft.md")).toBe("original reply\n");
-    expect((await NodeFSP.readdir(dir)).filter((name) => name.endsWith(".aside"))).toEqual([]);
-  });
-
-  it("applies one run once when two reads race, and the next run still updates", async () => {
-    const dir = await folder();
-    await applyFallback(dir, "run-1", "one");
-    let other: Promise<void> | null = null;
-    await applyFallback(dir, "run-2", "two", {
-      // A second read of the same run arrives while the first is about to write; this one
-      // carries on once that read has finished or is waiting its turn.
-      beforeWrite: () =>
-        new Promise<void>((resume) => {
-          other = applyFallback(dir, "run-2", "two", { onQueued: resume });
-          void other.then(resume);
-        }),
-    });
-    await other;
-    expect(await read(dir, "draft.md")).toBe("two\n");
-    await applyFallback(dir, "run-3", "three");
-    expect(await read(dir, "draft.md")).toBe("three\n");
-  });
+  it.effect("applies one run once when two reads race, and the next run still updates", () =>
+    Effect.gen(function* () {
+      const files = yield* Artifacts.Artifacts;
+      const dir = yield* folder;
+      yield* files.applyFallback(dir, "run-1", "one");
+      const queued = yield* Deferred.make<void>();
+      let other: Fiber.Fiber<void, PlatformError.PlatformError> | undefined;
+      yield* files.applyFallback(dir, "run-2", "two", {
+        beforeWrite: () =>
+          Effect.gen(function* () {
+            other = yield* files
+              .applyFallback(dir, "run-2", "two", {
+                onQueued: () => {
+                  Deferred.doneUnsafe(queued, Effect.void);
+                },
+              })
+              .pipe(Effect.forkChild);
+            yield* Deferred.await(queued);
+          }),
+      });
+      if (other === undefined) throw new Error("The competing fallback was not started.");
+      yield* Fiber.join(other);
+      expect(yield* read(dir, "draft.md")).toBe("two\n");
+      yield* files.applyFallback(dir, "run-3", "three");
+      expect(yield* read(dir, "draft.md")).toBe("three\n");
+    }).pipe(Effect.provide(artifactLayer)),
+  );
 });
 
 describe("sent records", () => {
-  it("keeps both of two sends made in the same millisecond", async () => {
-    const itemDir = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-sent-"));
-    const sentAt = "2026-11-14T12:00:00.000Z";
-    for (const [messageId, text] of [
-      ["m-1", "first"],
-      ["m-2", "second"],
-    ] as const) {
-      await recordSent({ itemDir, draftDir: null, draftAtSend: null, text, messageId, sentAt });
-    }
-    expect((await readSent(itemDir)).map((record) => record.text).toSorted()).toEqual([
-      "first",
-      "second",
-    ]);
-  });
+  it.effect("keeps both of two sends made in the same millisecond", () =>
+    Effect.gen(function* () {
+      const files = yield* Artifacts.Artifacts;
+      const itemDir = yield* folder;
+      const sentAt = "2026-11-14T12:00:00.000Z";
+      for (const [messageId, text] of [
+        ["m-1", "first"],
+        ["m-2", "second"],
+      ] as const) {
+        yield* files.recordSent({
+          itemDir,
+          draftDir: null,
+          draftAtSend: null,
+          text,
+          messageId,
+          sentAt,
+        });
+      }
+      expect((yield* files.readSent(itemDir)).map((record) => record.text).toSorted()).toEqual([
+        "first",
+        "second",
+      ]);
+    }).pipe(Effect.provide(artifactLayer)),
+  );
 });
 
 describe("discarding a draft", () => {
-  it("drops the draft the user saw and keeps one the thread rewrote since", async () => {
-    const dir = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-discard-"));
-    const at = "2026-11-16T12:00:00.000Z";
-    await NodeFSP.writeFile(NodePath.join(dir, "draft.md"), "newer reply\n");
-    expect(await discardDraft(dir, "older reply", at)).toBe(false);
-    expect((await readArtifacts(dir)).draft).toBe("newer reply");
-    expect(await discardDraft(dir, "newer reply", at)).toBe(true);
-    expect((await readArtifacts(dir)).draft).toBeNull();
-  });
+  it.effect("drops the draft the user saw and keeps one the thread rewrote since", () =>
+    Effect.gen(function* () {
+      const files = yield* Artifacts.Artifacts;
+      const dir = yield* folder;
+      const at = "2026-11-16T12:00:00.000Z";
+      yield* write(dir, "draft.md", "newer reply\n");
+      expect(yield* files.discardDraft(dir, "older reply", at)).toBe(false);
+      expect((yield* files.readArtifacts(dir)).draft).toBe("newer reply");
+      expect(yield* files.discardDraft(dir, "newer reply", at)).toBe(true);
+      expect((yield* files.readArtifacts(dir)).draft).toBeNull();
+    }).pipe(Effect.provide(artifactLayer)),
+  );
 });

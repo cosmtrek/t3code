@@ -29,6 +29,7 @@ import * as Bots from "./bot/operations.ts";
 import { answerQuestion, authenticateTool, runTool } from "./bot/tools.ts";
 import type { HubEvent } from "./channels/hub.ts";
 import { InboxRuntime, type InboxRuntimeShape } from "./inbox/InboxRuntime.ts";
+import * as Artifacts from "./inbox/artifacts.ts";
 import * as Inbox from "./inbox/operations.ts";
 
 const FORK_ROUTE_PREFIX = "/api/fork";
@@ -109,7 +110,11 @@ const fileBody = Effect.gen(function* () {
 });
 
 const makeRoute =
-  (runtime: InboxRuntimeShape, bots: BotRuntime["Service"]) =>
+  (
+    runtime: InboxRuntimeShape,
+    bots: BotRuntime["Service"],
+    contextFiles: Artifacts.Artifacts["Service"],
+  ) =>
   <A, R>(
     method: "GET" | "POST",
     path: HttpRouter.PathInput,
@@ -129,6 +134,7 @@ const makeRoute =
         return yield* handle.pipe(
           Effect.provideService(InboxRuntime, runtime),
           Effect.provideService(BotRuntime, bots),
+          Effect.provideService(Artifacts.Artifacts, contextFiles),
           Effect.map((value) =>
             HttpServerResponse.isHttpServerResponse(value)
               ? value
@@ -184,7 +190,11 @@ const eventsRoute = (runtime: InboxRuntimeShape, bots: BotRuntime["Service"]) =>
   );
 
 /** The `t3bot` CLI in a bot's work thread: no session, the bot's own token instead. */
-const toolRoute = (runtime: InboxRuntimeShape, bots: BotRuntime["Service"]) =>
+const toolRoute = (
+  runtime: InboxRuntimeShape,
+  bots: BotRuntime["Service"],
+  contextFiles: Artifacts.Artifacts["Service"],
+) =>
   HttpRouter.add(
     "POST",
     `${BOTS}/tool`,
@@ -195,6 +205,7 @@ const toolRoute = (runtime: InboxRuntimeShape, bots: BotRuntime["Service"]) =>
       return ok({ output: yield* runTool(tool) });
     }).pipe(
       Effect.provideService(BotRuntime, bots),
+      Effect.provideService(Artifacts.Artifacts, contextFiles),
       Effect.provideService(InboxRuntime, runtime),
       Effect.catchTags({ ForkHttpError: (error) => Effect.succeed(errorResponse(error)) }),
     ),
@@ -226,8 +237,12 @@ const mediaRoute = (route: ReturnType<typeof makeRoute>) =>
     }),
   );
 
-const routes = (runtime: InboxRuntimeShape, bots: BotRuntime["Service"]) => {
-  const route = makeRoute(runtime, bots);
+const routes = (
+  runtime: InboxRuntimeShape,
+  bots: BotRuntime["Service"],
+  contextFiles: Artifacts.Artifacts["Service"],
+) => {
+  const route = makeRoute(runtime, bots, contextFiles);
   return Layer.mergeAll(
     route("GET", CHANNELS, AuthOrchestrationReadScope, Inbox.listChannels()),
     route(
@@ -435,13 +450,13 @@ const routes = (runtime: InboxRuntimeShape, bots: BotRuntime["Service"]) => {
       AuthOrchestrationOperateScope,
       body.pipe(Effect.flatMap(answerQuestion)),
     ),
-    toolRoute(runtime, bots),
+    toolRoute(runtime, bots, contextFiles),
     eventsRoute(runtime, bots),
   );
 };
 
 export const routesLayer = Layer.unwrap(
   Effect.gen(function* () {
-    return routes(yield* InboxRuntime, yield* BotRuntime);
+    return routes(yield* InboxRuntime, yield* BotRuntime, yield* Artifacts.Artifacts);
   }),
 );

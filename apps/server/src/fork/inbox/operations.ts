@@ -52,15 +52,7 @@ import {
   type Conversation as ConversationType,
   type Message as MessageType,
 } from "../channels/protocol.ts";
-import {
-  applyFallback,
-  discardDraft as discardDraftFile,
-  fallbackApplied,
-  readArtifacts,
-  readSent,
-  recordSent,
-  threadContextDir,
-} from "./artifacts.ts";
+import * as Artifacts from "./artifacts.ts";
 import {
   CONTEXT_FILE,
   MEDIA_DIR,
@@ -337,6 +329,7 @@ const applyFallbackFor = Effect.fn("ForkInbox.applyFallback")(function* (
   contextDir: string,
   shell: OrchestrationV2ThreadShell,
 ) {
+  const contextFiles = yield* Artifacts.Artifacts;
   const runId = shell.latestRunId;
   // Only a finished run: a launch reads as idle for a moment before its run starts.
   if (
@@ -347,7 +340,7 @@ const applyFallbackFor = Effect.fn("ForkInbox.applyFallback")(function* (
   ) {
     return;
   }
-  if (yield* Effect.promise(() => fallbackApplied(contextDir, runId))) return;
+  if (yield* contextFiles.fallbackApplied(contextDir, runId)) return;
   const threads = yield* ThreadManagement.ThreadManagementService;
   const records = yield* threads
     .getThreadRecords(shell.id, ["messages"], {
@@ -362,7 +355,7 @@ const applyFallbackFor = Effect.fn("ForkInbox.applyFallback")(function* (
       DateTime.toEpochMillis(left.createdAt) - DateTime.toEpochMillis(right.createdAt),
   )[finished.length - 1];
   const draft = last ? parseFallbackDraft(last.text) : null;
-  yield* Effect.promise(() => applyFallback(contextDir, runId, draft).catch(() => undefined));
+  yield* contextFiles.applyFallback(contextDir, runId, draft).pipe(Effect.ignore);
 });
 
 /**
@@ -374,6 +367,7 @@ const inspectLink = Effect.fn("ForkInbox.inspectLink")(function* (
   options: { readonly current: boolean },
 ) {
   const runtime = yield* InboxRuntime;
+  const contextFiles = yield* Artifacts.Artifacts;
   const base = {
     threadId: link.threadId,
     projectId: link.projectId,
@@ -414,7 +408,7 @@ const inspectLink = Effect.fn("ForkInbox.inspectLink")(function* (
   }
   if (options.current && link.detachedAt === null) {
     yield* applyFallbackFor(
-      threadContextDir(runtime.itemsDir, link.delegationId, link.threadId),
+      contextFiles.threadContextDir(runtime.itemsDir, link.delegationId, link.threadId),
       shell,
     );
   }
@@ -531,15 +525,19 @@ const inspectDelegation = Effect.fn("ForkInbox.inspectDelegation")(function* (
   links: ReadonlyArray<Link>,
 ) {
   const runtime = yield* InboxRuntime;
+  const contextFiles = yield* Artifacts.Artifacts;
   const shown = activeLinkOf(links) ?? links[0];
   const thread = shown ? yield* inspectLink(shown, { current: shown.detachedAt === null }) : null;
-  const [artifacts, sent] = yield* Effect.promise(() =>
-    Promise.all([
+  const [artifacts, sent] = yield* Effect.all(
+    [
       thread
-        ? readArtifacts(threadContextDir(runtime.itemsDir, delegation.id, thread.threadId))
-        : { draft: null },
-      readSent(NodePath.join(runtime.itemsDir, delegation.id)),
-    ]),
+        ? contextFiles.readArtifacts(
+            contextFiles.threadContextDir(runtime.itemsDir, delegation.id, thread.threadId),
+          )
+        : Effect.succeed({ draft: null }),
+      contextFiles.readSent(NodePath.join(runtime.itemsDir, delegation.id)),
+    ],
+    { concurrency: "unbounded" },
   );
   return { thread, artifacts, lastSentAt: sent[0]?.sentAt ?? null };
 });
@@ -923,6 +921,7 @@ export const readDelegation = Effect.fn("ForkInbox.readDelegation")(function* (
     Effect.mapError(() => badRequest("Name the channel and delegation.")),
   );
   const runtime = yield* InboxRuntime;
+  const contextFiles = yield* Artifacts.Artifacts;
   const { delegation, item, conversation, channel } = yield* findDelegation(
     input.channelId,
     input.delegationId,
@@ -932,8 +931,8 @@ export const readDelegation = Effect.fn("ForkInbox.readDelegation")(function* (
   // Only the current thread's draft can go into the reply box.
   const draft =
     thread && isCurrent(thread)
-      ? (yield* Effect.promise(() =>
-          readArtifacts(threadContextDir(runtime.itemsDir, item.id, thread.threadId)),
+      ? (yield* contextFiles.readArtifacts(
+          contextFiles.threadContextDir(runtime.itemsDir, item.id, thread.threadId),
         )).draft
       : null;
   const history = yield* Effect.forEach(
@@ -1371,6 +1370,7 @@ export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown
     Effect.mapError(() => badRequest("The delegation is missing fields.")),
   );
   const runtime = yield* InboxRuntime;
+  const contextFiles = yield* Artifacts.Artifacts;
   const channel = yield* channelOrMissing(input.channelId);
   const listing = yield* readChannel(input.channelId);
   const conversation = listing.raw.find((candidate) => candidate.id === input.conversationId);
@@ -1443,7 +1443,7 @@ export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown
 
     const commandId = CommandId.make(`fork-inbox:${NodeCrypto.randomUUID()}`);
     const threadId = ThreadId.make(commandId);
-    const contextDir = threadContextDir(runtime.itemsDir, delegationId, threadId);
+    const contextDir = contextFiles.threadContextDir(runtime.itemsDir, delegationId, threadId);
     yield* Effect.promise(() => NodeFSP.mkdir(contextDir, { recursive: true }));
     const images = yield* downloadImages(input.channelId, contextDir, scoped.messages);
     const anchor = scoped.messages.find((message) => message.id === input.anchorMessageId);
@@ -1628,6 +1628,7 @@ export const send = Effect.fn("ForkInbox.send")(function* (body: unknown) {
   );
   const text = input.text.trim();
   const runtime = yield* InboxRuntime;
+  const contextFiles = yield* Artifacts.Artifacts;
   const channel = yield* channelOrMissing(input.channelId);
   const attachments = input.attachments ?? [];
   if (attachments.length > 0 && !supports(channel, "attachments")) {
@@ -1654,10 +1655,10 @@ export const send = Effect.fn("ForkInbox.send")(function* (body: unknown) {
       : activeLinkOf(runtime.store.linksForDelegation(delegationId));
   const draftDir =
     delegationId !== null && active
-      ? threadContextDir(runtime.itemsDir, delegationId, active.threadId)
+      ? contextFiles.threadContextDir(runtime.itemsDir, delegationId, active.threadId)
       : null;
   const draftAtSend =
-    draftDir === null ? null : (yield* Effect.promise(() => readArtifacts(draftDir))).draft;
+    draftDir === null ? null : (yield* contextFiles.readArtifacts(draftDir)).draft;
   const answer = yield* attempt(() =>
     runtime.hub.postJson(input.channelId, "/messages", {
       conversationId: input.conversationId,
@@ -1713,8 +1714,8 @@ export const send = Effect.fn("ForkInbox.send")(function* (body: unknown) {
   if (delegationId === null) return { ...outcome, archived: null };
   // The message went out either way; a failed copy is reported, never retried by resending.
   const sentAt = DateTime.formatIso(yield* DateTime.now);
-  const archived = yield* Effect.promise(() =>
-    recordSent({
+  const archived = yield* contextFiles
+    .recordSent({
       itemDir: NodePath.join(runtime.itemsDir, delegationId),
       draftDir,
       draftAtSend,
@@ -1722,11 +1723,11 @@ export const send = Effect.fn("ForkInbox.send")(function* (body: unknown) {
       files: attachments.map((attachment) => attachment.name),
       messageId,
       sentAt,
-    }).then(
-      () => true,
-      () => false,
-    ),
-  );
+    })
+    .pipe(
+      Effect.as(true),
+      Effect.orElseSucceed(() => false),
+    );
   return { ...outcome, archived };
 });
 
@@ -1772,6 +1773,7 @@ export const discardDraft = Effect.fn("ForkInbox.discardDraft")(function* (body:
     Effect.mapError(() => badRequest("Name the delegation and its draft.")),
   );
   const runtime = yield* InboxRuntime;
+  const contextFiles = yield* Artifacts.Artifacts;
   const delegation = runtime.store.getDelegation(input.delegationId);
   const active =
     delegation !== null && delegation.channelId === input.channelId
@@ -1779,12 +1781,10 @@ export const discardDraft = Effect.fn("ForkInbox.discardDraft")(function* (body:
       : undefined;
   if (active === undefined) return yield* badRequest("This delegation has no thread.");
   const discardedAt = DateTime.formatIso(yield* DateTime.now);
-  const discarded = yield* Effect.promise(() =>
-    discardDraftFile(
-      threadContextDir(runtime.itemsDir, input.delegationId, active.threadId),
-      input.draft,
-      discardedAt,
-    ),
+  const discarded = yield* contextFiles.discardDraft(
+    contextFiles.threadContextDir(runtime.itemsDir, input.delegationId, active.threadId),
+    input.draft,
+    discardedAt,
   );
   runtime.hub.publish({ type: "inbox", channelId: input.channelId });
   return { discarded };
