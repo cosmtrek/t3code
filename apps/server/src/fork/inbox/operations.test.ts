@@ -32,7 +32,7 @@ import { delegationIdFor } from "./derive.ts";
 import { InboxRuntime } from "./InboxRuntime.ts";
 import { followLinkedThreads } from "./linkedThreads.ts";
 import * as Inbox from "./operations.ts";
-import { InboxStore } from "./store.ts";
+import * as InboxStore from "./store.ts";
 
 const TOKEN = "secret-token";
 const encoder = new TextEncoder();
@@ -195,11 +195,25 @@ interface Harness {
   };
 }
 
-async function harness(
+const harness = (
   conversations: () => ReadonlyArray<FakeConversation>,
   sendAnswer: () => AdapterResponse = () => json(200, { messageId: "sent-1" }),
   config: Record<string, unknown> = {},
   seedReadCutoff = true,
+) =>
+  Effect.gen(function* () {
+    const store = yield* InboxStore.make(":memory:").pipe(Effect.provide(NodeServices.layer));
+    const h = yield* Effect.promise(() => harnessWith(store, conversations, sendAnswer, config));
+    // Fixtures are at fixed past times; none should fall before the first-read cutoff.
+    if (seedReadCutoff) yield* store.readAllBefore(h.channelId, "2026-01-01T00:00:00.000Z");
+    return h;
+  });
+
+async function harnessWith(
+  store: InboxStore.InboxStore["Service"],
+  conversations: () => ReadonlyArray<FakeConversation>,
+  sendAnswer: () => AdapterResponse,
+  config: Record<string, unknown>,
 ): Promise<Harness> {
   const dir = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-inbox-"));
   const tokenFile = NodePath.join(dir, "token");
@@ -239,9 +253,6 @@ async function harness(
     },
     { create: true },
   );
-  const store = new InboxStore(":memory:");
-  // Fixtures are at fixed past times; none should fall before the first-read cutoff.
-  if (seedReadCutoff) store.readAllBefore(channelId, "2026-01-01T00:00:00.000Z");
   const runtime = {
     hub: hub.service,
     store,
@@ -305,8 +316,8 @@ const saveDelegation = Effect.fn("Test.saveDelegation")(function* (
 ) {
   const key = { ...h.keyOf(conversationId), anchorMessageId };
   const id = delegationIdFor(key);
-  if (h.runtime.store.getDelegation(id) === null) {
-    h.runtime.store.saveDelegation({
+  if ((yield* h.runtime.store.getDelegation(id)) === null) {
+    yield* h.runtime.store.saveDelegation({
       ...key,
       id,
       scope,
@@ -330,7 +341,7 @@ const linkThread = (
 ) =>
   Effect.gen(function* () {
     const delegationId = yield* saveDelegation(h, conversationId, anchorMessageId, scope);
-    h.runtime.store.addLink({
+    yield* h.runtime.store.addLink({
       ...h.keyOf(conversationId),
       delegationId,
       threadId,
@@ -378,20 +389,20 @@ describe("inbox listing", () => {
       yield* TestClock.setTime(
         DateTime.toEpochMillis(DateTime.makeUnsafe("2026-11-21T08:10:00.000Z")),
       );
-      const h = yield* Effect.promise(() =>
-        harness(
-          () => [
-            { id: "old", messages: [{ id: "old-1", minute: 9, author: THEM }] },
-            { id: "new", messages: [{ id: "new-1", minute: 11, author: THEM }] },
-          ],
-          undefined,
-          {},
-          false,
-        ),
+      const h = yield* harness(
+        () => [
+          { id: "old", messages: [{ id: "old-1", minute: 9, author: THEM }] },
+          { id: "new", messages: [{ id: "new-1", minute: 11, author: THEM }] },
+        ],
+        undefined,
+        {},
+        false,
       );
       const read = Inbox.readChannel(h.channelId).pipe(Effect.provide(h.layer));
       const first = yield* read;
-      expect(h.runtime.store.readAllBefore(h.channelId, "unused")).toBe("2026-11-14T08:10:00.000Z");
+      expect(yield* h.runtime.store.readAllBefore(h.channelId, "unused")).toBe(
+        "2026-11-14T08:10:00.000Z",
+      );
       const listed = yield* listOf(h);
       expect(listed.conversations.find((row) => row.id === "old")?.unread).toBe(false);
       expect(listed.conversations.find((row) => row.id === "new")?.unread).toBe(true);
@@ -399,33 +410,33 @@ describe("inbox listing", () => {
       expect(yield* read).toBe(first);
       yield* TestClock.adjust(1);
       expect(yield* read).not.toBe(first);
-      expect(h.runtime.store.readAllBefore(h.channelId, "unused")).toBe("2026-11-14T08:10:00.000Z");
+      expect(yield* h.runtime.store.readAllBefore(h.channelId, "unused")).toBe(
+        "2026-11-14T08:10:00.000Z",
+      );
     }),
   );
 
   it.effect("lists one row per conversation and reads every page", () =>
     Effect.gen(function* () {
-      const h = yield* Effect.promise(() =>
-        harness(() => [
-          { id: "c-first", messages: [{ id: "a1", minute: 1, author: THEM }] },
-          {
-            id: "c-second",
-            messages: [
-              { id: "j1", minute: 1, author: ME },
-              { id: "j2", minute: 2, author: THEM, replyTo: "j1" },
-              { id: "j3", minute: 3, author: THEM, replyTo: "j2" },
-              { id: "j4", minute: 4, author: THEM, mentionsSelf: true },
-              { id: "s1", minute: 5, author: THEM, image: { key: "k", name: "same.png" } },
-              { id: "s2", minute: 6, author: ME },
-            ],
-          },
-          {
-            id: "c-read-there",
-            readThroughMinute: 2,
-            messages: [{ id: "r1", minute: 2, author: THEM }],
-          },
-        ]),
-      );
+      const h = yield* harness(() => [
+        { id: "c-first", messages: [{ id: "a1", minute: 1, author: THEM }] },
+        {
+          id: "c-second",
+          messages: [
+            { id: "j1", minute: 1, author: ME },
+            { id: "j2", minute: 2, author: THEM, replyTo: "j1" },
+            { id: "j3", minute: 3, author: THEM, replyTo: "j2" },
+            { id: "j4", minute: 4, author: THEM, mentionsSelf: true },
+            { id: "s1", minute: 5, author: THEM, image: { key: "k", name: "same.png" } },
+            { id: "s2", minute: 6, author: ME },
+          ],
+        },
+        {
+          id: "c-read-there",
+          readThroughMinute: 2,
+          messages: [{ id: "r1", minute: 2, author: THEM }],
+        },
+      ]);
       const result = yield* listOf(h);
       expect(result.conversations.map((row) => row.id)).toEqual([
         "c-second",
@@ -471,7 +482,7 @@ describe("inbox listing", () => {
     () =>
       Effect.gen(function* () {
         const messages: FakeMessage[] = [{ id: "m1", minute: 1, author: THEM }];
-        const h = yield* Effect.promise(() => harness(() => [{ id: "c", kind: "dm", messages }]));
+        const h = yield* harness(() => [{ id: "c", kind: "dm", messages }]);
         const key = h.keyOf("c");
         const row = () => listOf(h).pipe(Effect.map((result) => result.conversations[0]));
         h.requests.length = 0;
@@ -512,9 +523,9 @@ describe("inbox listing", () => {
 
   it.effect("shows a finished run until the client reports seeing it", () =>
     Effect.gen(function* () {
-      const h = yield* Effect.promise(() =>
-        harness(() => [{ id: "c", messages: [{ id: "m1", minute: 1, author: ME }] }]),
-      );
+      const h = yield* harness(() => [
+        { id: "c", messages: [{ id: "m1", minute: 1, author: ME }] },
+      ]);
       const { delegationId } = yield* linkThread(h, "c", "m1", "thread-1", 1);
       const finished = Effect.fn("Test.finishRun")(function* (
         status: string,
@@ -558,9 +569,9 @@ describe("inbox listing", () => {
     "settling drops a delegation's signals and settles its thread; delegating reopens it",
     () =>
       Effect.gen(function* () {
-        const h = yield* Effect.promise(() =>
-          harness(() => [{ id: "c", messages: [{ id: "m1", minute: 1, author: THEM }] }]),
-        );
+        const h = yield* harness(() => [
+          { id: "c", messages: [{ id: "m1", minute: 1, author: THEM }] },
+        ]);
         const { dir, delegationId } = yield* linkThread(h, "c", "m1", "thread-1", 1);
         yield* Effect.promise(() => NodeFSP.writeFile(NodePath.join(dir, "draft.md"), "Fixed.\n"));
         h.shells.set("thread-1", {
@@ -593,7 +604,7 @@ describe("inbox listing", () => {
           Effect.provide(h.layer),
         );
         const key = { ...h.keyOf("c"), anchorMessageId: "m1" };
-        h.runtime.store.saveDelegation({
+        yield* h.runtime.store.saveDelegation({
           ...key,
           id: delegationId,
           scope: "chain",
@@ -601,14 +612,14 @@ describe("inbox listing", () => {
           preview: null,
           createdAt: at(9),
         });
-        expect(h.runtime.store.getDelegation(delegationId)?.settledAt).toBeNull();
+        expect((yield* h.runtime.store.getDelegation(delegationId))?.settledAt).toBeNull();
       }),
   );
 
   it.effect("shares one read of the channel until something in it changes", () =>
     Effect.gen(function* () {
       const messages: FakeMessage[] = [{ id: "m1", minute: 1, author: THEM }];
-      const h = yield* Effect.promise(() => harness(() => [{ id: "c", messages }]));
+      const h = yield* harness(() => [{ id: "c", messages }]);
       const delegationId = yield* saveDelegation(h, "c", "m1");
       const reads = vi.spyOn(h.runtime.store, "listConversationReads");
       yield* Effect.all(
@@ -631,9 +642,9 @@ describe("inbox listing", () => {
 
   it.effect("answers the overview before a slow listing, then announces the count", () =>
     Effect.gen(function* () {
-      const h = yield* Effect.promise(() =>
-        harness(() => [{ id: "c", kind: "dm", messages: [{ id: "m1", minute: 1, author: THEM }] }]),
-      );
+      const h = yield* harness(() => [
+        { id: "c", kind: "dm", messages: [{ id: "m1", minute: 1, author: THEM }] },
+      ]);
       let release = () => {};
       h.holdListings = new Promise<void>((resolve) => {
         release = resolve;
@@ -663,13 +674,11 @@ describe("inbox listing", () => {
 
   it.effect("says when the channel lists more conversations than it reads", () =>
     Effect.gen(function* () {
-      const h = yield* Effect.promise(() =>
-        harness(() =>
-          Array.from({ length: 21 }, (_, index) => ({
-            id: `c${index}`,
-            messages: [{ id: `m${index}`, minute: 1, author: THEM }],
-          })),
-        ),
+      const h = yield* harness(() =>
+        Array.from({ length: 21 }, (_, index) => ({
+          id: `c${index}`,
+          messages: [{ id: `m${index}`, minute: 1, author: THEM }],
+        })),
       );
       const result = yield* listOf(h);
       expect(result.conversations).toHaveLength(20);
@@ -679,20 +688,18 @@ describe("inbox listing", () => {
 
   it.effect("reads a delegation made from a v1 DM topic as its six-hour window", () =>
     Effect.gen(function* () {
-      const h = yield* Effect.promise(() =>
-        harness(() => [
-          {
-            id: "c",
-            kind: "dm",
-            messages: [
-              { id: "before", minute: 0, author: THEM },
-              { id: "anchor", minute: 1, author: THEM },
-              { id: "inside", minute: 300, author: ME },
-              { id: "after", minute: 1_000, author: THEM },
-            ],
-          },
-        ]),
-      );
+      const h = yield* harness(() => [
+        {
+          id: "c",
+          kind: "dm",
+          messages: [
+            { id: "before", minute: 0, author: THEM },
+            { id: "anchor", minute: 1, author: THEM },
+            { id: "inside", minute: 300, author: ME },
+            { id: "after", minute: 1_000, author: THEM },
+          ],
+        },
+      ]);
       const delegationId = yield* saveDelegation(h, "c", "anchor", null);
       const detail = yield* Inbox.readDelegation(delegationQuery(h, delegationId)).pipe(
         Effect.provide(h.layer),
@@ -705,11 +712,11 @@ describe("inbox listing", () => {
 describe("delegating", () => {
   it.effect("offers the project the delegation's last thread used", () =>
     Effect.gen(function* () {
-      const h = yield* Effect.promise(() =>
-        harness(() => [{ id: "c", messages: [{ id: "m1", minute: 1, author: THEM }] }]),
-      );
+      const h = yield* harness(() => [
+        { id: "c", messages: [{ id: "m1", minute: 1, author: THEM }] },
+      ]);
       yield* linkThread(h, "c", "m1", "thread-1", 1);
-      h.runtime.store.addLink({
+      yield* h.runtime.store.addLink({
         ...h.keyOf("c"),
         delegationId: delegationIdFor({ ...h.keyOf("c"), anchorMessageId: "m1" }),
         threadId: "thread-2",
@@ -753,18 +760,16 @@ describe("delegating", () => {
 
   it.effect("starts the thread in the checkout asked for, the project's when none is", () =>
     Effect.gen(function* () {
-      const h = yield* Effect.promise(() =>
-        harness(() => [
-          {
-            id: "c",
-            messages: ["root", "worktree", "bad"].map((id, index) => ({
-              id,
-              minute: index,
-              author: THEM,
-            })),
-          },
-        ]),
-      );
+      const h = yield* harness(() => [
+        {
+          id: "c",
+          messages: ["root", "worktree", "bad"].map((id, index) => ({
+            id,
+            minute: index,
+            author: THEM,
+          })),
+        },
+      ]);
       const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
       const delegate = (anchorMessageId: string, workspaceStrategy?: unknown) =>
         Inbox.delegate({
@@ -802,28 +807,26 @@ describe("delegating", () => {
 
   it.effect("gives the thread the reply thread, or the range asked for, and nothing else", () =>
     Effect.gen(function* () {
-      const h = yield* Effect.promise(() =>
-        harness(
-          () => [
-            {
-              id: "c",
-              messages: [
-                { id: "root", minute: 1, author: THEM },
-                {
-                  id: "aside",
-                  minute: 2,
-                  author: THEM,
-                  reactions: [{ key: "OK", emoji: null, count: 1, users: [], includesSelf: true }],
-                },
-                { id: "reply", minute: 3, author: ME, replyTo: "root" },
-                { id: "late", minute: 4, author: THEM },
-                { id: "ask", minute: 5, author: THEM, replyTo: "root" },
-              ],
-            },
-          ],
-          undefined,
-          { ackReaction: "OK" },
-        ),
+      const h = yield* harness(
+        () => [
+          {
+            id: "c",
+            messages: [
+              { id: "root", minute: 1, author: THEM },
+              {
+                id: "aside",
+                minute: 2,
+                author: THEM,
+                reactions: [{ key: "OK", emoji: null, count: 1, users: [], includesSelf: true }],
+              },
+              { id: "reply", minute: 3, author: ME, replyTo: "root" },
+              { id: "late", minute: 4, author: THEM },
+              { id: "ask", minute: 5, author: THEM, replyTo: "root" },
+            ],
+          },
+        ],
+        undefined,
+        { ackReaction: "OK" },
       );
       const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
       const delegate = (input: Record<string, unknown>) =>
@@ -861,7 +864,7 @@ describe("delegating", () => {
         modelSelection,
       });
       expect(mentioned(yield* contextOf(range))).toEqual(["aside", "reply"]);
-      expect(h.runtime.store.getDelegation(range.delegationId)).toMatchObject({
+      expect(yield* h.runtime.store.getDelegation(range.delegationId)).toMatchObject({
         scope: "range",
         untilAt: at(3),
         preview: "text of aside",
@@ -907,7 +910,7 @@ describe("delegating", () => {
     ],
   ] as const)("refuses %s, before starting anything", ([_name, scope, messages]) =>
     Effect.gen(function* () {
-      const h = yield* Effect.promise(() => harness(() => [{ id: "c", kind: "dm", messages }]));
+      const h = yield* harness(() => [{ id: "c", kind: "dm", messages }]);
       const error = yield* Inbox.delegate({
         ...h.keyOf("c"),
         anchorMessageId: "m0",
@@ -928,9 +931,10 @@ describe("delegating", () => {
         ),
         Effect.flip,
       );
+      if (error._tag !== "ForkHttpError") throw error;
       expect(error.code).toBe("scope_too_long");
-      expect(h.runtime.store.listLinks(h.channelId)).toEqual([]);
-      expect(h.runtime.store.listDelegations(h.channelId)).toEqual([]);
+      expect(yield* h.runtime.store.listLinks(h.channelId)).toEqual([]);
+      expect(yield* h.runtime.store.listDelegations(h.channelId)).toEqual([]);
     }),
   );
 });
@@ -942,11 +946,11 @@ describe("linked threads and their files", () => {
 
   it.effect("shows only the current thread's draft, whatever an older thread writes", () =>
     Effect.gen(function* () {
-      const h = yield* Effect.promise(() => harness(oneConversation));
+      const h = yield* harness(oneConversation);
       const old = yield* linkThread(h, "c", "m1", "thread-old", 1);
       yield* Effect.promise(() => NodeFSP.writeFile(NodePath.join(old.dir, "draft.md"), "old\n"));
       // A second delegation replaced the first.
-      h.runtime.store.detachLink(old.delegationId, "thread-old", "replaced", at(2));
+      yield* h.runtime.store.detachLink(old.delegationId, "thread-old", "replaced", at(2));
       yield* linkThread(h, "c", "m1", "thread-new", 2);
       const query = delegationQuery(h, old.delegationId);
       const fresh = yield* Inbox.readDelegation(query).pipe(Effect.provide(h.layer));
@@ -961,7 +965,7 @@ describe("linked threads and their files", () => {
 
   it.effect("drops a deleted thread's draft from the delegation's state", () =>
     Effect.gen(function* () {
-      const h = yield* Effect.promise(() => harness(oneConversation));
+      const h = yield* harness(oneConversation);
       const { dir, delegationId } = yield* linkThread(h, "c", "m1", "thread-1", 1);
       yield* Effect.promise(() => NodeFSP.writeFile(NodePath.join(dir, "draft.md"), "reply\n"));
       const query = delegationQuery(h, delegationId);
@@ -979,7 +983,7 @@ describe("linked threads and their files", () => {
 
   it.effect("does not count a blank draft", () =>
     Effect.gen(function* () {
-      const h = yield* Effect.promise(() => harness(oneConversation));
+      const h = yield* harness(oneConversation);
       const { dir } = yield* linkThread(h, "c", "m1", "thread-1", 1);
       yield* Effect.promise(() => NodeFSP.writeFile(NodePath.join(dir, "draft.md"), " \n\n"));
       const result = yield* listOf(h);
@@ -991,7 +995,7 @@ describe("linked threads and their files", () => {
 describe("following linked threads", () => {
   it.effect("refreshes a channel when one of its linked threads changes, and only then", () =>
     Effect.gen(function* () {
-      const h = yield* Effect.promise(() => harness(() => []));
+      const h = yield* harness(() => []);
       yield* linkThread(h, "c", "m1", "thread-linked", 1);
       const published: unknown[] = [];
       const _unsubscribe = yield* Effect.acquireRelease(
@@ -1026,15 +1030,14 @@ describe("sending", () => {
 
   it.effect("keeps the draft when the adapter does not confirm a message id", () =>
     Effect.gen(function* () {
-      const h = yield* Effect.promise(() =>
-        harness(oneConversation, () => json(200, { ok: true })),
-      );
+      const h = yield* harness(oneConversation, () => json(200, { ok: true }));
       const { dir, delegationId } = yield* linkThread(h, "c", "m1", "thread-1", 1);
       yield* Effect.promise(() => NodeFSP.writeFile(NodePath.join(dir, "draft.md"), "reply\n"));
       const error = yield* Inbox.send({ ...h.keyOf("c"), delegationId, text: "reply" }).pipe(
         Effect.provide(h.layer),
         Effect.flip,
       );
+      if (error._tag !== "ForkHttpError") throw error;
       expect(error.code).toBe("delivery_unknown");
       expect(
         yield* Effect.promise(() => NodeFSP.readFile(NodePath.join(dir, "draft.md"), "utf8")),
@@ -1044,7 +1047,7 @@ describe("sending", () => {
 
   it.effect("records what was actually sent from a delegation, edited draft or typed reply", () =>
     Effect.gen(function* () {
-      const h = yield* Effect.promise(() => harness(oneConversation));
+      const h = yield* harness(oneConversation);
       const { dir, delegationId } = yield* linkThread(h, "c", "m1", "thread-1", 1);
       yield* Effect.promise(() =>
         NodeFSP.writeFile(NodePath.join(dir, "draft.md"), "draft text\n"),
@@ -1073,7 +1076,7 @@ describe("sending", () => {
       const listed = yield* Inbox.listInbox(h.channelId).pipe(Effect.provide(h.layer));
       expect(listed.delegations[0]!.lastSentAt).not.toBeNull();
 
-      const typed = yield* Effect.promise(() => harness(oneConversation));
+      const typed = yield* harness(oneConversation);
       const typedId = yield* saveDelegation(typed, "c", "m1");
       yield* Inbox.send({ ...typed.keyOf("c"), delegationId: typedId, text: "by hand" }).pipe(
         Effect.provide(typed.layer),
@@ -1101,7 +1104,7 @@ describe("sending", () => {
 
   it.effect("reports a sent message whose copy could not be saved, without failing the send", () =>
     Effect.gen(function* () {
-      const h = yield* Effect.promise(() => harness(oneConversation));
+      const h = yield* harness(oneConversation);
       const delegationId = yield* saveDelegation(h, "c", "m1");
       // A file where the delegation's folder should be: the copy cannot be written.
       yield* Effect.promise(async () => {
@@ -1125,12 +1128,10 @@ describe("sending", () => {
         { userId: "u4", name: "Jordan" },
         { userId: "u5", name: "Robin" },
       ];
-      const h = yield* Effect.promise(() =>
-        harness(
-          oneConversation,
-          () => json(200, { messageId: "sent-1", unresolvedMentions: ["u3"] }),
-          { capabilities: ["mentions"] },
-        ),
+      const h = yield* harness(
+        oneConversation,
+        () => json(200, { messageId: "sent-1", unresolvedMentions: ["u3"] }),
+        { capabilities: ["mentions"] },
       );
       const sent = yield* Inbox.send({ ...h.keyOf("c"), text, mentions }).pipe(
         Effect.provide(h.layer),
@@ -1138,7 +1139,7 @@ describe("sending", () => {
       expect(h.posted).toEqual([{ conversationId: "c", text, mentions: mentions.slice(0, 2) }]);
       expect(sent.unresolvedMentions).toEqual(["Sam"]);
 
-      const plain = yield* Effect.promise(() => harness(oneConversation));
+      const plain = yield* harness(oneConversation);
       yield* Inbox.send({ ...plain.keyOf("c"), text, mentions }).pipe(Effect.provide(plain.layer));
       expect(plain.posted).toEqual([{ conversationId: "c", text }]);
     }),
@@ -1146,9 +1147,7 @@ describe("sending", () => {
 
   it.effect("says whether a reply goes into the thread, only to an adapter that takes quotes", () =>
     Effect.gen(function* () {
-      const h = yield* Effect.promise(() =>
-        harness(oneConversation, undefined, { capabilities: ["quotes"] }),
-      );
+      const h = yield* harness(oneConversation, undefined, { capabilities: ["quotes"] });
       for (const inThread of [false, true]) {
         yield* Inbox.send({ ...h.keyOf("c"), replyToId: "m1", inThread, text: "hi" }).pipe(
           Effect.provide(h.layer),
@@ -1164,7 +1163,7 @@ describe("sending", () => {
         { conversationId: "c", text: "hi" },
       ]);
 
-      const plain = yield* Effect.promise(() => harness(oneConversation));
+      const plain = yield* harness(oneConversation);
       yield* Inbox.send({ ...plain.keyOf("c"), replyToId: "m1", inThread: false, text: "hi" }).pipe(
         Effect.provide(plain.layer),
       );
@@ -1179,12 +1178,10 @@ describe("sending", () => {
         { uploadId: "up-2", name: "log.txt" },
       ];
       const upload = { uploadId: "up-1", kind: "image", name: "chart.png", size: 3 };
-      const h = yield* Effect.promise(() =>
-        harness(
-          oneConversation,
-          () => json(200, { ...upload, messageId: "sent-1", failedAttachments: ["up-2"] }),
-          { capabilities: ["markdown", "attachments"] },
-        ),
+      const h = yield* harness(
+        oneConversation,
+        () => json(200, { ...upload, messageId: "sent-1", failedAttachments: ["up-2"] }),
+        { capabilities: ["markdown", "attachments"] },
       );
       const file = new URLSearchParams({ channelId: h.channelId, name: "my chart.png" });
       expect(
@@ -1210,7 +1207,7 @@ describe("sending", () => {
       ]);
       expect(sent.failedAttachments).toEqual(["log.txt"]);
 
-      const plain = yield* Effect.promise(() => harness(oneConversation));
+      const plain = yield* harness(oneConversation);
       yield* Inbox.send({ ...plain.keyOf("c"), text: "**hi**", format: "markdown" }).pipe(
         Effect.provide(plain.layer),
       );
@@ -1224,6 +1221,7 @@ describe("sending", () => {
         new URLSearchParams({ channelId: plain.channelId, name: "a.png" }),
         new Uint8Array([1]),
       ).pipe(Effect.provide(plain.layer), Effect.flip);
+      if (noFiles._tag !== "ForkHttpError") throw noFiles;
       expect([noFiles.status, noUpload.status]).toEqual([400, 400]);
       expect(plain.posted).toHaveLength(1);
     }),
@@ -1233,7 +1231,7 @@ describe("sending", () => {
 describe("channel settings", () => {
   it.effect("returns a tested channel in the same shape as the list", () =>
     Effect.gen(function* () {
-      const h = yield* Effect.promise(() => harness(() => []));
+      const h = yield* harness(() => []);
       const tested = yield* Inbox.testChannel(h.channelId).pipe(Effect.provide(h.layer));
       expect(tested.projectMatches).toEqual([
         { path: "~/code/somewhere", projectId: null, projectTitle: null },
@@ -1304,9 +1302,9 @@ describe("delegateExclusively", () => {
 describe("tagged replies", () => {
   it.effect("fills only the current thread's folder from its finished run", () =>
     Effect.gen(function* () {
-      const h = yield* Effect.promise(() =>
-        harness(() => [{ id: "c", messages: [{ id: "m1", minute: 1, author: THEM }] }]),
-      );
+      const h = yield* harness(() => [
+        { id: "c", messages: [{ id: "m1", minute: 1, author: THEM }] },
+      ]);
       const { dir, delegationId } = yield* linkThread(h, "c", "m1", "thread-1", 1);
       h.shells.set("thread-1", {
         ...idleShell("thread-1"),

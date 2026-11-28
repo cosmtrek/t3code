@@ -24,7 +24,7 @@ import { ChannelFileError } from "../channels/config.ts";
 import * as ChannelHub from "../channels/hub.ts";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as InboxRuntime from "./InboxRuntime.ts";
-import { InboxStore } from "./store.ts";
+import * as NodeSqlite from "node:sqlite";
 
 const io = vi.hoisted(() => ({
   watch: vi.fn(),
@@ -88,7 +88,7 @@ const setup = Effect.gen(function* () {
   const start = vi.spyOn(hub, "start").mockReturnValue(Effect.void);
   const stop = vi.fn(() => hub.stop());
   yield* Scope.addFinalizer(scope, Effect.suspend(stop));
-  const close = vi.spyOn(InboxStore.prototype, "close");
+  const close = vi.spyOn(NodeSqlite.DatabaseSync.prototype, "close");
   const publish = vi.spyOn(hub, "publish");
   const context = yield* Layer.build(ServerConfig.layerTest(root, root)).pipe(
     Effect.provide(NodeServices.layer),
@@ -120,7 +120,7 @@ const setup = Effect.gen(function* () {
     Layer.build(
       failDependent
         ? Layer.effectDiscard(Effect.die("dependent initialization failed")).pipe(
-            Layer.provide(InboxRuntime.layer),
+            Layer.provideMerge(InboxRuntime.layer),
           )
         : InboxRuntime.layer,
     ).pipe(
@@ -177,12 +177,18 @@ describe("InboxRuntime lifecycle", () => {
     Effect.scoped(
       Effect.gen(function* () {
         const fixture = yield* setup;
-        vi.spyOn(InboxStore.prototype, "linksForDelegation").mockImplementation((id) =>
-          id === "unlinked"
-            ? []
-            : [{ channelId: id } as ReturnType<InboxStore["linksForDelegation"]>[number]],
-        );
-        yield* fixture.build();
+        const context = yield* fixture.build();
+        const store = Context.get(context, InboxRuntime.InboxRuntime).store;
+        for (const id of ["a", "b"]) {
+          yield* store.addLink({
+            delegationId: id,
+            channelId: id,
+            conversationId: "c",
+            threadId: id,
+            projectId: "p",
+            createdAt: "2026-01-01T00:00:00.000Z",
+          });
+        }
         const onError = fixture.watcher.on.mock.calls.find(([event]) => event === "error")?.[1];
         expect(onError).toBeTypeOf("function");
         onError(new Error("watch error"));

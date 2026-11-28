@@ -225,7 +225,9 @@ export const listConversations = Effect.fn("ForkBot.listConversations")(function
   const query = options.query?.trim().toLowerCase() ?? "";
   const lines: Array<{ readonly at: number; readonly text: string }> = [];
   const listing = yield* readChannel(channel.id).pipe(
-    Effect.mapError((error) => toolError(`${channelName(channel)}: ${error.detail}`)),
+    Effect.catchTags({
+      ForkHttpError: (error) => Effect.fail(toolError(`${channelName(channel)}: ${error.detail}`)),
+    }),
   );
   for (const conversation of listing.conversations) {
     if (query !== "" && !conversation.name.toLowerCase().includes(query)) continue;

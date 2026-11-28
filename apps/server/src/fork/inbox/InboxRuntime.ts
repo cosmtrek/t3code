@@ -22,11 +22,11 @@ import * as Stream from "effect/Stream";
 import * as ServerConfig from "../../config.ts";
 import * as ChannelHub from "../channels/hub.ts";
 import type { HubEvent } from "../channels/hub.ts";
-import { InboxStore } from "./store.ts";
+import * as InboxStore from "./store.ts";
 
 export interface InboxRuntimeShape {
   readonly hub: ChannelHub.ChannelHub["Service"];
-  readonly store: InboxStore;
+  readonly store: InboxStore.InboxStore["Service"];
   readonly channelsDir: string;
   readonly itemsDir: string;
   /** Hub events plus changes to delegated context folders. */
@@ -112,10 +112,7 @@ const make = Effect.gen(function* () {
   const channelsDir = path.join(config.stateDir, "channels");
   const itemsDir = path.join(channelsDir, "items");
   yield* fs.makeDirectory(itemsDir, { recursive: true });
-  const store = yield* Effect.acquireRelease(
-    Effect.sync(() => new InboxStore(path.join(channelsDir, "inbox.sqlite"))),
-    (store) => Effect.sync(() => store.close()),
-  );
+  const store = yield* InboxStore.make(path.join(channelsDir, "inbox.sqlite"));
   const hub = yield* ChannelHub.ChannelHub;
   yield* hub.start().pipe(
     Effect.catch((error) =>
@@ -138,7 +135,7 @@ const make = Effect.gen(function* () {
           Effect.andThen(
             Effect.gen(function* () {
               pending.delete(itemId);
-              const link = store.linksForDelegation(itemId)[0];
+              const link = (yield* store.linksForDelegation(itemId))[0];
               if (link) yield* hub.publish({ type: "inbox", channelId: link.channelId });
             }),
           ),

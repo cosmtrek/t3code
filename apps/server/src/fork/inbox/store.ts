@@ -4,9 +4,12 @@
  * delegations made from its messages, and the links between delegations and T3 threads. Its own
  * file, so the main database never carries fork migrations.
  */
-import * as NodeFS from "node:fs";
-import * as NodePath from "node:path";
 import * as NodeSqlite from "node:sqlite";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 
 export interface ConversationKey {
   readonly channelId: string;
@@ -175,12 +178,72 @@ function toLink(row: Row): Link {
   };
 }
 
-export class InboxStore {
-  private readonly db: NodeSqlite.DatabaseSync;
+export class InboxStoreError extends Schema.TaggedError<InboxStoreError>()("InboxStoreError", {
+  operation: Schema.String,
+  path: Schema.String,
+  cause: Schema.Defect(),
+}) {
+  override get message() {
+    return "The inbox database operation failed.";
+  }
+}
 
-  constructor(filePath: string) {
-    if (filePath !== ":memory:") NodeFS.mkdirSync(NodePath.dirname(filePath), { recursive: true });
-    this.db = new NodeSqlite.DatabaseSync(filePath);
+export class InboxStore extends Context.Service<
+  InboxStore,
+  {
+    readonly listConversationReads: (
+      ...args: Parameters<InboxDatabase["listConversationReads"]>
+    ) => Effect.Effect<ReturnType<InboxDatabase["listConversationReads"]>, InboxStoreError>;
+    readonly markConversationRead: (
+      ...args: Parameters<InboxDatabase["markConversationRead"]>
+    ) => Effect.Effect<ReturnType<InboxDatabase["markConversationRead"]>, InboxStoreError>;
+    readonly pinConversationUnread: (
+      ...args: Parameters<InboxDatabase["pinConversationUnread"]>
+    ) => Effect.Effect<ReturnType<InboxDatabase["pinConversationUnread"]>, InboxStoreError>;
+    readonly readAllBefore: (
+      ...args: Parameters<InboxDatabase["readAllBefore"]>
+    ) => Effect.Effect<ReturnType<InboxDatabase["readAllBefore"]>, InboxStoreError>;
+    readonly markAllRead: (
+      ...args: Parameters<InboxDatabase["markAllRead"]>
+    ) => Effect.Effect<ReturnType<InboxDatabase["markAllRead"]>, InboxStoreError>;
+    readonly listDelegations: (
+      ...args: Parameters<InboxDatabase["listDelegations"]>
+    ) => Effect.Effect<ReturnType<InboxDatabase["listDelegations"]>, InboxStoreError>;
+    readonly getDelegation: (
+      ...args: Parameters<InboxDatabase["getDelegation"]>
+    ) => Effect.Effect<ReturnType<InboxDatabase["getDelegation"]>, InboxStoreError>;
+    readonly saveDelegation: (
+      ...args: Parameters<InboxDatabase["saveDelegation"]>
+    ) => Effect.Effect<ReturnType<InboxDatabase["saveDelegation"]>, InboxStoreError>;
+    readonly markAgentSeen: (
+      ...args: Parameters<InboxDatabase["markAgentSeen"]>
+    ) => Effect.Effect<ReturnType<InboxDatabase["markAgentSeen"]>, InboxStoreError>;
+    readonly setSettled: (
+      ...args: Parameters<InboxDatabase["setSettled"]>
+    ) => Effect.Effect<ReturnType<InboxDatabase["setSettled"]>, InboxStoreError>;
+    readonly listLinks: (
+      ...args: Parameters<InboxDatabase["listLinks"]>
+    ) => Effect.Effect<ReturnType<InboxDatabase["listLinks"]>, InboxStoreError>;
+    readonly linksForDelegation: (
+      ...args: Parameters<InboxDatabase["linksForDelegation"]>
+    ) => Effect.Effect<ReturnType<InboxDatabase["linksForDelegation"]>, InboxStoreError>;
+    readonly channelOfThread: (
+      ...args: Parameters<InboxDatabase["channelOfThread"]>
+    ) => Effect.Effect<ReturnType<InboxDatabase["channelOfThread"]>, InboxStoreError>;
+    readonly addLink: (
+      ...args: Parameters<InboxDatabase["addLink"]>
+    ) => Effect.Effect<ReturnType<InboxDatabase["addLink"]>, InboxStoreError>;
+    readonly detachLink: (
+      ...args: Parameters<InboxDatabase["detachLink"]>
+    ) => Effect.Effect<ReturnType<InboxDatabase["detachLink"]>, InboxStoreError>;
+    readonly close: () => Effect.Effect<void, InboxStoreError>;
+  }
+>()("t3/fork/inbox/store/InboxStore") {}
+
+class InboxDatabase {
+  private readonly db: NodeSqlite.DatabaseSync;
+  constructor(db: NodeSqlite.DatabaseSync) {
+    this.db = db;
     this.db.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;");
     this.migrate();
   }
@@ -211,10 +274,6 @@ export class InboxStore {
       this.db.exec("ROLLBACK");
       throw error;
     }
-  }
-
-  close() {
-    this.db.close();
   }
 
   listConversationReads(channelId: string): ReadonlyArray<ConversationRead> {
@@ -390,3 +449,164 @@ export class InboxStore {
       .run(at, reason, delegationId, threadId);
   }
 }
+
+export const make = Effect.fn("InboxStore.make")(function* (filePath: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  if (filePath !== ":memory:") {
+    yield* fs
+      .makeDirectory(path.dirname(filePath), { recursive: true })
+      .pipe(
+        Effect.mapError(
+          (cause) => new InboxStoreError({ operation: "mkdir", path: filePath, cause }),
+        ),
+      );
+  }
+  const { database, close } = yield* Effect.acquireRelease(
+    Effect.try({
+      try: () => {
+        const db = new NodeSqlite.DatabaseSync(filePath);
+        let database: InboxDatabase;
+        try {
+          database = new InboxDatabase(db);
+        } catch (cause) {
+          db.close();
+          throw cause;
+        }
+        let closed = false;
+        const close = Effect.fn("InboxStore.close")(() =>
+          Effect.try({
+            try: () => {
+              if (!closed) {
+                db.close();
+                closed = true;
+              }
+            },
+            catch: (cause) => new InboxStoreError({ operation: "close", path: filePath, cause }),
+          }),
+        );
+        return { database, close };
+      },
+      catch: (cause) => new InboxStoreError({ operation: "open", path: filePath, cause }),
+    }),
+    ({ close }) => close().pipe(Effect.orDie),
+  );
+  return InboxStore.of({
+    close,
+    listConversationReads: Effect.fn("InboxStore.listConversationReads")(
+      (...args: Parameters<InboxDatabase["listConversationReads"]>) =>
+        Effect.try({
+          try: () => database.listConversationReads(...args),
+          catch: (cause) =>
+            new InboxStoreError({ operation: "listConversationReads", path: filePath, cause }),
+        }),
+    ),
+    markConversationRead: Effect.fn("InboxStore.markConversationRead")(
+      (...args: Parameters<InboxDatabase["markConversationRead"]>) =>
+        Effect.try({
+          try: () => database.markConversationRead(...args),
+          catch: (cause) =>
+            new InboxStoreError({ operation: "markConversationRead", path: filePath, cause }),
+        }),
+    ),
+    pinConversationUnread: Effect.fn("InboxStore.pinConversationUnread")(
+      (...args: Parameters<InboxDatabase["pinConversationUnread"]>) =>
+        Effect.try({
+          try: () => database.pinConversationUnread(...args),
+          catch: (cause) =>
+            new InboxStoreError({ operation: "pinConversationUnread", path: filePath, cause }),
+        }),
+    ),
+    readAllBefore: Effect.fn("InboxStore.readAllBefore")(
+      (...args: Parameters<InboxDatabase["readAllBefore"]>) =>
+        Effect.try({
+          try: () => database.readAllBefore(...args),
+          catch: (cause) =>
+            new InboxStoreError({ operation: "readAllBefore", path: filePath, cause }),
+        }),
+    ),
+    markAllRead: Effect.fn("InboxStore.markAllRead")(
+      (...args: Parameters<InboxDatabase["markAllRead"]>) =>
+        Effect.try({
+          try: () => database.markAllRead(...args),
+          catch: (cause) =>
+            new InboxStoreError({ operation: "markAllRead", path: filePath, cause }),
+        }),
+    ),
+    listDelegations: Effect.fn("InboxStore.listDelegations")(
+      (...args: Parameters<InboxDatabase["listDelegations"]>) =>
+        Effect.try({
+          try: () => database.listDelegations(...args),
+          catch: (cause) =>
+            new InboxStoreError({ operation: "listDelegations", path: filePath, cause }),
+        }),
+    ),
+    getDelegation: Effect.fn("InboxStore.getDelegation")(
+      (...args: Parameters<InboxDatabase["getDelegation"]>) =>
+        Effect.try({
+          try: () => database.getDelegation(...args),
+          catch: (cause) =>
+            new InboxStoreError({ operation: "getDelegation", path: filePath, cause }),
+        }),
+    ),
+    saveDelegation: Effect.fn("InboxStore.saveDelegation")(
+      (...args: Parameters<InboxDatabase["saveDelegation"]>) =>
+        Effect.try({
+          try: () => database.saveDelegation(...args),
+          catch: (cause) =>
+            new InboxStoreError({ operation: "saveDelegation", path: filePath, cause }),
+        }),
+    ),
+    markAgentSeen: Effect.fn("InboxStore.markAgentSeen")(
+      (...args: Parameters<InboxDatabase["markAgentSeen"]>) =>
+        Effect.try({
+          try: () => database.markAgentSeen(...args),
+          catch: (cause) =>
+            new InboxStoreError({ operation: "markAgentSeen", path: filePath, cause }),
+        }),
+    ),
+    setSettled: Effect.fn("InboxStore.setSettled")(
+      (...args: Parameters<InboxDatabase["setSettled"]>) =>
+        Effect.try({
+          try: () => database.setSettled(...args),
+          catch: (cause) => new InboxStoreError({ operation: "setSettled", path: filePath, cause }),
+        }),
+    ),
+    listLinks: Effect.fn("InboxStore.listLinks")(
+      (...args: Parameters<InboxDatabase["listLinks"]>) =>
+        Effect.try({
+          try: () => database.listLinks(...args),
+          catch: (cause) => new InboxStoreError({ operation: "listLinks", path: filePath, cause }),
+        }),
+    ),
+    linksForDelegation: Effect.fn("InboxStore.linksForDelegation")(
+      (...args: Parameters<InboxDatabase["linksForDelegation"]>) =>
+        Effect.try({
+          try: () => database.linksForDelegation(...args),
+          catch: (cause) =>
+            new InboxStoreError({ operation: "linksForDelegation", path: filePath, cause }),
+        }),
+    ),
+    channelOfThread: Effect.fn("InboxStore.channelOfThread")(
+      (...args: Parameters<InboxDatabase["channelOfThread"]>) =>
+        Effect.try({
+          try: () => database.channelOfThread(...args),
+          catch: (cause) =>
+            new InboxStoreError({ operation: "channelOfThread", path: filePath, cause }),
+        }),
+    ),
+    addLink: Effect.fn("InboxStore.addLink")((...args: Parameters<InboxDatabase["addLink"]>) =>
+      Effect.try({
+        try: () => database.addLink(...args),
+        catch: (cause) => new InboxStoreError({ operation: "addLink", path: filePath, cause }),
+      }),
+    ),
+    detachLink: Effect.fn("InboxStore.detachLink")(
+      (...args: Parameters<InboxDatabase["detachLink"]>) =>
+        Effect.try({
+          try: () => database.detachLink(...args),
+          catch: (cause) => new InboxStoreError({ operation: "detachLink", path: filePath, cause }),
+        }),
+    ),
+  });
+});

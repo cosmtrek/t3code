@@ -32,7 +32,7 @@ import {
   scopeIsChain,
   sortMessages,
 } from "./derive.ts";
-import { InboxStore } from "./store.ts";
+import * as InboxStore from "./store.ts";
 
 const NOW = Date.parse("2026-11-14T12:00:00.000Z");
 const hoursAgo = (hours: number) => new Date(NOW - hours * 3_600_000).toISOString();
@@ -334,78 +334,81 @@ describe("delegation text", () => {
 });
 
 describe("InboxStore", () => {
-  it("round-trips reads, delegations, and links", () => {
-    const store = new InboxStore(":memory:");
-    const key = { channelId: "a", conversationId: "b" };
-    store.markConversationRead(key, hoursAgo(1));
-    store.pinConversationUnread(key);
-    // A stale view moves nothing back.
-    store.markConversationRead(key, hoursAgo(3));
-    expect(store.listConversationReads("a")).toEqual([
-      { ...key, readAt: hoursAgo(1), pinnedUnread: false },
-    ]);
-    store.pinConversationUnread(key);
-    expect(store.readAllBefore("a", hoursAgo(5))).toBe(hoursAgo(5));
-    expect(store.readAllBefore("a", hoursAgo(4))).toBe(hoursAgo(5));
-    store.markAllRead("a", hoursAgo(0));
-    store.markAllRead("a", hoursAgo(2));
-    expect(store.readAllBefore("a", hoursAgo(9))).toBe(hoursAgo(0));
-    expect(store.listConversationReads("a")[0]?.pinnedUnread).toBe(false);
+  it.effect("round-trips reads, delegations, and links", () =>
+    Effect.gen(function* () {
+      const store = yield* InboxStore.make(":memory:");
+      const key = { channelId: "a", conversationId: "b" };
+      yield* store.markConversationRead(key, hoursAgo(1));
+      yield* store.pinConversationUnread(key);
+      // A stale view moves nothing back.
+      yield* store.markConversationRead(key, hoursAgo(3));
+      expect(yield* store.listConversationReads("a")).toEqual([
+        { ...key, readAt: hoursAgo(1), pinnedUnread: false },
+      ]);
+      yield* store.pinConversationUnread(key);
+      expect(yield* store.readAllBefore("a", hoursAgo(5))).toBe(hoursAgo(5));
+      expect(yield* store.readAllBefore("a", hoursAgo(4))).toBe(hoursAgo(5));
+      yield* store.markAllRead("a", hoursAgo(0));
+      yield* store.markAllRead("a", hoursAgo(2));
+      expect(yield* store.readAllBefore("a", hoursAgo(9))).toBe(hoursAgo(0));
+      expect((yield* store.listConversationReads("a"))[0]?.pinnedUnread).toBe(false);
 
-    const delegation = {
-      ...key,
-      id: "d1",
-      anchorMessageId: "m1",
-      scope: "range" as const,
-      untilAt: hoursAgo(2),
-      preview: "first",
-      createdAt: hoursAgo(3),
-    };
-    store.saveDelegation(delegation);
-    store.markAgentSeen("d1", hoursAgo(1));
-    store.markAgentSeen("d1", hoursAgo(2));
-    // Delegated again: the new range, the first preview and creation time.
-    store.saveDelegation({
-      ...delegation,
-      scope: "chain",
-      untilAt: null,
-      preview: null,
-      createdAt: hoursAgo(0),
-    });
-    expect(store.listDelegations("a")).toEqual([
-      { ...delegation, scope: "chain", untilAt: null, agentSeenAt: hoursAgo(1), settledAt: null },
-    ]);
+      const delegation = {
+        ...key,
+        id: "d1",
+        anchorMessageId: "m1",
+        scope: "range" as const,
+        untilAt: hoursAgo(2),
+        preview: "first",
+        createdAt: hoursAgo(3),
+      };
+      yield* store.saveDelegation(delegation);
+      yield* store.markAgentSeen("d1", hoursAgo(1));
+      yield* store.markAgentSeen("d1", hoursAgo(2));
+      // Delegated again: the new range, the first preview and creation time.
+      yield* store.saveDelegation({
+        ...delegation,
+        scope: "chain",
+        untilAt: null,
+        preview: null,
+        createdAt: hoursAgo(0),
+      });
+      expect(yield* store.listDelegations("a")).toEqual([
+        { ...delegation, scope: "chain", untilAt: null, agentSeenAt: hoursAgo(1), settledAt: null },
+      ]);
 
-    store.addLink({
-      ...key,
-      delegationId: "d1",
-      threadId: "t1",
-      projectId: "p",
-      createdAt: hoursAgo(1),
-    });
-    store.detachLink("d1", "t1", "deleted", hoursAgo(0));
-    expect(store.linksForDelegation("d1")).toEqual([
-      {
+      yield* store.addLink({
         ...key,
         delegationId: "d1",
         threadId: "t1",
         projectId: "p",
         createdAt: hoursAgo(1),
-        detachedAt: hoursAgo(0),
-        detachedReason: "deleted",
-      },
-    ]);
-    store.close();
-  });
+      });
+      yield* store.detachLink("d1", "t1", "deleted", hoursAgo(0));
+      expect(yield* store.linksForDelegation("d1")).toEqual([
+        {
+          ...key,
+          delegationId: "d1",
+          threadId: "t1",
+          projectId: "p",
+          createdAt: hoursAgo(1),
+          detachedAt: hoursAgo(0),
+          detachedReason: "deleted",
+        },
+      ]);
+      yield* store.close();
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
 
-  it("carries v1 topics over: reads per conversation, linked topics as delegations", async () => {
-    const file = NodePath.join(
-      await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "inbox-")),
-      "db",
-    );
-    // Version 2 as the previous build left it.
-    const v2 = new NodeSqlite.DatabaseSync(file);
-    v2.exec(`CREATE TABLE links (
+  it.effect("carries v1 topics over: reads per conversation, linked topics as delegations", () =>
+    Effect.gen(function* () {
+      const file = NodePath.join(
+        yield* Effect.promise(() => NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "inbox-"))),
+        "db",
+      );
+      // Version 2 as the previous build left it.
+      const v2 = new NodeSqlite.DatabaseSync(file);
+      v2.exec(`CREATE TABLE links (
         item_id TEXT NOT NULL, channel_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
         topic_id TEXT NOT NULL, thread_id TEXT NOT NULL, project_id TEXT NOT NULL,
         created_at TEXT NOT NULL, detached_at TEXT, detached_reason TEXT,
@@ -422,37 +425,53 @@ describe("InboxStore", () => {
       INSERT INTO links VALUES ('item-t', 'a', 'c', 't', 'thread-1', 'p', '${hoursAgo(6)}', '${hoursAgo(5)}', 'replaced');
       INSERT INTO links VALUES ('item-t', 'a', 'c', 't', 'thread-2', 'p', '${hoursAgo(5)}', NULL, NULL);
       PRAGMA user_version = 2;`);
-    v2.close();
+      v2.close();
 
-    const store = new InboxStore(file);
-    expect(
-      store
-        .listConversationReads("a")
-        .toSorted((x, y) => x.conversationId.localeCompare(y.conversationId)),
-    ).toEqual([
-      { channelId: "a", conversationId: "b", readAt: hoursAgo(1), pinnedUnread: true },
-      { channelId: "a", conversationId: "c", readAt: null, pinnedUnread: false },
-    ]);
-    expect(store.listDelegations("a")).toEqual([
-      {
-        id: "item-t",
-        channelId: "a",
-        conversationId: "c",
-        anchorMessageId: "t",
-        scope: null,
-        untilAt: null,
-        preview: null,
-        createdAt: hoursAgo(6),
-        agentSeenAt: hoursAgo(4),
-        settledAt: null,
-      },
-    ]);
-    expect(store.linksForDelegation("item-t").map((link) => link.threadId)).toEqual([
-      "thread-2",
-      "thread-1",
-    ]);
-    store.close();
-  });
+      const store = yield* InboxStore.make(file);
+      expect(
+        (yield* store.listConversationReads("a")).toSorted((x, y) =>
+          x.conversationId.localeCompare(y.conversationId),
+        ),
+      ).toEqual([
+        { channelId: "a", conversationId: "b", readAt: hoursAgo(1), pinnedUnread: true },
+        { channelId: "a", conversationId: "c", readAt: null, pinnedUnread: false },
+      ]);
+      expect(yield* store.listDelegations("a")).toEqual([
+        {
+          id: "item-t",
+          channelId: "a",
+          conversationId: "c",
+          anchorMessageId: "t",
+          scope: null,
+          untilAt: null,
+          preview: null,
+          createdAt: hoursAgo(6),
+          agentSeenAt: hoursAgo(4),
+          settledAt: null,
+        },
+      ]);
+      expect((yield* store.linksForDelegation("item-t")).map((link) => link.threadId)).toEqual([
+        "thread-2",
+        "thread-1",
+      ]);
+      yield* store.markConversationRead({ channelId: "a", conversationId: "b" }, hoursAgo(0));
+      yield* store.setSettled("item-t", hoursAgo(0));
+      yield* store.close();
+      const reopened = yield* InboxStore.make(file);
+      expect(
+        (yield* reopened.listConversationReads("a")).find((read) => read.conversationId === "b"),
+      ).toEqual({ channelId: "a", conversationId: "b", readAt: hoursAgo(0), pinnedUnread: false });
+      expect((yield* reopened.getDelegation("item-t"))?.settledAt).toBe(hoursAgo(0));
+      expect((yield* reopened.linksForDelegation("item-t")).map((link) => link.threadId)).toEqual([
+        "thread-2",
+        "thread-1",
+      ]);
+      yield* reopened.close();
+      const disk = new NodeSqlite.DatabaseSync(file);
+      expect(disk.prepare("PRAGMA user_version").get()?.user_version).toBe(4);
+      disk.close();
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
 });
 
 describe("messages", () => {

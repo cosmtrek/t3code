@@ -78,7 +78,7 @@ import {
   type ConversationState,
 } from "./derive.ts";
 import { InboxRuntime } from "./InboxRuntime.ts";
-import type { Delegation, DelegationScope, Link } from "./store.ts";
+import type { Delegation, DelegationScope, Link, InboxStoreError } from "./store.ts";
 
 export class ForkHttpError extends Schema.TaggedError<ForkHttpError>()("ForkHttpError", {
   status: Schema.Number,
@@ -400,7 +400,7 @@ const inspectLink = Effect.fn("ForkInbox.inspectLink")(function* (
   if (shell === null || shell.deletedAt !== null) {
     const at = link.detachedAt ?? DateTime.formatIso(yield* DateTime.now);
     if (link.detachedAt === null) {
-      runtime.store.detachLink(link.delegationId, link.threadId, "deleted", at);
+      yield* runtime.store.detachLink(link.delegationId, link.threadId, "deleted", at);
     }
     return {
       ...base,
@@ -487,7 +487,7 @@ interface ChannelListing {
 interface ListingMemo {
   readonly revision: number;
   readonly at: number;
-  readonly fiber: Fiber.Fiber<ChannelListing, ForkHttpError>;
+  readonly fiber: Fiber.Fiber<ChannelListing, ForkHttpError | InboxStoreError>;
 }
 
 /** Bounds a change no signal announced, as the client's poll does. */
@@ -553,9 +553,11 @@ const computeChannel = Effect.fn("ForkInbox.computeChannel")(function* (channelI
     .getAllPages(channelId, conversationsPath, Conversation, { maxPages: CONVERSATION_PAGES })
     .pipe(Effect.mapError(toForkError));
   const reads = new Map(
-    store.listConversationReads(channelId).map((read) => [read.conversationId, read] as const),
+    (yield* store.listConversationReads(channelId)).map(
+      (read) => [read.conversationId, read] as const,
+    ),
   );
-  const readAllBefore = store.readAllBefore(
+  const readAllBefore = yield* store.readAllBefore(
     channelId,
     DateTime.formatIso(
       DateTime.makeUnsafe((yield* Clock.currentTimeMillis) - FIRST_READ_LOOKBACK_MS),
@@ -582,14 +584,14 @@ const computeChannel = Effect.fn("ForkInbox.computeChannel")(function* (channelI
     .toSorted(compareConversations);
   const linksByDelegation = new Map<string, Link[]>();
   // Newest first, so each delegation's list starts with its latest link.
-  for (const link of store.listLinks(channelId)) {
+  for (const link of yield* store.listLinks(channelId)) {
     const list = linksByDelegation.get(link.delegationId) ?? [];
     list.push(link);
     linksByDelegation.set(link.delegationId, list);
   }
   const names = new Map(listed.items.map((conversation) => [conversation.id, conversation.name]));
   const delegations = yield* Effect.forEach(
-    store.listDelegations(channelId),
+    yield* store.listDelegations(channelId),
     (delegation) =>
       Effect.gen(function* () {
         // A settled delegation is history: it raises no signal, so its thread is not read here.
@@ -708,9 +710,10 @@ export const overview = Effect.fn("ForkInbox.overview")(function* () {
         const read = access.read
           ? yield* readChannel(channel.id).pipe(
               Effect.map((result) => ({ ok: true as const, result })),
-              Effect.catch((error: ForkHttpError) =>
-                Effect.succeed({ ok: false as const, error: error.detail }),
-              ),
+              Effect.catchTags({
+                ForkHttpError: (error) =>
+                  Effect.succeed({ ok: false as const, error: error.detail }),
+              }),
               Effect.timeoutOption(OVERVIEW_WAIT),
             )
           : Option.none();
@@ -890,7 +893,7 @@ const findDelegation = Effect.fn("ForkInbox.findDelegation")(function* (
 ) {
   const runtime = yield* InboxRuntime;
   const channel = yield* channelOrMissing(channelId);
-  const delegation = runtime.store.getDelegation(delegationId);
+  const delegation = yield* runtime.store.getDelegation(delegationId);
   if (delegation === null || delegation.channelId !== channelId) return yield* missingDelegation();
   const listing = yield* readChannel(channelId);
   const listed = listing.delegations.find((candidate) => candidate.id === delegationId);
@@ -899,9 +902,10 @@ const findDelegation = Effect.fn("ForkInbox.findDelegation")(function* (
   const item =
     listed.settledAt === null
       ? listed
-      : yield* inspectDelegation(delegation, runtime.store.linksForDelegation(delegation.id)).pipe(
-          Effect.map(({ thread, lastSentAt }) => ({ ...listed, thread, lastSentAt })),
-        );
+      : yield* inspectDelegation(
+          delegation,
+          yield* runtime.store.linksForDelegation(delegation.id),
+        ).pipe(Effect.map(({ thread, lastSentAt }) => ({ ...listed, thread, lastSentAt })));
   const conversation = listing.raw.find((candidate) => candidate.id === delegation.conversationId);
   return {
     delegation,
@@ -938,7 +942,9 @@ export const readDelegation = Effect.fn("ForkInbox.readDelegation")(function* (
         )).draft
       : null;
   const history = yield* Effect.forEach(
-    runtime.store.linksForDelegation(item.id).filter((link) => link.threadId !== thread?.threadId),
+    (yield* runtime.store.linksForDelegation(item.id)).filter(
+      (link) => link.threadId !== thread?.threadId,
+    ),
     (link) => inspectLink(link, { current: false }),
   );
   const access = channelAccess(channel.status);
@@ -1015,8 +1021,8 @@ export const setRead = Effect.fn("ForkInbox.setRead")(function* (body: unknown) 
   );
   const runtime = yield* InboxRuntime;
   const key = { channelId: input.channelId, conversationId: input.conversationId };
-  if (input.read) runtime.store.markConversationRead(key, input.lastMessageAt);
-  else runtime.store.pinConversationUnread(key);
+  if (input.read) yield* runtime.store.markConversationRead(key, input.lastMessageAt);
+  else yield* runtime.store.pinConversationUnread(key);
   yield* runtime.hub.publish({ type: "inbox", channelId: input.channelId });
   return { ok: true };
 });
@@ -1035,7 +1041,7 @@ export const markSeen = Effect.fn("ForkInbox.markSeen")(function* (body: unknown
     Effect.mapError(() => badRequest("Name the delegation and the run end it showed.")),
   );
   const runtime = yield* InboxRuntime;
-  runtime.store.markAgentSeen(input.delegationId, input.runCompletedAt);
+  yield* runtime.store.markAgentSeen(input.delegationId, input.runCompletedAt);
   yield* runtime.hub.publish({ type: "inbox", channelId: input.channelId });
   return { ok: true };
 });
@@ -1056,15 +1062,15 @@ export const settle = Effect.fn("ForkInbox.settle")(function* (body: unknown) {
     Effect.mapError(() => badRequest("Name the delegation and whether it is settled.")),
   );
   const runtime = yield* InboxRuntime;
-  const delegation = runtime.store.getDelegation(input.delegationId);
+  const delegation = yield* runtime.store.getDelegation(input.delegationId);
   if (delegation === null || delegation.channelId !== input.channelId) {
     return yield* badRequest("There is no such delegation.");
   }
-  runtime.store.setSettled(
+  yield* runtime.store.setSettled(
     delegation.id,
     input.settled ? DateTime.formatIso(yield* DateTime.now) : null,
   );
-  const active = activeLinkOf(runtime.store.linksForDelegation(delegation.id));
+  const active = activeLinkOf(yield* runtime.store.linksForDelegation(delegation.id));
   if (input.settled && active !== undefined) {
     const threads = yield* ThreadManagement.ThreadManagementService;
     yield* threads
@@ -1091,7 +1097,7 @@ export const markAllRead = Effect.fn("ForkInbox.markAllRead")(function* (body: u
     Effect.mapError(() => badRequest("Name the channel and a time.")),
   );
   const runtime = yield* InboxRuntime;
-  runtime.store.markAllRead(input.channelId, input.before);
+  yield* runtime.store.markAllRead(input.channelId, input.before);
   yield* runtime.hub.publish({ type: "inbox", channelId: input.channelId });
   return { ok: true };
 });
@@ -1161,7 +1167,7 @@ export const delegateOptions = Effect.fn("ForkInbox.delegateOptions")(function* 
       Effect.orElseSucceed(() => [project.id, null] as const),
     ),
   );
-  const links = runtime.store.linksForDelegation(delegationId);
+  const links = yield* runtime.store.linksForDelegation(delegationId);
   const lastProjectId = links[0]?.projectId ?? null;
   const active = activeLinkOf(links);
   const existing = active ? yield* inspectLink(active, { current: true }) : null;
@@ -1173,7 +1179,7 @@ export const delegateOptions = Effect.fn("ForkInbox.delegateOptions")(function* 
     : null;
   return {
     delegationId,
-    scope: runtime.store.getDelegation(delegationId)?.scope ?? null,
+    scope: (yield* runtime.store.getDelegation(delegationId))?.scope ?? null,
     projects: projects.map((project) => ({
       id: project.id,
       title: project.title,
@@ -1389,7 +1395,7 @@ export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown
   const delegationId = delegationIdFor(input);
 
   const current = Effect.gen(function* () {
-    const active = activeLinkOf(runtime.store.linksForDelegation(delegationId));
+    const active = activeLinkOf(yield* runtime.store.linksForDelegation(delegationId));
     if (!active) return null;
     const view = yield* inspectLink(active, { current: true });
     return isCurrent(view) ? { threadId: view.threadId, projectId: view.projectId } : null;
@@ -1539,7 +1545,7 @@ export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown
       ),
     );
     const at = DateTime.formatIso(yield* DateTime.now);
-    runtime.store.saveDelegation({
+    yield* runtime.store.saveDelegation({
       id: delegationId,
       channelId: input.channelId,
       conversationId: input.conversationId,
@@ -1549,7 +1555,7 @@ export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown
       preview,
       createdAt: at,
     });
-    runtime.store.addLink({
+    yield* runtime.store.addLink({
       delegationId,
       channelId: input.channelId,
       conversationId: input.conversationId,
@@ -1558,7 +1564,7 @@ export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown
       createdAt: at,
     });
     if (replacing !== null) {
-      runtime.store.detachLink(delegationId, replacing.threadId, "replaced", at);
+      yield* runtime.store.detachLink(delegationId, replacing.threadId, "replaced", at);
     } else {
       yield* acknowledge(input.channelId, input.conversationId, request, channel.config);
     }
@@ -1648,13 +1654,15 @@ export const send = Effect.fn("ForkInbox.send")(function* (body: unknown) {
   const mentions = supports(channel, "mentions") ? mentionsToSend(text, input.mentions ?? []) : [];
   const markdown = input.format === "markdown" && supports(channel, "markdown");
   const delegation =
-    input.delegationId === undefined ? null : runtime.store.getDelegation(input.delegationId);
+    input.delegationId === undefined
+      ? null
+      : yield* runtime.store.getDelegation(input.delegationId);
   const delegationId =
     delegation !== null && delegation.channelId === input.channelId ? delegation.id : null;
   const active =
     delegationId === null
       ? undefined
-      : activeLinkOf(runtime.store.linksForDelegation(delegationId));
+      : activeLinkOf(yield* runtime.store.linksForDelegation(delegationId));
   const draftDir =
     delegationId !== null && active
       ? contextFiles.threadContextDir(runtime.itemsDir, delegationId, active.threadId)
@@ -1779,10 +1787,10 @@ export const discardDraft = Effect.fn("ForkInbox.discardDraft")(function* (body:
   );
   const runtime = yield* InboxRuntime;
   const contextFiles = yield* Artifacts.Artifacts;
-  const delegation = runtime.store.getDelegation(input.delegationId);
+  const delegation = yield* runtime.store.getDelegation(input.delegationId);
   const active =
     delegation !== null && delegation.channelId === input.channelId
-      ? activeLinkOf(runtime.store.linksForDelegation(delegation.id))
+      ? activeLinkOf(yield* runtime.store.linksForDelegation(delegation.id))
       : undefined;
   if (active === undefined) return yield* badRequest("This delegation has no thread.");
   const discardedAt = DateTime.formatIso(yield* DateTime.now);

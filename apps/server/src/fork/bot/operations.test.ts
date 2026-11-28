@@ -31,7 +31,7 @@ import * as ChannelHub from "../channels/hub.ts";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import { ForkHttpError } from "../inbox/operations.ts";
 import { InboxRuntime } from "../inbox/InboxRuntime.ts";
-import { InboxStore } from "../inbox/store.ts";
+import * as InboxStore from "../inbox/store.ts";
 import { BotRuntime } from "./BotRuntime.ts";
 import { followThreads, reconcileThreads } from "./events.ts";
 import * as Bots from "./operations.ts";
@@ -358,7 +358,7 @@ const withChat = <E>(
             { create: false },
           );
         });
-        const inbox = new InboxStore(":memory:");
+        const inbox = yield* InboxStore.make(":memory:").pipe(Effect.provide(NodeServices.layer));
         yield* program(h).pipe(
           Effect.provideService(InboxRuntime, {
             hub,

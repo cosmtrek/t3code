@@ -31,6 +31,7 @@ import type { HubEvent } from "./channels/hub.ts";
 import { InboxRuntime, type InboxRuntimeShape } from "./inbox/InboxRuntime.ts";
 import * as Artifacts from "./inbox/artifacts.ts";
 import * as Inbox from "./inbox/operations.ts";
+import type * as InboxStore from "./inbox/store.ts";
 
 const FORK_ROUTE_PREFIX = "/api/fork";
 const CHANNELS = `${FORK_ROUTE_PREFIX}/channels`;
@@ -109,7 +110,7 @@ const fileBody = Effect.gen(function* () {
   );
 });
 
-const makeRoute =
+export const makeRoute =
   (
     runtime: InboxRuntimeShape,
     bots: BotRuntime["Service"],
@@ -121,7 +122,10 @@ const makeRoute =
     scope: AuthEnvironmentScope,
     handle: Effect.Effect<
       A,
-      Inbox.ForkHttpError | BotRuntimeError | PlatformError.PlatformError,
+      | Inbox.ForkHttpError
+      | BotRuntimeError
+      | PlatformError.PlatformError
+      | InboxStore.InboxStoreError,
       R
     >,
   ) =>

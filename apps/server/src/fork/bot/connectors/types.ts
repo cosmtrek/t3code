@@ -11,6 +11,7 @@ import { ForkHttpError } from "../../inbox/operations.ts";
 import type { Artifacts } from "../../inbox/artifacts.ts";
 import type { BotRuntime } from "../BotRuntime.ts";
 import type { notify } from "../operations.ts";
+import type { InboxStoreError } from "../../inbox/store.ts";
 import type { Bot, ConnectorSettings } from "../store.ts";
 
 /** What a connector may use: the bot's own services, its threads, and waking bots. */
@@ -56,7 +57,7 @@ export interface ConnectorCall {
 
 type Run = Effect.Effect<
   string,
-  ForkHttpError | Effect.Error<ReturnType<typeof notify>>,
+  ForkHttpError | InboxStoreError | Effect.Error<ReturnType<typeof notify>>,
   BotServices
 >;
 
@@ -84,7 +85,11 @@ export interface Connector {
   readonly brief: (instance: Instance, settings: ConnectorSettings) => ReadonlyArray<string>;
   readonly resolve: (
     call: ConnectorCall,
-  ) => Effect.Effect<Action, ForkHttpError | Effect.Error<ReturnType<typeof notify>>, BotServices>;
+  ) => Effect.Effect<
+    Action,
+    ForkHttpError | InboxStoreError | Effect.Error<ReturnType<typeof notify>>,
+    BotServices
+  >;
   /** The kind's own settings from what the user saved. */
   readonly config: (
     input: unknown,
