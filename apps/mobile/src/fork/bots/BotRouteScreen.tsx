@@ -4,11 +4,16 @@ import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import type {
   BotActivity,
-  BotChatMessage,
   BotDetail,
   BotQuestion,
+  PendingBotMessage,
+  ShownBotMessage,
 } from "@t3tools/fork-client/bots";
-import { startsChatBreak } from "@t3tools/fork-client/bots";
+import {
+  pendingBotMessage,
+  startsChatBreak,
+  withPendingMessages,
+} from "@t3tools/fork-client/bots";
 import type { ForkEvent } from "@t3tools/fork-client/sse";
 import { parseThreadLinkHref } from "@t3tools/shared/threadLinks";
 import { useIsFocused, useNavigation, type StaticScreenProps } from "@react-navigation/native";
@@ -81,7 +86,7 @@ function BotRoute(props: { readonly environmentId: EnvironmentId; readonly botId
   );
   const [composerFocused, setComposerFocused] = useState(false);
   const [dockHeight, setDockHeight] = useState(0);
-  const [sending, setSending] = useState(false);
+  const [pending, setPending] = useState<ReadonlyArray<PendingBotMessage>>([]);
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<React.ComponentRef<typeof ScrollView>>(null);
   const nearEnd = useRef(true);
@@ -121,23 +126,31 @@ function BotRoute(props: { readonly environmentId: EnvironmentId; readonly botId
     void tryOpenWebLink(href, "markdown-link");
   };
 
-  const send = async (text: string) => {
-    setSending(true);
+  const chat = withPendingMessages(data?.chat ?? [], pending);
+  // The server starts the bot's turn before it answers, so the message shows before that.
+  const send = (text: string) => {
+    const entry = pendingBotMessage(text, data?.chat ?? []);
+    const shown = new Set(chat.map((line) => line.id));
+    setPending((current) => [...current.filter((other) => shown.has(other.key)), entry]);
     setError(null);
-    const sent = await forkRequest(environmentId, "/bots/send", {
+    nearEnd.current = true;
+    void forkRequest(environmentId, "/bots/send", {
       method: "POST",
-      body: { botId, text },
+      body: { botId, text: entry.text },
     }).then(
-      () => true,
+      () => detail.refresh(),
       (cause: unknown) => {
         setError(asForkError(cause).message);
-        return false;
+        setPending((current) =>
+          current.map((other) => (other === entry ? { ...other, failed: true } : other)),
+        );
       },
     );
-    setSending(false);
-    nearEnd.current = true;
-    detail.refresh();
-    return sent;
+    return Promise.resolve(true);
+  };
+  const retry = (entry: PendingBotMessage) => {
+    setPending((current) => current.filter((other) => other !== entry));
+    void send(entry.text);
   };
   const setPaused = (paused: boolean) => {
     setError(null);
@@ -243,22 +256,23 @@ function BotRoute(props: { readonly environmentId: EnvironmentId; readonly botId
               ) : (
                 <AppActivityIndicator className="my-12" colorClassName="accent-icon" />
               )
-            ) : data.chat.length === 0 ? (
+            ) : chat.length === 0 ? (
               <EmptyState
                 title="No messages yet"
                 detail={`Write to ${data.bot.name} below.`}
                 variant="plain"
               />
             ) : (
-              data.chat.map((message, index) => (
+              chat.map((message, index) => (
                 <Fragment key={message.id}>
-                  {startsChatBreak(data.chat[index - 1], message) ? (
+                  {startsChatBreak(chat[index - 1], message) ? (
                     <ChatTimeDivider createdAt={message.createdAt} />
                   ) : null}
                   <ChatLine
                     message={message}
                     textStyle={markdown.nativeTextStyle}
                     onLinkPress={onLinkPress}
+                    onRetry={retry}
                   />
                 </Fragment>
               ))
@@ -318,7 +332,7 @@ function BotRoute(props: { readonly environmentId: EnvironmentId; readonly botId
               ownerKey={`bot:${environmentId}:${botId}`}
               label={data?.bot.name ?? "Bot"}
               blocked={null}
-              posting={sending}
+              posting={false}
               bottomInset={composerBottomInset}
               contentMaxWidth={contentMaxWidth}
               copy={{
@@ -393,9 +407,10 @@ function useMarkSeen(environmentId: EnvironmentId, botId: string, data: BotDetai
 }
 
 function ChatLine(props: {
-  readonly message: BotChatMessage;
+  readonly message: ShownBotMessage;
   readonly textStyle: ReturnType<typeof useMarkdownPreviewStyles>["nativeTextStyle"];
   readonly onLinkPress: (href: string) => void;
+  readonly onRetry: (entry: PendingBotMessage) => void;
 }) {
   const { message } = props;
   const userStyle = useResolveClassNames("text-sm text-user-bubble-foreground bg-user-bubble");
@@ -432,7 +447,15 @@ function ChatLine(props: {
             onLinkPress={props.onLinkPress}
           />
         </View>
-        {message.turnRunId === null ? (
+        {message.pending?.failed ? (
+          <Pressable
+            accessibilityRole="button"
+            className="self-end pe-1"
+            onPress={() => message.pending && props.onRetry(message.pending)}
+          >
+            <Text className="text-xs text-danger-foreground">Not sent · Tap to retry</Text>
+          </Pressable>
+        ) : message.turnRunId === null ? (
           <Text className="self-end pe-1 text-xs text-foreground-muted">Waiting for the bot</Text>
         ) : null}
       </View>

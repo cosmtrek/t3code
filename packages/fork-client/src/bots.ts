@@ -238,3 +238,62 @@ export function startsChatBreak(
   if (gap >= LONG_GAP_MS || dayOf(at) !== dayOf(before)) return true;
   return previous.role !== "user" && message.role !== "user" && gap >= SAME_POST_MS;
 }
+
+/** A message the user sent that no read has carried yet: the chat shows it at once. */
+export interface PendingBotMessage {
+  readonly key: string;
+  readonly text: string;
+  readonly createdAt: string;
+  /** The chat's newest message when it was sent: the server's copy lands after it. */
+  readonly after: string | null;
+  readonly failed: boolean;
+}
+
+export type ShownBotMessage = BotChatMessage & { readonly pending?: PendingBotMessage };
+
+let pendingCount = 0;
+
+export function pendingBotMessage(
+  text: string,
+  chat: ReadonlyArray<BotChatMessage>,
+): PendingBotMessage {
+  pendingCount += 1;
+  return {
+    key: `pending:${pendingCount}`,
+    text: text.trim(),
+    createdAt: new Date().toISOString(),
+    after: chat.at(-1)?.id ?? null,
+    failed: false,
+  };
+}
+
+/** The chat with the user's sent messages that a read has not carried yet. */
+export function withPendingMessages(
+  chat: ReadonlyArray<BotChatMessage>,
+  pending: ReadonlyArray<PendingBotMessage>,
+): ReadonlyArray<ShownBotMessage> {
+  if (pending.length === 0) return chat;
+  const carried = new Set<string>();
+  const waiting = pending.filter((entry) => {
+    if (entry.failed) return true;
+    const start = entry.after === null ? 0 : chat.findIndex((m) => m.id === entry.after) + 1;
+    const copy = chat
+      .slice(start)
+      .find((m) => m.role === "user" && m.text === entry.text && !carried.has(m.id));
+    if (copy === undefined) return true;
+    carried.add(copy.id);
+    return false;
+  });
+  if (waiting.length === 0) return chat;
+  return [
+    ...chat,
+    ...waiting.map((entry) => ({
+      id: entry.key,
+      role: "user" as const,
+      text: entry.text,
+      createdAt: entry.createdAt,
+      turnRunId: null,
+      pending: entry,
+    })),
+  ];
+}

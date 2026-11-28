@@ -4,7 +4,10 @@ import {
   botAttention,
   botRowStatus,
   botWorkThreadKeys,
+  pendingBotMessage,
   startsChatBreak,
+  withPendingMessages,
+  type BotChatMessage,
   type BotSummary,
 } from "./bots.ts";
 
@@ -98,5 +101,36 @@ describe("startsChatBreak", () => {
     expect(
       startsChatBreak(at("user", "2026-11-28T06:00:00Z"), at("bot", "2026-11-28T06:02:00Z")),
     ).toBe(false);
+  });
+});
+
+describe("withPendingMessages", () => {
+  const line = (id: string, text: string, role: BotChatMessage["role"] = "user") =>
+    ({ id, role, text, createdAt: "2026-11-27T10:00:00Z", turnRunId: null }) as BotChatMessage;
+  const before = [line("m1", "hello"), line("m2", "hi", "bot")];
+
+  it("shows a sent message until a read carries the server's copy", () => {
+    const sent = pendingBotMessage(" hello ", before);
+    expect(withPendingMessages(before, [sent]).map((m) => m.id)).toEqual(["m1", "m2", sent.key]);
+    const read = [...before, line("m3", "hello")];
+    expect(withPendingMessages(read, [sent])).toBe(read);
+  });
+
+  it("matches each copy once, so the same text sent twice shows twice", () => {
+    const first = pendingBotMessage("again", before);
+    const second = pendingBotMessage("again", before);
+    const read = [...before, line("m3", "again")];
+    expect(withPendingMessages(read, [first, second]).map((m) => m.id)).toEqual([
+      "m1",
+      "m2",
+      "m3",
+      second.key,
+    ]);
+  });
+
+  it("keeps a failed send in view", () => {
+    const failed = { ...pendingBotMessage("hello", before), failed: true };
+    const read = [...before, line("m3", "hello")];
+    expect(withPendingMessages(read, [failed]).at(-1)?.pending).toBe(failed);
   });
 });

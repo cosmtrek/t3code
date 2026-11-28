@@ -36,16 +36,14 @@ export function BotComposer({
   draftKey,
   placeholder,
   status,
-  sending,
   onSend,
 }: {
   readonly ref: Ref<BotComposerHandle>;
   readonly draftKey: string;
   readonly placeholder: string;
   readonly status?: ReactNode;
-  readonly sending: boolean;
-  /** Resolves true once sent, which clears the box. */
-  readonly onSend: (prompt: string) => Promise<boolean>;
+  /** The chat shows the message at once and owns a failed send, so the box clears on send. */
+  readonly onSend: (prompt: string) => void;
 }) {
   const editorRef = useRef<ComposerPromptEditorHandle>(null);
   const [prompt, setPrompt] = useState(() => drafts.get(draftKey) ?? "");
@@ -61,16 +59,14 @@ export function BotComposer({
   const sendShortcut = useClientSettings((settings) => settings.sendShortcut);
   const richTextEnabled = useClientSettings((settings) => settings.composerRichTextEnabled);
   const needsModifier = composerRequiresModifier(sendShortcut, prompt);
-  const canSend = prompt.trim() !== "" && !sending;
+  const canSend = prompt.trim() !== "";
 
   const send = () => {
     const text = promptRef.current.trim();
-    if (text === "" || sending) return false;
-    void onSend(text).then((sent) => {
-      if (!sent) return;
-      write("");
-      setCursor(0);
-    });
+    if (text === "") return false;
+    onSend(text);
+    write("");
+    setCursor(0);
     return true;
   };
 
@@ -137,7 +133,7 @@ export function BotComposer({
             <div className="flex min-w-0 items-center gap-1 px-2 pb-2">
               <div className="min-w-0 flex-1 truncate ps-2 text-xs">{status}</div>
               <SendButton
-                sending={sending}
+                sending={false}
                 disabled={!canSend}
                 label="Send"
                 shortcut={

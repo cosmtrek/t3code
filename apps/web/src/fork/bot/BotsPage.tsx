@@ -108,7 +108,6 @@ import { PaneHeader } from "../inbox/PaneHeader";
 import { formatSince, formatSpan, useFormatTimestamp } from "../presentation";
 import type {
   BotActivity,
-  BotChatMessage,
   BotConnectorInstance,
   BotConnectorSettings,
   BotDetail,
@@ -117,8 +116,14 @@ import type {
   BotQuestion,
   BotSettings,
   BotSummary,
+  PendingBotMessage,
+  ShownBotMessage,
 } from "@t3tools/fork-client/bots";
-import { startsChatBreak } from "@t3tools/fork-client/bots";
+import {
+  pendingBotMessage,
+  startsChatBreak,
+  withPendingMessages,
+} from "@t3tools/fork-client/bots";
 import { TimelineSystemDivider } from "../../components/chat/TimelineSystemDivider";
 import { useProject, useQuietThreadShell } from "../../state/entities";
 import { botStep } from "./botStep";
@@ -438,7 +443,7 @@ function BotChat({
   );
   const composerRef = useRef<BotComposerHandle>(null);
   const [chatViewport, setChatViewport] = useState<HTMLDivElement | null>(null);
-  const [sending, setSending] = useState(false);
+  const [pending, setPending] = useState<ReadonlyArray<PendingBotMessage>>([]);
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [editingSettings, setEditingSettings] = useState(false);
@@ -506,22 +511,29 @@ function BotChat({
   const activity =
     pushed !== null && pushed.read === data ? pushed.activity : (data?.activity ?? null);
 
-  const send = async (message: string) => {
-    setSending(true);
+  const chat = withPendingMessages(data?.chat ?? [], pending);
+  // The server starts the bot's turn before it answers, so the message shows before that.
+  const send = (message: string) => {
+    const entry = pendingBotMessage(message, data?.chat ?? []);
+    const shown = new Set(chat.map((line) => line.id));
+    setPending((current) => [...current.filter((other) => shown.has(other.key)), entry]);
     setError(null);
-    try {
-      await forkRequest(environmentId, "/bots/send", {
-        method: "POST",
-        body: { botId, text: message },
-      });
-      setSending(false);
-      void detail.refresh();
-      return true;
-    } catch (cause) {
-      setError(errorText(cause));
-      setSending(false);
-      return false;
-    }
+    forkRequest(environmentId, "/bots/send", {
+      method: "POST",
+      body: { botId, text: entry.text },
+    }).then(
+      () => void detail.refresh(),
+      (cause: unknown) => {
+        setError(errorText(cause));
+        setPending((current) =>
+          current.map((other) => (other === entry ? { ...other, failed: true } : other)),
+        );
+      },
+    );
+  };
+  const retry = (entry: PendingBotMessage) => {
+    setPending((current) => current.filter((other) => other !== entry));
+    send(entry.text);
   };
 
   const setPaused = async (paused: boolean) => {
@@ -612,9 +624,9 @@ function BotChat({
                 Tell {data.bot.name} what it is responsible for.
               </p>
             ) : null}
-            {data?.chat.map((message, index) => (
+            {chat.map((message, index) => (
               <Fragment key={message.id}>
-                {startsChatBreak(data.chat[index - 1], message) ? (
+                {startsChatBreak(chat[index - 1], message) ? (
                   <TimelineSystemDivider label={formatTimestamp(message.createdAt)} />
                 ) : null}
                 <ChatLine
@@ -624,6 +636,7 @@ function BotChat({
                   workThreadId={workThreadId}
                   cwd={cwd}
                   onOpenFileInPanel={openFileInPanel}
+                  onRetry={retry}
                 />
               </Fragment>
             ))}
@@ -664,7 +677,6 @@ function BotChat({
             draftKey={`${environmentId}:${botId}`}
             placeholder={data ? `Message ${data.bot.name}` : ""}
             status={error ? <span className="text-destructive-foreground">{error}</span> : null}
-            sending={sending}
             onSend={send}
           />
         </div>
@@ -784,16 +796,19 @@ function ChatLine({
   workThreadId,
   cwd,
   onOpenFileInPanel,
+  onRetry,
 }: {
-  readonly message: BotChatMessage;
+  readonly message: ShownBotMessage;
   readonly environmentId: EnvironmentId;
   readonly botId: string;
   /** Where the bot wrote its replies: images and files they name load through it. */
   readonly workThreadId: string | null;
   readonly cwd: string | undefined;
   readonly onOpenFileInPanel: (path: string, line?: number) => void;
+  readonly onRetry: (entry: PendingBotMessage) => void;
 }) {
   if (message.role === "user") {
+    const pending = message.pending;
     const waiting = message.turnRunId === null;
     return (
       <div className="group flex flex-col items-end gap-1">
@@ -810,7 +825,14 @@ function ChatLine({
             extensions={USER_MESSAGE_MARKDOWN}
           />
         </div>
-        {waiting ? (
+        {pending?.failed ? (
+          <span className="flex items-center gap-1 pe-1 text-xs text-destructive-foreground">
+            Not sent
+            <Button size="xs" variant="ghost" onClick={() => onRetry(pending)}>
+              Retry
+            </Button>
+          </span>
+        ) : waiting ? (
           <span className="pe-1 text-xs text-muted-foreground">Waiting for the bot</span>
         ) : (
           <MessageMeta text={message.text} createdAt={message.createdAt} />
