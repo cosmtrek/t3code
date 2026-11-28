@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off globalDate:off globalDateInEffect:off - Context folders are plain files an agent writes; timestamps are wall-clock ISO strings for humans.
+// @effect-diagnostics nodeBuiltinImport:off - Context folders are plain files an agent writes; timestamps are wall-clock ISO strings for humans.
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
@@ -18,6 +18,7 @@ import {
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
 import * as DateTime from "effect/DateTime";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
@@ -399,7 +400,7 @@ const inspectLink = Effect.fn("ForkInbox.inspectLink")(function* (
       runCompletedAt: null,
     } satisfies LinkedThreadView;
   if (shell === null || shell.deletedAt !== null) {
-    const at = link.detachedAt ?? new Date().toISOString();
+    const at = link.detachedAt ?? DateTime.formatIso(yield* DateTime.now);
     if (link.detachedAt === null) {
       runtime.store.detachLink(link.delegationId, link.threadId, "deleted", at);
     }
@@ -508,7 +509,7 @@ export const readChannel = Effect.fn("ForkInbox.readChannel")(function* (channel
     listingMemos.set(hub, memos);
   }
   const revision = hub.revision(channelId);
-  const now = Date.now();
+  const now = yield* Clock.currentTimeMillis;
   let memo = memos.get(channelId);
   if (memo === undefined || memo.revision !== revision || now - memo.at >= LISTING_MEMO_MS) {
     // Detached: a client that gives up must not cancel the read the others are waiting on.
@@ -554,7 +555,9 @@ const computeChannel = Effect.fn("ForkInbox.computeChannel")(function* (channelI
   );
   const readAllBefore = store.readAllBefore(
     channelId,
-    new Date(Date.now() - FIRST_READ_LOOKBACK_MS).toISOString(),
+    DateTime.formatIso(
+      DateTime.makeUnsafe((yield* Clock.currentTimeMillis) - FIRST_READ_LOOKBACK_MS),
+    ),
   );
   const conversations = listed.items
     .map(
@@ -1054,7 +1057,10 @@ export const settle = Effect.fn("ForkInbox.settle")(function* (body: unknown) {
   if (delegation === null || delegation.channelId !== input.channelId) {
     return yield* badRequest("There is no such delegation.");
   }
-  runtime.store.setSettled(delegation.id, input.settled ? new Date().toISOString() : null);
+  runtime.store.setSettled(
+    delegation.id,
+    input.settled ? DateTime.formatIso(yield* DateTime.now) : null,
+  );
   const active = activeLinkOf(runtime.store.linksForDelegation(delegation.id));
   if (input.settled && active !== undefined) {
     const threads = yield* ThreadManagement.ThreadManagementService;
@@ -1450,7 +1456,7 @@ export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown
         ? picked
         : scoped.messages.find((message) => !message.author.isSelf);
     const sender = request?.author ?? scoped.messages[0]!.author;
-    const since = Date.now() - SENDER_HISTORY_MS;
+    const since = (yield* Clock.currentTimeMillis) - SENDER_HISTORY_MS;
     const senderHistory = listing.conversations
       .filter(
         (candidate) =>
@@ -1487,13 +1493,14 @@ export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown
       skippedMessages: scoped.skipped,
       markdown: supports(channel, "markdown"),
     });
+    const requestedAt = DateTime.formatIso(yield* DateTime.now);
     yield* Effect.promise(() =>
       Promise.all([
         NodeFSP.writeFile(NodePath.join(contextDir, CONTEXT_FILE), context),
         NodeFSP.writeFile(
           NodePath.join(contextDir, REQUEST_FILE),
           prettyJson({
-            requestedAt: new Date().toISOString(),
+            requestedAt,
             channelId: input.channelId,
             conversationId: input.conversationId,
             anchorMessageId: input.anchorMessageId,
@@ -1529,7 +1536,7 @@ export const delegate = Effect.fn("ForkInbox.delegate")(function* (body: unknown
         Effect.promise(() => NodeFSP.rm(contextDir, { recursive: true, force: true })),
       ),
     );
-    const at = new Date().toISOString();
+    const at = DateTime.formatIso(yield* DateTime.now);
     runtime.store.saveDelegation({
       id: delegationId,
       channelId: input.channelId,
@@ -1705,6 +1712,7 @@ export const send = Effect.fn("ForkInbox.send")(function* (body: unknown) {
   };
   if (delegationId === null) return { ...outcome, archived: null };
   // The message went out either way; a failed copy is reported, never retried by resending.
+  const sentAt = DateTime.formatIso(yield* DateTime.now);
   const archived = yield* Effect.promise(() =>
     recordSent({
       itemDir: NodePath.join(runtime.itemsDir, delegationId),
@@ -1713,7 +1721,7 @@ export const send = Effect.fn("ForkInbox.send")(function* (body: unknown) {
       text,
       files: attachments.map((attachment) => attachment.name),
       messageId,
-      sentAt: new Date().toISOString(),
+      sentAt,
     }).then(
       () => true,
       () => false,
@@ -1770,11 +1778,12 @@ export const discardDraft = Effect.fn("ForkInbox.discardDraft")(function* (body:
       ? activeLinkOf(runtime.store.linksForDelegation(delegation.id))
       : undefined;
   if (active === undefined) return yield* badRequest("This delegation has no thread.");
+  const discardedAt = DateTime.formatIso(yield* DateTime.now);
   const discarded = yield* Effect.promise(() =>
     discardDraftFile(
       threadContextDir(runtime.itemsDir, input.delegationId, active.threadId),
       input.draft,
-      new Date().toISOString(),
+      discardedAt,
     ),
   );
   runtime.hub.publish({ type: "inbox", channelId: input.channelId });

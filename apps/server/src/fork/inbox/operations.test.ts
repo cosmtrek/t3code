@@ -193,6 +193,7 @@ async function harness(
   conversations: () => ReadonlyArray<FakeConversation>,
   sendAnswer: () => AdapterResponse = () => json(200, { messageId: "sent-1" }),
   config: Record<string, unknown> = {},
+  seedReadCutoff = true,
 ): Promise<Harness> {
   const dir = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-inbox-"));
   const tokenFile = NodePath.join(dir, "token");
@@ -234,7 +235,7 @@ async function harness(
   );
   const store = new InboxStore(":memory:");
   // Fixtures are at fixed past times; none should fall before the first-read cutoff.
-  store.readAllBefore(channelId, "2026-01-01T00:00:00.000Z");
+  if (seedReadCutoff) store.readAllBefore(channelId, "2026-01-01T00:00:00.000Z");
   const runtime = {
     hub,
     store,
@@ -365,6 +366,36 @@ const launchLayer = (h: Harness, launched: Array<ThreadLaunch.ThreadLaunchInput>
   );
 
 describe("inbox listing", () => {
+  it.effect("uses the clock for the seven-day first-read cutoff and ten-second memo TTL", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(
+        DateTime.toEpochMillis(DateTime.makeUnsafe("2026-11-21T08:10:00.000Z")),
+      );
+      const h = yield* Effect.promise(() =>
+        harness(
+          () => [
+            { id: "old", messages: [{ id: "old-1", minute: 9, author: THEM }] },
+            { id: "new", messages: [{ id: "new-1", minute: 11, author: THEM }] },
+          ],
+          undefined,
+          {},
+          false,
+        ),
+      );
+      const read = Inbox.readChannel(h.channelId).pipe(Effect.provide(h.layer));
+      const first = yield* read;
+      expect(h.runtime.store.readAllBefore(h.channelId, "unused")).toBe("2026-11-14T08:10:00.000Z");
+      const listed = yield* listOf(h);
+      expect(listed.conversations.find((row) => row.id === "old")?.unread).toBe(false);
+      expect(listed.conversations.find((row) => row.id === "new")?.unread).toBe(true);
+      yield* TestClock.adjust(9_999);
+      expect(yield* read).toBe(first);
+      yield* TestClock.adjust(1);
+      expect(yield* read).not.toBe(first);
+      expect(h.runtime.store.readAllBefore(h.channelId, "unused")).toBe("2026-11-14T08:10:00.000Z");
+    }),
+  );
+
   it.effect("lists one row per conversation and reads every page", () =>
     Effect.gen(function* () {
       const h = yield* Effect.promise(() =>

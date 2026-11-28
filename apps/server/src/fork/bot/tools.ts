@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off globalDate:off globalDateInEffect:off - Compares tool tokens in constant time; times are ISO text.
+// @effect-diagnostics nodeBuiltinImport:off - Compares tool tokens in constant time; times are ISO text.
 /**
  * What `t3bot` does. The CLI sends its arguments as they are; parsing, checks, and effects all
  * happen here, so every action a bot takes passes the same place.
@@ -16,6 +16,7 @@ import {
   type RuntimeMode,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
@@ -236,14 +237,14 @@ const gate = Effect.fn("ForkBot.gate")(function* (
   const runtime = yield* BotRuntime;
   const store = runtime.store();
   if (decide({ permission, overBudget }) === "allow") return null;
-  const now = Date.now();
+  const now = yield* Clock.currentTimeMillis;
   const id = store.addQuestion({
     botId: call.bot,
     text: detail === "" ? what : `${what}\n\n${detail}`,
     argv: call.argv,
     stdin: call.stdin,
-    createdAt: new Date(now).toISOString(),
-    expiresAt: new Date(now + QUESTION_TTL_MS).toISOString(),
+    createdAt: DateTime.formatIso(DateTime.makeUnsafe(now)),
+    expiresAt: DateTime.formatIso(DateTime.makeUnsafe(now + QUESTION_TTL_MS)),
   });
   runtime.publish(call.bot);
   return `Not done yet: the user must approve this (question ${id}). Approving runs exactly this command; you hear the answer on a later turn, and the question lapses after 24 hours. Say why you need it in your reply, then end your turn.`;
@@ -258,7 +259,7 @@ export const runTool = Effect.fn("ForkBot.runTool")(function* (input: ToolCall) 
   const botId = input.bot;
   const runtime = yield* BotRuntime;
   const store = runtime.store();
-  const at = nowIso();
+  const at = yield* nowIso;
   const touched = (output: string) => {
     runtime.publish(botId);
     return output;
@@ -408,7 +409,7 @@ const routineCommand = Effect.fn("ForkBot.routineCommand")(function* (
 ) {
   const runtime = yield* BotRuntime;
   const store = runtime.store();
-  const now = new Date();
+  const now = DateTime.toDateUtc(yield* DateTime.now);
   if (sub === "list") {
     const routines = store.listRoutines(botId);
     return routines.length === 0
@@ -653,7 +654,7 @@ const threadCommand = Effect.fn("ForkBot.threadCommand")(function* (
           projectId: project.id,
           itemId,
           follow,
-          createdAt: nowIso(),
+          createdAt: yield* nowIso,
         });
         runtime.ownedThreads.set(threadId, botId);
         yield* launchOwned(
@@ -666,13 +667,13 @@ const threadCommand = Effect.fn("ForkBot.threadCommand")(function* (
           flags,
         ).pipe(
           Effect.onError(() =>
-            Effect.sync(() => {
-              store.removeThread(threadId);
+            Effect.gen(function* () {
+              store.removeThread(threadId, yield* nowIso);
               runtime.ownedThreads.delete(threadId);
             }),
           ),
         );
-        if (itemId !== null) store.updateItem(botId, itemId, {}, nowIso());
+        if (itemId !== null) store.updateItem(botId, itemId, {}, yield* nowIso);
         runtime.publish(botId);
         return `Thread ${threadId} started in ${project.title}. ${
           follow === "now"
@@ -837,7 +838,7 @@ export const answerQuestion = Effect.fn("ForkBot.answerQuestion")(function* (inp
       decoded.botId,
       decoded.questionId,
       decoded.approve ? "approved" : "declined",
-      nowIso(),
+      yield* nowIso,
     ) ?? null;
   if (question === null) {
     return yield* new ForkHttpError({

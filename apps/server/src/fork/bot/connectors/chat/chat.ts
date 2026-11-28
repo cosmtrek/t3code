@@ -1,10 +1,10 @@
-// @effect-diagnostics globalDate:off globalDateInEffect:off - Mention delays are wall-clock; adapter times are ISO text.
 /**
  * What bots do with one of the environment's chat channels: read it through the inbox's own
  * reads, send as the user through its `send`, and wake the one bot per channel that handles the
  * user's mentions. Mentions are found from the conversation list the inbox reads anyway, so a busy
  * conversation that never mentions the user costs nothing more.
  */
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -141,7 +141,7 @@ export function trackMentions(input: {
         type: "pending",
         conversationId: conversation.id,
         pendingAt: mentionAt,
-        dueAt: new Date(input.now.getTime() + MENTION_DELAY_MS).toISOString(),
+        dueAt: DateTime.formatIso(DateTime.makeUnsafe(input.now.getTime() + MENTION_DELAY_MS)),
         handledThrough: handled,
       },
     ];
@@ -409,7 +409,7 @@ export const sendAsUser = Effect.fn("ForkBot.sendAsUser")(function* (input: {
     input.botId,
     input.target.channel.id,
     sent.messageId,
-    new Date().toISOString(),
+    DateTime.formatIso(yield* DateTime.now),
   );
   return sent;
 });
@@ -455,7 +455,7 @@ export const scanMentions = Effect.fn("ForkBot.scanMentions")(function* (channel
     conversations: listing.raw,
     marks: State.listMentions(store, channelId),
     since: chatConfig(connectorSettings(bot.settings, channelId)).mentionsSince ?? bot.createdAt,
-    now: new Date(),
+    now: DateTime.toDateUtc(yield* DateTime.now),
   });
   for (const step of steps) {
     if (step.type === "handled") {
@@ -475,7 +475,7 @@ export const scanMentions = Effect.fn("ForkBot.scanMentions")(function* (channel
 
 /** Wakes the mention bot for each conversation whose delay has passed. */
 export const fireDueMentions = Effect.fn("ForkBot.fireDueMentions")(function* () {
-  const now = new Date();
+  const now = DateTime.toDateUtc(yield* DateTime.now);
   const store = (yield* BotRuntime).existingStore();
   if (store === null) return;
   for (const mark of State.dueMentions(store, now.toISOString())) {
@@ -492,7 +492,7 @@ export const fireDueMentions = Effect.fn("ForkBot.fireDueMentions")(function* ()
         store,
         mark.channelId,
         mark.conversationId,
-        new Date(now.getTime() + RETRY_MS).toISOString(),
+        DateTime.formatIso(DateTime.makeUnsafe(now.getTime() + RETRY_MS)),
       );
     }
   }

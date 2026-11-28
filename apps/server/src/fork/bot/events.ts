@@ -53,14 +53,14 @@ const observeThread = Effect.fn("ForkBot.observeThread")(function* (
   const runtime = yield* BotRuntime;
   const store = runtime.store();
   const botId = owned.botId;
-  const touch = () => {
-    if (owned.itemId !== null) store.updateItem(botId, owned.itemId, {}, nowIso());
-  };
+  const touch = Effect.gen(function* () {
+    if (owned.itemId !== null) store.updateItem(botId, owned.itemId, {}, yield* nowIso);
+  });
 
   if (change.type === "request") {
     if (owned.takenOver || owned.lastRequestId === change.requestId) return;
-    store.updateThread(owned.threadId, { lastRequestId: change.requestId });
-    touch();
+    store.updateThread(owned.threadId, { lastRequestId: change.requestId }, yield* nowIso);
+    yield* touch;
     const what = change.kind === "user_input" ? "a question answered" : "an approval";
     // Blocked until someone answers, so it always wakes the bot.
     yield* notify(
@@ -79,7 +79,7 @@ const observeThread = Effect.fn("ForkBot.observeThread")(function* (
     !seenRun &&
     (yield* takenOverByUser(owned.projectId, owned.threadId, owned.handedBackAt));
   if (takenNow) {
-    store.updateThread(owned.threadId, { takenOver: true });
+    store.updateThread(owned.threadId, { takenOver: true }, yield* nowIso);
     yield* notify(
       botId,
       `The user took over ${describe(owned).toLowerCase()}. Leave it to them until they hand it back.`,
@@ -90,10 +90,14 @@ const observeThread = Effect.fn("ForkBot.observeThread")(function* (
 
   if (!isTerminalRunStatus(change.status)) {
     if (owned.status === change.status && seenRun) return;
-    store.updateThread(owned.threadId, {
-      status: change.status,
-      lastRunKey: `${change.runId}:${change.status}`,
-    });
+    store.updateThread(
+      owned.threadId,
+      {
+        status: change.status,
+        lastRunKey: `${change.runId}:${change.status}`,
+      },
+      yield* nowIso,
+    );
     runtime.publish(botId);
     return;
   }
@@ -101,12 +105,12 @@ const observeThread = Effect.fn("ForkBot.observeThread")(function* (
   const key = `${change.runId}:${change.status}`;
   if (owned.lastRunKey === key) return;
   if (takenOver) {
-    store.updateThread(owned.threadId, { status: change.status, lastRunKey: key });
+    store.updateThread(owned.threadId, { status: change.status, lastRunKey: key }, yield* nowIso);
     runtime.publish(botId);
     return;
   }
-  store.updateThread(owned.threadId, { lastRunKey: key });
-  touch();
+  store.updateThread(owned.threadId, { lastRunKey: key }, yield* nowIso);
+  yield* touch;
   const failed = change.status !== "completed";
   const wakes = owned.follow === "now" || (owned.follow === "attention" && failed);
   // Its last word saves the bot a `thread read` and a model step on most wakes.
@@ -116,7 +120,9 @@ const observeThread = Effect.fn("ForkBot.observeThread")(function* (
   // The status is recorded once the bot woke, so a bot taking up the answer stays working.
   yield* notify(botId, stoppedEvent(describe(owned), change.status, reply), wakes).pipe(
     Effect.ensuring(
-      Effect.sync(() => store.updateThread(owned.threadId, { status: change.status })),
+      Effect.gen(function* () {
+        store.updateThread(owned.threadId, { status: change.status }, yield* nowIso);
+      }),
     ),
   );
 });

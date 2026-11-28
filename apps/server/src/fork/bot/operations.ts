@@ -76,7 +76,7 @@ const internal = (cause: unknown) =>
     detail: cause instanceof Error ? cause.message : String(cause),
   });
 
-export const nowIso = () => new Date().toISOString();
+export const nowIso = DateTime.now.pipe(Effect.map(DateTime.formatIso));
 export const newId = (prefix: string) => `${prefix}_${NodeCrypto.randomUUID()}`;
 const localDay = (at: Date) =>
   `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, "0")}-${String(at.getDate()).padStart(2, "0")}`;
@@ -305,7 +305,11 @@ export const readBot = Effect.fn("ForkBot.readBot")(function* (params: URLSearch
   const since = store.workingSince(bot.id);
   return {
     // A count from an earlier day is spent: today starts at zero.
-    bot: { ...bot, turnsToday: bot.lastTurnDay === localDay(new Date()) ? bot.turnsToday : 0 },
+    bot: {
+      ...bot,
+      turnsToday:
+        bot.lastTurnDay === localDay(DateTime.toDateUtc(yield* DateTime.now)) ? bot.turnsToday : 0,
+    },
     role: yield* readRole(runtime.botsDir, bot.id),
     workingSince: since,
     activity: activityOf(runtime, bot.id, since),
@@ -416,7 +420,7 @@ export const createBot = Effect.fn("ForkBot.createBot")(function* (input: unknow
   runtime
     .store()
     .createBot(
-      { id, name, modelSelection, createdAt: nowIso() },
+      { id, name, modelSelection, createdAt: yield* nowIso },
       decoded.runtimeMode ?? (yield* runtimeModeFor(modelSelection, "auto")),
       brief === "" ? undefined : { id: newId("msg"), text: brief },
     );
@@ -445,7 +449,7 @@ export const saveRole = Effect.fn("ForkBot.saveRole")(function* (input: unknown)
     try: () => NodeFSP.writeFile(rolePath(runtime.botsDir, bot.id), decoded.role),
     catch: internal,
   });
-  runtime.store().enqueue(bot.id, "The user edited your role.", false, nowIso());
+  runtime.store().enqueue(bot.id, "The user edited your role.", false, yield* nowIso);
   runtime.publish(bot.id);
   return {};
 });
@@ -485,7 +489,7 @@ export const sendMessage = Effect.fn("ForkBot.sendMessage")(function* (input: un
   const messageId = newId("msg");
   runtime
     .store()
-    .addChat({ id: messageId, botId: bot.id, role: "user", text, createdAt: nowIso() });
+    .addChat({ id: messageId, botId: bot.id, role: "user", text, createdAt: yield* nowIso });
   runtime.publish(bot.id);
   if (!(yield* steer(bot, messageId, text))) yield* wake(bot.id);
   return { messageId };
@@ -523,7 +527,9 @@ const steer = Effect.fn("ForkBot.steer")(function* (bot: Bot, messageId: string,
 
 export const postError = Effect.fn("ForkBot.postError")(function* (botId: string, text: string) {
   const runtime = yield* BotRuntime;
-  runtime.store().addChat({ id: newId("msg"), botId, role: "error", text, createdAt: nowIso() });
+  runtime
+    .store()
+    .addChat({ id: newId("msg"), botId, role: "error", text, createdAt: yield* nowIso });
   runtime.publish(botId);
 });
 
@@ -653,7 +659,7 @@ const wake = Effect.fn("ForkBot.wake")(function* (botId: string) {
       const waiting = store.waitingMessages(botId);
       const queued = store.queued(botId);
       if (waiting.length === 0 && !queued.some((event) => event.wakes)) return null;
-      const now = new Date();
+      const now = DateTime.toDateUtc(yield* DateTime.now);
       const today = localDay(now);
       const firstTurnToday = bot.lastTurnDay !== today;
       const turnsToday = firstTurnToday ? 0 : bot.turnsToday;
@@ -717,7 +723,7 @@ const wake = Effect.fn("ForkBot.wake")(function* (botId: string) {
           botId,
           runId: started.success.runId,
           threadId: started.success.threadId,
-          startedAt: nowIso(),
+          startedAt: yield* nowIso,
         },
         waiting.map((message) => message.id),
         queued.map((event) => event.id),
@@ -798,11 +804,11 @@ export const withShown = Effect.fn("ForkBot.withShown")(function* (
     // Its id comes from the tool call, so a later look at the same run finds it posted.
     const id = `msg_shown_${item.id}`;
     if (sent && !store.hasChat(id)) {
-      post({ id, botId: bot.id, role: "bot", text: sent, createdAt: nowIso() });
+      post({ id, botId: bot.id, role: "bot", text: sent, createdAt: yield* nowIso });
     }
   }
   if (pages.length > 0 && last?.role !== "bot") {
-    post({ id: newId("msg"), botId: bot.id, role: "bot", text: "", createdAt: nowIso() });
+    post({ id: newId("msg"), botId: bot.id, role: "bot", text: "", createdAt: yield* nowIso });
   }
   if (last !== null) post(last);
   return posts;
@@ -858,7 +864,7 @@ export const finishRun = Effect.fn("ForkBot.finishRun")(function* (
       const posts = yield* withShown(
         bot,
         turn,
-        post === null ? null : { id: newId("msg"), botId, createdAt: nowIso(), ...post },
+        post === null ? null : { id: newId("msg"), botId, createdAt: yield* nowIso, ...post },
       );
       const owed = turn.answersUser && !turn.said && !silent && status === "completed";
       store.endTurn(
@@ -871,10 +877,11 @@ export const finishRun = Effect.fn("ForkBot.finishRun")(function* (
                 botId,
                 role: "error",
                 text: "The turn ended without a reply.",
-                createdAt: nowIso(),
+                createdAt: yield* nowIso,
               },
             ]
           : posts,
+        yield* nowIso,
       );
       return true;
     }),
@@ -891,15 +898,14 @@ export const notify = Effect.fn("ForkBot.notify")(function* (
   wakes: boolean,
 ) {
   const runtime = yield* BotRuntime;
-  runtime.store().enqueue(botId, text, wakes, nowIso());
+  runtime.store().enqueue(botId, text, wakes, yield* nowIso);
   runtime.publish(botId);
   if (wakes) yield* wake(botId);
 });
 
 /** Fires every routine due by `now` once, however many times it was due, and sets the next. */
-export const fireDueRoutines = Effect.fn("ForkBot.fireDueRoutines")(function* (
-  now: Date = new Date(),
-) {
+export const fireDueRoutines = Effect.fn("ForkBot.fireDueRoutines")(function* (at?: Date) {
+  const now = at ?? DateTime.toDateUtc(yield* DateTime.now);
   const runtime = yield* BotRuntime;
   const store = runtime.existingStore();
   if (store === null) return;
@@ -952,7 +958,7 @@ const RunRoutineInput = Schema.Struct({ botId: Schema.String, routineId: Schema.
 export const runRoutineNow = Effect.fn("ForkBot.runRoutineNow")(function* (input: unknown) {
   const decoded = yield* decode(RunRoutineInput, input);
   yield* requireBot(decoded.botId);
-  const now = new Date();
+  const now = DateTime.toDateUtc(yield* DateTime.now);
   if (!(yield* fireRoutine(decoded.botId, decoded.routineId, now, now))) {
     return yield* new ForkHttpError({
       status: 404,
@@ -970,7 +976,7 @@ export const reopenItem = Effect.fn("ForkBot.reopenItem")(function* (input: unkn
   const runtime = yield* BotRuntime;
   const decoded = yield* decode(ItemInput, input);
   const bot = yield* requireBot(decoded.botId);
-  if (!runtime.store().updateItem(bot.id, decoded.itemId, {}, nowIso())) {
+  if (!runtime.store().updateItem(bot.id, decoded.itemId, {}, yield* nowIso)) {
     return yield* new ForkHttpError({
       status: 404,
       code: "not_found",
@@ -1022,7 +1028,7 @@ export const moveMemoryToRole = Effect.fn("ForkBot.moveMemoryToRole")(function* 
     catch: internal,
   });
   store.removeMemory(bot.id, note.id);
-  store.enqueue(bot.id, `The user moved memory ${note.id} into your role.`, false, nowIso());
+  store.enqueue(bot.id, `The user moved memory ${note.id} into your role.`, false, yield* nowIso);
   runtime.publish(bot.id);
   return {};
 });
@@ -1132,7 +1138,7 @@ export const saveSettings = Effect.fn("ForkBot.saveSettings")(function* (input: 
         ? null
         : yield* pickModel(wantedThreadModel, "threadModel");
   const instances = yield* listInstances();
-  const now = nowIso();
+  const now = yield* nowIso;
   const connectors: Record<string, ConnectorSettings> = Object.fromEntries(
     // Settings of instances the environment no longer has are dropped.
     Object.entries(bot.settings.connectors).filter(([id]) =>
@@ -1218,7 +1224,8 @@ export const handBack = Effect.fn("ForkBot.handBack")(function* (input: unknown)
   if (owned === null || owned.botId !== bot.id) {
     return yield* badRequest("That thread is not this bot's.", "threadId");
   }
-  store.updateThread(owned.threadId, { takenOver: false, handedBackAt: nowIso() });
+  const handedBackAt = yield* nowIso;
+  store.updateThread(owned.threadId, { takenOver: false, handedBackAt }, handedBackAt);
   yield* notify(
     bot.id,
     `The user handed thread ${owned.threadId}${owned.itemId === null ? "" : ` (item #${owned.itemId})`} back to you. Read it to see what they did, then carry on.`,

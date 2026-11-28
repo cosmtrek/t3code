@@ -12,6 +12,9 @@ import * as Latch from "effect/Latch";
 import * as Layer from "effect/Layer";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
+import * as Chat from "./connectors/chat/chat.ts";
+import * as ChatState from "./connectors/chat/state.ts";
 
 import * as ServerConfig from "../../config.ts";
 import * as ThreadLaunch from "../../orchestration-v2/ThreadLaunchService.ts";
@@ -653,6 +656,10 @@ describe("bot turns", () => {
           // Editing its role asks by default: nothing changes until the user approves.
           expect(yield* edit("Watch CI.")).toContain("the user must approve");
           const [question] = store.openQuestions(botId);
+          expect(question).toMatchObject({
+            createdAt: "1970-01-01T00:00:00.000Z",
+            expiresAt: "1970-01-02T00:00:00.000Z",
+          });
           expect(question?.text).toContain("Watch CI.");
           expect(yield* Effect.promise(() => roleOf().catch(() => ""))).toBe("");
           // The sidebar shows a waiting question apart from unread posts.
@@ -679,8 +686,11 @@ describe("bot turns", () => {
 
           // Unanswered, it lapses after a day and its action never runs.
           yield* edit("Watch nothing.");
-          // Well past its 24 hours.
-          yield* Bots.fireDueRoutines(new Date(2100, 0, 1));
+          yield* TestClock.adjust(86_400_000 - 1);
+          yield* Bots.fireDueRoutines();
+          expect(store.openQuestions(botId)).toHaveLength(1);
+          yield* TestClock.adjust(1);
+          yield* Bots.fireDueRoutines();
           expect(store.openQuestions(botId)).toEqual([]);
           expect(store.queued(botId).at(-1)?.text).toContain("lapsed unanswered");
           expect(yield* Effect.promise(roleOf)).toBe("Watch CI.");
@@ -735,6 +745,13 @@ describe("bot turns", () => {
         });
         expect(h.runs).toHaveLength(2);
         expect((yield* read()).bot.turnsToday).toBe(2);
+
+        yield* endRun(h, botId, 1, "Done for today.");
+        yield* TestClock.adjust("24 hours");
+        expect((yield* read()).bot.turnsToday).toBe(0);
+        yield* Bots.sendMessage({ botId, text: "A new day" });
+        expect(h.runs).toHaveLength(3);
+        expect((yield* read()).bot.turnsToday).toBe(1);
 
         // A count left from an earlier day reads as none used today.
         h.runtime.store().countTurn(botId, "2000-01-01");
@@ -880,6 +897,39 @@ describe("bot turns", () => {
         yield* endRun(h, botId, h.runs.length - 1, "Hello");
         yield* Bots.sendMessage({ botId, text: "Again" });
         expect(h.threadModes.get(threadId)).toBe("auto-accept-edits");
+      }),
+    ),
+  );
+
+  it.effect("delays mention wakes by 30 seconds on the Effect clock", () =>
+    withChat((h) =>
+      Effect.gen(function* () {
+        const { botId } = yield* Bots.createBot({ name: "Mentions", modelSelection: MODEL });
+        yield* Bots.saveSettings({
+          botId,
+          settings: {
+            turnsPerDay: 100,
+            maxThreads: 3,
+            connectors: {
+              example: { enabled: true, permissions: { send: "ask" }, config: { mentions: true } },
+            },
+          },
+        });
+        yield* Chat.scanMentions("example");
+        const pending = ChatState.listMentions(h.runtime.store(), "example").filter(
+          (mark) => mark.dueAt !== null,
+        );
+        expect(pending.length).toBeGreaterThan(0);
+        expect(pending.every((mark) => mark.dueAt === "1970-01-01T00:00:30.000Z")).toBe(true);
+        yield* TestClock.adjust(29_999);
+        yield* Chat.fireDueMentions();
+        expect(h.runs).toHaveLength(0);
+        yield* TestClock.adjust(1);
+        yield* Chat.fireDueMentions();
+        expect(h.runs).toHaveLength(1);
+        expect(
+          ChatState.listMentions(h.runtime.store(), "example").every((mark) => mark.dueAt === null),
+        ).toBe(true);
       }),
     ),
   );

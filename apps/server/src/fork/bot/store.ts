@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off globalDate:off - node:sqlite is synchronous and a separate small file keeps fork data out of the main database; times are stored as ISO text.
+// @effect-diagnostics nodeBuiltinImport:off - node:sqlite is synchronous and a separate small file keeps fork data out of the main database; times are stored as ISO text.
 /**
  * What bots keep that T3 does not: the bots themselves, each one's chat with the user, and the
  * turn it is running. Its own file, like the inbox's, so the main database carries no fork tables.
@@ -736,13 +736,18 @@ export class BotStore {
   }
 
   /** Ends the turn and posts what it said, together, so a restart never posts it twice. */
-  endTurn(botId: string, runId: string, replies: ReadonlyArray<Omit<ChatMessage, "turnRunId">>) {
+  endTurn(
+    botId: string,
+    runId: string,
+    replies: ReadonlyArray<Omit<ChatMessage, "turnRunId">>,
+    at: string,
+  ) {
     this.transaction(() => {
       const ended = this.db
         .prepare("DELETE FROM turns WHERE bot_id = ? AND run_id = ?")
         .run(botId, runId);
       if (Number(ended.changes) > 0) for (const reply of replies) this.addChat(reply);
-      this.syncWorking(botId);
+      this.syncWorking(botId, at);
     });
   }
 
@@ -757,7 +762,7 @@ export class BotStore {
     return row === undefined ? null : nullableText(row, "working_since");
   }
 
-  private syncWorking(botId: string, at = new Date().toISOString()) {
+  private syncWorking(botId: string, at: string) {
     this.db
       .prepare(
         `UPDATE bots SET working_since = CASE
@@ -942,6 +947,7 @@ export class BotStore {
     patch: Partial<
       Pick<OwnedThread, "status" | "lastRunKey" | "lastRequestId" | "takenOver" | "handedBackAt">
     >,
+    at: string,
   ) {
     const thread = this.getThread(threadId);
     if (thread === null) return;
@@ -958,7 +964,7 @@ export class BotStore {
         next.handedBackAt,
         threadId,
       );
-    this.syncWorking(thread.botId);
+    this.syncWorking(thread.botId, at);
   }
 
   addThread(
@@ -982,10 +988,10 @@ export class BotStore {
     this.syncWorking(thread.botId, thread.createdAt);
   }
 
-  removeThread(threadId: string) {
+  removeThread(threadId: string, at: string) {
     const thread = this.getThread(threadId);
     this.db.prepare("DELETE FROM threads WHERE thread_id = ?").run(threadId);
-    if (thread !== null) this.syncWorking(thread.botId);
+    if (thread !== null) this.syncWorking(thread.botId, at);
   }
 
   // Queue
