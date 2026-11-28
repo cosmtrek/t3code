@@ -3,12 +3,16 @@
  * What bots keep that T3 does not: the bots themselves, each one's chat with the user, and the
  * turn it is running. Its own file, like the inbox's, so the main database carries no fork tables.
  */
-import * as NodeFS from "node:fs";
-import * as NodePath from "node:path";
 import * as NodeSqlite from "node:sqlite";
 
 import type { ModelSelection, RuntimeMode } from "@t3tools/contracts";
 import type { HtmlRenderReference } from "@t3tools/shared/htmlRender";
+
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 
 import type { PacketSections } from "./packet.ts";
 
@@ -432,20 +436,222 @@ const toQueued = (row: Row): QueuedEvent => ({
   createdAt: text(row, "created_at"),
 });
 
-export class BotStore {
-  /** Connectors keep their own tables in this file and query them through it. */
-  readonly db: NodeSqlite.DatabaseSync;
+/** Per conversation: mentions of the user already given to a bot, and one waiting its delay. */
+export interface MentionMark {
+  readonly channelId: string;
+  readonly conversationId: string;
+  /** Mentions at or before this are handled. */
+  readonly handledThrough: string;
+  /** The newest mention seen and not yet handled; null when none waits. */
+  readonly pendingAt: string | null;
+  readonly dueAt: string | null;
+}
 
-  constructor(filePath: string) {
-    if (filePath !== ":memory:") NodeFS.mkdirSync(NodePath.dirname(filePath), { recursive: true });
-    this.db = new NodeSqlite.DatabaseSync(filePath);
-    try {
-      this.db.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;");
-      this.migrate();
-    } catch (error) {
-      this.db.close();
-      throw error;
-    }
+const toMention = (row: Row): MentionMark => ({
+  channelId: String(row.channel_id),
+  conversationId: String(row.conversation_id),
+  handledThrough: String(row.handled_through),
+  pendingAt: nullableText(row, "pending_at"),
+  dueAt: nullableText(row, "due_at"),
+});
+
+export class BotStoreError extends Schema.TaggedError<BotStoreError>()("BotStoreError", {
+  operation: Schema.String,
+  path: Schema.String,
+  cause: Schema.Defect(),
+}) {
+  override get message() {
+    return "The bot database operation failed.";
+  }
+}
+
+export class BotStore extends Context.Service<
+  BotStore,
+  {
+    readonly listBots: (
+      ...args: Parameters<BotDatabase["listBots"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["listBots"]>, BotStoreError>;
+    readonly getBot: (
+      ...args: Parameters<BotDatabase["getBot"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["getBot"]>, BotStoreError>;
+    readonly createBot: (
+      ...args: Parameters<BotDatabase["createBot"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["createBot"]>, BotStoreError>;
+    readonly deleteBot: (
+      ...args: Parameters<BotDatabase["deleteBot"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["deleteBot"]>, BotStoreError>;
+    readonly countTurn: (
+      ...args: Parameters<BotDatabase["countTurn"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["countTurn"]>, BotStoreError>;
+    readonly noteBudgetSpent: (
+      ...args: Parameters<BotDatabase["noteBudgetSpent"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["noteBudgetSpent"]>, BotStoreError>;
+    readonly setProfile: (
+      ...args: Parameters<BotDatabase["setProfile"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["setProfile"]>, BotStoreError>;
+    readonly seenModel: (
+      ...args: Parameters<BotDatabase["seenModel"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["seenModel"]>, BotStoreError>;
+    readonly setPaused: (
+      ...args: Parameters<BotDatabase["setPaused"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["setPaused"]>, BotStoreError>;
+    readonly setSettings: (
+      ...args: Parameters<BotDatabase["setSettings"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["setSettings"]>, BotStoreError>;
+    readonly seenPacket: (
+      ...args: Parameters<BotDatabase["seenPacket"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["seenPacket"]>, BotStoreError>;
+    readonly setSeenPacket: (
+      ...args: Parameters<BotDatabase["setSeenPacket"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["setSeenPacket"]>, BotStoreError>;
+    readonly setWorkThread: (
+      ...args: Parameters<BotDatabase["setWorkThread"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["setWorkThread"]>, BotStoreError>;
+    readonly addChat: (
+      ...args: Parameters<BotDatabase["addChat"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["addChat"]>, BotStoreError>;
+    readonly hasChat: (
+      ...args: Parameters<BotDatabase["hasChat"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["hasChat"]>, BotStoreError>;
+    readonly postedRenderIds: (
+      ...args: Parameters<BotDatabase["postedRenderIds"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["postedRenderIds"]>, BotStoreError>;
+    readonly recentChat: (
+      ...args: Parameters<BotDatabase["recentChat"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["recentChat"]>, BotStoreError>;
+    readonly unseenCount: (
+      ...args: Parameters<BotDatabase["unseenCount"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["unseenCount"]>, BotStoreError>;
+    readonly markSeen: (
+      ...args: Parameters<BotDatabase["markSeen"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["markSeen"]>, BotStoreError>;
+    readonly waitingMessages: (
+      ...args: Parameters<BotDatabase["waitingMessages"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["waitingMessages"]>, BotStoreError>;
+    readonly getTurn: (
+      ...args: Parameters<BotDatabase["getTurn"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["getTurn"]>, BotStoreError>;
+    readonly listTurns: (
+      ...args: Parameters<BotDatabase["listTurns"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["listTurns"]>, BotStoreError>;
+    readonly startTurn: (
+      ...args: Parameters<BotDatabase["startTurn"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["startTurn"]>, BotStoreError>;
+    readonly markAnswered: (
+      ...args: Parameters<BotDatabase["markAnswered"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["markAnswered"]>, BotStoreError>;
+    readonly markSaid: (
+      ...args: Parameters<BotDatabase["markSaid"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["markSaid"]>, BotStoreError>;
+    readonly endTurn: (
+      ...args: Parameters<BotDatabase["endTurn"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["endTurn"]>, BotStoreError>;
+    readonly workingSince: (
+      ...args: Parameters<BotDatabase["workingSince"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["workingSince"]>, BotStoreError>;
+    readonly listItems: (
+      ...args: Parameters<BotDatabase["listItems"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["listItems"]>, BotStoreError>;
+    readonly addItem: (
+      ...args: Parameters<BotDatabase["addItem"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["addItem"]>, BotStoreError>;
+    readonly updateItem: (
+      ...args: Parameters<BotDatabase["updateItem"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["updateItem"]>, BotStoreError>;
+    readonly setAsideStale: (
+      ...args: Parameters<BotDatabase["setAsideStale"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["setAsideStale"]>, BotStoreError>;
+    readonly listMemory: (
+      ...args: Parameters<BotDatabase["listMemory"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["listMemory"]>, BotStoreError>;
+    readonly addMemory: (
+      ...args: Parameters<BotDatabase["addMemory"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["addMemory"]>, BotStoreError>;
+    readonly editMemory: (
+      ...args: Parameters<BotDatabase["editMemory"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["editMemory"]>, BotStoreError>;
+    readonly removeMemory: (
+      ...args: Parameters<BotDatabase["removeMemory"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["removeMemory"]>, BotStoreError>;
+    readonly listRoutines: (
+      ...args: Parameters<BotDatabase["listRoutines"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["listRoutines"]>, BotStoreError>;
+    readonly addRoutine: (
+      ...args: Parameters<BotDatabase["addRoutine"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["addRoutine"]>, BotStoreError>;
+    readonly updateRoutine: (
+      ...args: Parameters<BotDatabase["updateRoutine"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["updateRoutine"]>, BotStoreError>;
+    readonly removeRoutine: (
+      ...args: Parameters<BotDatabase["removeRoutine"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["removeRoutine"]>, BotStoreError>;
+    readonly listThreads: (
+      ...args: Parameters<BotDatabase["listThreads"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["listThreads"]>, BotStoreError>;
+    readonly getThread: (
+      ...args: Parameters<BotDatabase["getThread"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["getThread"]>, BotStoreError>;
+    readonly updateThread: (
+      ...args: Parameters<BotDatabase["updateThread"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["updateThread"]>, BotStoreError>;
+    readonly addThread: (
+      ...args: Parameters<BotDatabase["addThread"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["addThread"]>, BotStoreError>;
+    readonly removeThread: (
+      ...args: Parameters<BotDatabase["removeThread"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["removeThread"]>, BotStoreError>;
+    readonly enqueue: (
+      ...args: Parameters<BotDatabase["enqueue"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["enqueue"]>, BotStoreError>;
+    readonly queued: (
+      ...args: Parameters<BotDatabase["queued"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["queued"]>, BotStoreError>;
+    readonly addQuestion: (
+      ...args: Parameters<BotDatabase["addQuestion"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["addQuestion"]>, BotStoreError>;
+    readonly openQuestions: (
+      ...args: Parameters<BotDatabase["openQuestions"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["openQuestions"]>, BotStoreError>;
+    readonly answerQuestion: (
+      ...args: Parameters<BotDatabase["answerQuestion"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["answerQuestion"]>, BotStoreError>;
+    readonly setQuestionResult: (
+      ...args: Parameters<BotDatabase["setQuestionResult"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["setQuestionResult"]>, BotStoreError>;
+    readonly expireQuestions: (
+      ...args: Parameters<BotDatabase["expireQuestions"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["expireQuestions"]>, BotStoreError>;
+    readonly recordSent: (
+      ...args: Parameters<BotDatabase["recordSent"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["recordSent"]>, BotStoreError>;
+    readonly sentByBots: (
+      ...args: Parameters<BotDatabase["sentByBots"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["sentByBots"]>, BotStoreError>;
+    readonly listMentions: (
+      ...args: Parameters<BotDatabase["listMentions"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["listMentions"]>, BotStoreError>;
+    readonly dueMentions: (
+      ...args: Parameters<BotDatabase["dueMentions"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["dueMentions"]>, BotStoreError>;
+    readonly markMentionPending: (
+      ...args: Parameters<BotDatabase["markMentionPending"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["markMentionPending"]>, BotStoreError>;
+    readonly delayMention: (
+      ...args: Parameters<BotDatabase["delayMention"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["delayMention"]>, BotStoreError>;
+    readonly markMentionHandled: (
+      ...args: Parameters<BotDatabase["markMentionHandled"]>
+    ) => Effect.Effect<ReturnType<BotDatabase["markMentionHandled"]>, BotStoreError>;
+    readonly close: () => Effect.Effect<void, BotStoreError>;
+  }
+>()("t3/fork/bot/store/BotStore") {}
+
+class BotDatabase {
+  private readonly db: NodeSqlite.DatabaseSync;
+  constructor(db: NodeSqlite.DatabaseSync) {
+    this.db = db;
+    this.db.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;");
+    this.migrate();
   }
 
   private migrate() {
@@ -474,10 +680,6 @@ export class BotStore {
       this.db.exec("ROLLBACK");
       throw error;
     }
-  }
-
-  close() {
-    this.db.close();
   }
 
   listBots(): ReadonlyArray<Bot> {
@@ -1068,4 +1270,501 @@ export class BotStore {
     for (const question of due) expire.run(question.id);
     return due;
   }
+  recordSent(botId: string, channelId: string, messageId: string, at: string) {
+    return this.db
+      .prepare(
+        "INSERT OR IGNORE INTO sent_messages (channel_id, message_id, bot_id, sent_at) VALUES (?, ?, ?, ?)",
+      )
+      .run(channelId, messageId, botId, at);
+  }
+
+  sentByBots(channelId: string, messageIds: ReadonlyArray<string>): ReadonlySet<string> {
+    const check = this.db.prepare(
+      "SELECT 1 FROM sent_messages WHERE channel_id = ? AND message_id = ?",
+    );
+    return new Set(messageIds.filter((id) => check.get(channelId, id) !== undefined));
+  }
+
+  listMentions(channelId: string): ReadonlyArray<MentionMark> {
+    return (
+      this.db.prepare("SELECT * FROM mentions WHERE channel_id = ?").all(channelId) as Row[]
+    ).map(toMention);
+  }
+
+  dueMentions(at: string): ReadonlyArray<MentionMark> {
+    return (
+      this.db
+        .prepare("SELECT * FROM mentions WHERE due_at IS NOT NULL AND due_at <= ? ORDER BY due_at")
+        .all(at) as Row[]
+    ).map(toMention);
+  }
+
+  markMentionPending(
+    channelId: string,
+    conversationId: string,
+    pendingAt: string,
+    dueAt: string,
+    handledThrough: string,
+  ) {
+    return this.db
+      .prepare(
+        `INSERT INTO mentions (channel_id, conversation_id, handled_through, pending_at, due_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (channel_id, conversation_id) DO UPDATE SET
+         pending_at = excluded.pending_at,
+         due_at = COALESCE(mentions.due_at, excluded.due_at)`,
+      )
+      .run(channelId, conversationId, handledThrough, pendingAt, dueAt);
+  }
+
+  delayMention(channelId: string, conversationId: string, dueAt: string) {
+    return this.db
+      .prepare("UPDATE mentions SET due_at = ? WHERE channel_id = ? AND conversation_id = ?")
+      .run(dueAt, channelId, conversationId);
+  }
+
+  markMentionHandled(channelId: string, conversationId: string, through: string) {
+    return this.db
+      .prepare(
+        `INSERT INTO mentions (channel_id, conversation_id, handled_through) VALUES (?, ?, ?)
+       ON CONFLICT (channel_id, conversation_id) DO UPDATE SET
+         handled_through = excluded.handled_through, pending_at = NULL, due_at = NULL`,
+      )
+      .run(channelId, conversationId, through);
+  }
 }
+
+export const make = Effect.fn("BotStore.make")(function* (filePath: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  if (filePath !== ":memory:") {
+    yield* fs
+      .makeDirectory(path.dirname(filePath), { recursive: true })
+      .pipe(
+        Effect.mapError(
+          (cause) => new BotStoreError({ operation: "mkdir", path: filePath, cause }),
+        ),
+      );
+  }
+  const { database, close } = yield* Effect.acquireRelease(
+    Effect.try({
+      try: () => {
+        const db = new NodeSqlite.DatabaseSync(filePath);
+        let database: BotDatabase;
+        try {
+          database = new BotDatabase(db);
+        } catch (cause) {
+          db.close();
+          throw cause;
+        }
+        let closed = false;
+        const close = Effect.fn("BotStore.close")(() =>
+          Effect.try({
+            try: () => {
+              if (!closed) {
+                db.close();
+                closed = true;
+              }
+            },
+            catch: (cause) => new BotStoreError({ operation: "close", path: filePath, cause }),
+          }),
+        );
+        return { database, close };
+      },
+      catch: (cause) => new BotStoreError({ operation: "open", path: filePath, cause }),
+    }),
+    ({ close }) => close().pipe(Effect.orDie),
+  );
+  return BotStore.of({
+    close,
+    listBots: Effect.fn("BotStore.listBots")((...args: Parameters<BotDatabase["listBots"]>) =>
+      Effect.try({
+        try: () => database.listBots(...args),
+        catch: (cause) => new BotStoreError({ operation: "listBots", path: filePath, cause }),
+      }),
+    ),
+    getBot: Effect.fn("BotStore.getBot")((...args: Parameters<BotDatabase["getBot"]>) =>
+      Effect.try({
+        try: () => database.getBot(...args),
+        catch: (cause) => new BotStoreError({ operation: "getBot", path: filePath, cause }),
+      }),
+    ),
+    createBot: Effect.fn("BotStore.createBot")((...args: Parameters<BotDatabase["createBot"]>) =>
+      Effect.try({
+        try: () => database.createBot(...args),
+        catch: (cause) => new BotStoreError({ operation: "createBot", path: filePath, cause }),
+      }),
+    ),
+    deleteBot: Effect.fn("BotStore.deleteBot")((...args: Parameters<BotDatabase["deleteBot"]>) =>
+      Effect.try({
+        try: () => database.deleteBot(...args),
+        catch: (cause) => new BotStoreError({ operation: "deleteBot", path: filePath, cause }),
+      }),
+    ),
+    countTurn: Effect.fn("BotStore.countTurn")((...args: Parameters<BotDatabase["countTurn"]>) =>
+      Effect.try({
+        try: () => database.countTurn(...args),
+        catch: (cause) => new BotStoreError({ operation: "countTurn", path: filePath, cause }),
+      }),
+    ),
+    noteBudgetSpent: Effect.fn("BotStore.noteBudgetSpent")(
+      (...args: Parameters<BotDatabase["noteBudgetSpent"]>) =>
+        Effect.try({
+          try: () => database.noteBudgetSpent(...args),
+          catch: (cause) =>
+            new BotStoreError({ operation: "noteBudgetSpent", path: filePath, cause }),
+        }),
+    ),
+    setProfile: Effect.fn("BotStore.setProfile")((...args: Parameters<BotDatabase["setProfile"]>) =>
+      Effect.try({
+        try: () => database.setProfile(...args),
+        catch: (cause) => new BotStoreError({ operation: "setProfile", path: filePath, cause }),
+      }),
+    ),
+    seenModel: Effect.fn("BotStore.seenModel")((...args: Parameters<BotDatabase["seenModel"]>) =>
+      Effect.try({
+        try: () => database.seenModel(...args),
+        catch: (cause) => new BotStoreError({ operation: "seenModel", path: filePath, cause }),
+      }),
+    ),
+    setPaused: Effect.fn("BotStore.setPaused")((...args: Parameters<BotDatabase["setPaused"]>) =>
+      Effect.try({
+        try: () => database.setPaused(...args),
+        catch: (cause) => new BotStoreError({ operation: "setPaused", path: filePath, cause }),
+      }),
+    ),
+    setSettings: Effect.fn("BotStore.setSettings")(
+      (...args: Parameters<BotDatabase["setSettings"]>) =>
+        Effect.try({
+          try: () => database.setSettings(...args),
+          catch: (cause) => new BotStoreError({ operation: "setSettings", path: filePath, cause }),
+        }),
+    ),
+    seenPacket: Effect.fn("BotStore.seenPacket")((...args: Parameters<BotDatabase["seenPacket"]>) =>
+      Effect.try({
+        try: () => database.seenPacket(...args),
+        catch: (cause) => new BotStoreError({ operation: "seenPacket", path: filePath, cause }),
+      }),
+    ),
+    setSeenPacket: Effect.fn("BotStore.setSeenPacket")(
+      (...args: Parameters<BotDatabase["setSeenPacket"]>) =>
+        Effect.try({
+          try: () => database.setSeenPacket(...args),
+          catch: (cause) =>
+            new BotStoreError({ operation: "setSeenPacket", path: filePath, cause }),
+        }),
+    ),
+    setWorkThread: Effect.fn("BotStore.setWorkThread")(
+      (...args: Parameters<BotDatabase["setWorkThread"]>) =>
+        Effect.try({
+          try: () => database.setWorkThread(...args),
+          catch: (cause) =>
+            new BotStoreError({ operation: "setWorkThread", path: filePath, cause }),
+        }),
+    ),
+    addChat: Effect.fn("BotStore.addChat")((...args: Parameters<BotDatabase["addChat"]>) =>
+      Effect.try({
+        try: () => database.addChat(...args),
+        catch: (cause) => new BotStoreError({ operation: "addChat", path: filePath, cause }),
+      }),
+    ),
+    hasChat: Effect.fn("BotStore.hasChat")((...args: Parameters<BotDatabase["hasChat"]>) =>
+      Effect.try({
+        try: () => database.hasChat(...args),
+        catch: (cause) => new BotStoreError({ operation: "hasChat", path: filePath, cause }),
+      }),
+    ),
+    postedRenderIds: Effect.fn("BotStore.postedRenderIds")(
+      (...args: Parameters<BotDatabase["postedRenderIds"]>) =>
+        Effect.try({
+          try: () => database.postedRenderIds(...args),
+          catch: (cause) =>
+            new BotStoreError({ operation: "postedRenderIds", path: filePath, cause }),
+        }),
+    ),
+    recentChat: Effect.fn("BotStore.recentChat")((...args: Parameters<BotDatabase["recentChat"]>) =>
+      Effect.try({
+        try: () => database.recentChat(...args),
+        catch: (cause) => new BotStoreError({ operation: "recentChat", path: filePath, cause }),
+      }),
+    ),
+    unseenCount: Effect.fn("BotStore.unseenCount")(
+      (...args: Parameters<BotDatabase["unseenCount"]>) =>
+        Effect.try({
+          try: () => database.unseenCount(...args),
+          catch: (cause) => new BotStoreError({ operation: "unseenCount", path: filePath, cause }),
+        }),
+    ),
+    markSeen: Effect.fn("BotStore.markSeen")((...args: Parameters<BotDatabase["markSeen"]>) =>
+      Effect.try({
+        try: () => database.markSeen(...args),
+        catch: (cause) => new BotStoreError({ operation: "markSeen", path: filePath, cause }),
+      }),
+    ),
+    waitingMessages: Effect.fn("BotStore.waitingMessages")(
+      (...args: Parameters<BotDatabase["waitingMessages"]>) =>
+        Effect.try({
+          try: () => database.waitingMessages(...args),
+          catch: (cause) =>
+            new BotStoreError({ operation: "waitingMessages", path: filePath, cause }),
+        }),
+    ),
+    getTurn: Effect.fn("BotStore.getTurn")((...args: Parameters<BotDatabase["getTurn"]>) =>
+      Effect.try({
+        try: () => database.getTurn(...args),
+        catch: (cause) => new BotStoreError({ operation: "getTurn", path: filePath, cause }),
+      }),
+    ),
+    listTurns: Effect.fn("BotStore.listTurns")((...args: Parameters<BotDatabase["listTurns"]>) =>
+      Effect.try({
+        try: () => database.listTurns(...args),
+        catch: (cause) => new BotStoreError({ operation: "listTurns", path: filePath, cause }),
+      }),
+    ),
+    startTurn: Effect.fn("BotStore.startTurn")((...args: Parameters<BotDatabase["startTurn"]>) =>
+      Effect.try({
+        try: () => database.startTurn(...args),
+        catch: (cause) => new BotStoreError({ operation: "startTurn", path: filePath, cause }),
+      }),
+    ),
+    markAnswered: Effect.fn("BotStore.markAnswered")(
+      (...args: Parameters<BotDatabase["markAnswered"]>) =>
+        Effect.try({
+          try: () => database.markAnswered(...args),
+          catch: (cause) => new BotStoreError({ operation: "markAnswered", path: filePath, cause }),
+        }),
+    ),
+    markSaid: Effect.fn("BotStore.markSaid")((...args: Parameters<BotDatabase["markSaid"]>) =>
+      Effect.try({
+        try: () => database.markSaid(...args),
+        catch: (cause) => new BotStoreError({ operation: "markSaid", path: filePath, cause }),
+      }),
+    ),
+    endTurn: Effect.fn("BotStore.endTurn")((...args: Parameters<BotDatabase["endTurn"]>) =>
+      Effect.try({
+        try: () => database.endTurn(...args),
+        catch: (cause) => new BotStoreError({ operation: "endTurn", path: filePath, cause }),
+      }),
+    ),
+    workingSince: Effect.fn("BotStore.workingSince")(
+      (...args: Parameters<BotDatabase["workingSince"]>) =>
+        Effect.try({
+          try: () => database.workingSince(...args),
+          catch: (cause) => new BotStoreError({ operation: "workingSince", path: filePath, cause }),
+        }),
+    ),
+    listItems: Effect.fn("BotStore.listItems")((...args: Parameters<BotDatabase["listItems"]>) =>
+      Effect.try({
+        try: () => database.listItems(...args),
+        catch: (cause) => new BotStoreError({ operation: "listItems", path: filePath, cause }),
+      }),
+    ),
+    addItem: Effect.fn("BotStore.addItem")((...args: Parameters<BotDatabase["addItem"]>) =>
+      Effect.try({
+        try: () => database.addItem(...args),
+        catch: (cause) => new BotStoreError({ operation: "addItem", path: filePath, cause }),
+      }),
+    ),
+    updateItem: Effect.fn("BotStore.updateItem")((...args: Parameters<BotDatabase["updateItem"]>) =>
+      Effect.try({
+        try: () => database.updateItem(...args),
+        catch: (cause) => new BotStoreError({ operation: "updateItem", path: filePath, cause }),
+      }),
+    ),
+    setAsideStale: Effect.fn("BotStore.setAsideStale")(
+      (...args: Parameters<BotDatabase["setAsideStale"]>) =>
+        Effect.try({
+          try: () => database.setAsideStale(...args),
+          catch: (cause) =>
+            new BotStoreError({ operation: "setAsideStale", path: filePath, cause }),
+        }),
+    ),
+    listMemory: Effect.fn("BotStore.listMemory")((...args: Parameters<BotDatabase["listMemory"]>) =>
+      Effect.try({
+        try: () => database.listMemory(...args),
+        catch: (cause) => new BotStoreError({ operation: "listMemory", path: filePath, cause }),
+      }),
+    ),
+    addMemory: Effect.fn("BotStore.addMemory")((...args: Parameters<BotDatabase["addMemory"]>) =>
+      Effect.try({
+        try: () => database.addMemory(...args),
+        catch: (cause) => new BotStoreError({ operation: "addMemory", path: filePath, cause }),
+      }),
+    ),
+    editMemory: Effect.fn("BotStore.editMemory")((...args: Parameters<BotDatabase["editMemory"]>) =>
+      Effect.try({
+        try: () => database.editMemory(...args),
+        catch: (cause) => new BotStoreError({ operation: "editMemory", path: filePath, cause }),
+      }),
+    ),
+    removeMemory: Effect.fn("BotStore.removeMemory")(
+      (...args: Parameters<BotDatabase["removeMemory"]>) =>
+        Effect.try({
+          try: () => database.removeMemory(...args),
+          catch: (cause) => new BotStoreError({ operation: "removeMemory", path: filePath, cause }),
+        }),
+    ),
+    listRoutines: Effect.fn("BotStore.listRoutines")(
+      (...args: Parameters<BotDatabase["listRoutines"]>) =>
+        Effect.try({
+          try: () => database.listRoutines(...args),
+          catch: (cause) => new BotStoreError({ operation: "listRoutines", path: filePath, cause }),
+        }),
+    ),
+    addRoutine: Effect.fn("BotStore.addRoutine")((...args: Parameters<BotDatabase["addRoutine"]>) =>
+      Effect.try({
+        try: () => database.addRoutine(...args),
+        catch: (cause) => new BotStoreError({ operation: "addRoutine", path: filePath, cause }),
+      }),
+    ),
+    updateRoutine: Effect.fn("BotStore.updateRoutine")(
+      (...args: Parameters<BotDatabase["updateRoutine"]>) =>
+        Effect.try({
+          try: () => database.updateRoutine(...args),
+          catch: (cause) =>
+            new BotStoreError({ operation: "updateRoutine", path: filePath, cause }),
+        }),
+    ),
+    removeRoutine: Effect.fn("BotStore.removeRoutine")(
+      (...args: Parameters<BotDatabase["removeRoutine"]>) =>
+        Effect.try({
+          try: () => database.removeRoutine(...args),
+          catch: (cause) =>
+            new BotStoreError({ operation: "removeRoutine", path: filePath, cause }),
+        }),
+    ),
+    listThreads: Effect.fn("BotStore.listThreads")(
+      (...args: Parameters<BotDatabase["listThreads"]>) =>
+        Effect.try({
+          try: () => database.listThreads(...args),
+          catch: (cause) => new BotStoreError({ operation: "listThreads", path: filePath, cause }),
+        }),
+    ),
+    getThread: Effect.fn("BotStore.getThread")((...args: Parameters<BotDatabase["getThread"]>) =>
+      Effect.try({
+        try: () => database.getThread(...args),
+        catch: (cause) => new BotStoreError({ operation: "getThread", path: filePath, cause }),
+      }),
+    ),
+    updateThread: Effect.fn("BotStore.updateThread")(
+      (...args: Parameters<BotDatabase["updateThread"]>) =>
+        Effect.try({
+          try: () => database.updateThread(...args),
+          catch: (cause) => new BotStoreError({ operation: "updateThread", path: filePath, cause }),
+        }),
+    ),
+    addThread: Effect.fn("BotStore.addThread")((...args: Parameters<BotDatabase["addThread"]>) =>
+      Effect.try({
+        try: () => database.addThread(...args),
+        catch: (cause) => new BotStoreError({ operation: "addThread", path: filePath, cause }),
+      }),
+    ),
+    removeThread: Effect.fn("BotStore.removeThread")(
+      (...args: Parameters<BotDatabase["removeThread"]>) =>
+        Effect.try({
+          try: () => database.removeThread(...args),
+          catch: (cause) => new BotStoreError({ operation: "removeThread", path: filePath, cause }),
+        }),
+    ),
+    enqueue: Effect.fn("BotStore.enqueue")((...args: Parameters<BotDatabase["enqueue"]>) =>
+      Effect.try({
+        try: () => database.enqueue(...args),
+        catch: (cause) => new BotStoreError({ operation: "enqueue", path: filePath, cause }),
+      }),
+    ),
+    queued: Effect.fn("BotStore.queued")((...args: Parameters<BotDatabase["queued"]>) =>
+      Effect.try({
+        try: () => database.queued(...args),
+        catch: (cause) => new BotStoreError({ operation: "queued", path: filePath, cause }),
+      }),
+    ),
+    addQuestion: Effect.fn("BotStore.addQuestion")(
+      (...args: Parameters<BotDatabase["addQuestion"]>) =>
+        Effect.try({
+          try: () => database.addQuestion(...args),
+          catch: (cause) => new BotStoreError({ operation: "addQuestion", path: filePath, cause }),
+        }),
+    ),
+    openQuestions: Effect.fn("BotStore.openQuestions")(
+      (...args: Parameters<BotDatabase["openQuestions"]>) =>
+        Effect.try({
+          try: () => database.openQuestions(...args),
+          catch: (cause) =>
+            new BotStoreError({ operation: "openQuestions", path: filePath, cause }),
+        }),
+    ),
+    answerQuestion: Effect.fn("BotStore.answerQuestion")(
+      (...args: Parameters<BotDatabase["answerQuestion"]>) =>
+        Effect.try({
+          try: () => database.answerQuestion(...args),
+          catch: (cause) =>
+            new BotStoreError({ operation: "answerQuestion", path: filePath, cause }),
+        }),
+    ),
+    setQuestionResult: Effect.fn("BotStore.setQuestionResult")(
+      (...args: Parameters<BotDatabase["setQuestionResult"]>) =>
+        Effect.try({
+          try: () => database.setQuestionResult(...args),
+          catch: (cause) =>
+            new BotStoreError({ operation: "setQuestionResult", path: filePath, cause }),
+        }),
+    ),
+    expireQuestions: Effect.fn("BotStore.expireQuestions")(
+      (...args: Parameters<BotDatabase["expireQuestions"]>) =>
+        Effect.try({
+          try: () => database.expireQuestions(...args),
+          catch: (cause) =>
+            new BotStoreError({ operation: "expireQuestions", path: filePath, cause }),
+        }),
+    ),
+    recordSent: Effect.fn("BotStore.recordSent")((...args: Parameters<BotDatabase["recordSent"]>) =>
+      Effect.try({
+        try: () => database.recordSent(...args),
+        catch: (cause) => new BotStoreError({ operation: "recordSent", path: filePath, cause }),
+      }),
+    ),
+    sentByBots: Effect.fn("BotStore.sentByBots")((...args: Parameters<BotDatabase["sentByBots"]>) =>
+      Effect.try({
+        try: () => database.sentByBots(...args),
+        catch: (cause) => new BotStoreError({ operation: "sentByBots", path: filePath, cause }),
+      }),
+    ),
+    listMentions: Effect.fn("BotStore.listMentions")(
+      (...args: Parameters<BotDatabase["listMentions"]>) =>
+        Effect.try({
+          try: () => database.listMentions(...args),
+          catch: (cause) => new BotStoreError({ operation: "listMentions", path: filePath, cause }),
+        }),
+    ),
+    dueMentions: Effect.fn("BotStore.dueMentions")(
+      (...args: Parameters<BotDatabase["dueMentions"]>) =>
+        Effect.try({
+          try: () => database.dueMentions(...args),
+          catch: (cause) => new BotStoreError({ operation: "dueMentions", path: filePath, cause }),
+        }),
+    ),
+    markMentionPending: Effect.fn("BotStore.markMentionPending")(
+      (...args: Parameters<BotDatabase["markMentionPending"]>) =>
+        Effect.try({
+          try: () => database.markMentionPending(...args),
+          catch: (cause) =>
+            new BotStoreError({ operation: "markMentionPending", path: filePath, cause }),
+        }),
+    ),
+    delayMention: Effect.fn("BotStore.delayMention")(
+      (...args: Parameters<BotDatabase["delayMention"]>) =>
+        Effect.try({
+          try: () => database.delayMention(...args),
+          catch: (cause) => new BotStoreError({ operation: "delayMention", path: filePath, cause }),
+        }),
+    ),
+    markMentionHandled: Effect.fn("BotStore.markMentionHandled")(
+      (...args: Parameters<BotDatabase["markMentionHandled"]>) =>
+        Effect.try({
+          try: () => database.markMentionHandled(...args),
+          catch: (cause) =>
+            new BotStoreError({ operation: "markMentionHandled", path: filePath, cause }),
+        }),
+    ),
+  });
+});

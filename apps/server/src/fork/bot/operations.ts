@@ -91,7 +91,7 @@ export const decode = <S extends Schema.Top>(schema: S, input: unknown) =>
 
 const requireBot = Effect.fn("ForkBot.requireBot")(function* (botId: string) {
   const runtime = yield* BotRuntime;
-  const bot = runtime.existingStore()?.getBot(botId) ?? null;
+  const bot = (yield* runtime.existingStore()?.getBot(botId) ?? Effect.undefined) ?? null;
   if (bot === null) return yield* notFound();
   return bot;
 });
@@ -101,18 +101,18 @@ export const readNotebook = Effect.fn("ForkBot.readNotebook")(function* (botId: 
   const runtime = yield* BotRuntime;
   const threads = yield* ThreadManagement.ThreadManagementService;
   const store = yield* runtime.store;
-  const owned = store.listThreads(botId);
+  const owned = yield* store.listThreads(botId);
   const titles = yield* threads
     .getThreadTitles(owned.map((thread) => ThreadId.make(thread.threadId)))
     .pipe(Effect.orElseSucceed((): Record<ThreadId, string> => ({})));
   return {
-    items: store.listItems(botId),
+    items: yield* store.listItems(botId),
     threads: owned.map((thread) => ({
       ...thread,
       title: titles[ThreadId.make(thread.threadId)] ?? null,
     })),
-    routines: store.listRoutines(botId),
-    memory: store.listMemory(botId),
+    routines: yield* store.listRoutines(botId),
+    memory: yield* store.listMemory(botId),
   } satisfies Notebook;
 });
 
@@ -133,26 +133,29 @@ export interface BotSummary {
 
 export const listBots = Effect.fn("ForkBot.listBots")(function* () {
   const store = (yield* BotRuntime).existingStore();
-  const bots: ReadonlyArray<BotSummary> = (store?.listBots() ?? []).map((bot) => {
-    const last = store!.recentChat(bot.id, 1)[0];
-    return {
-      id: bot.id,
-      name: bot.name,
-      modelSelection: bot.modelSelection,
-      working: store!.workingSince(bot.id) !== null,
-      paused: bot.paused,
-      lastMessage: last
-        ? {
-            role: last.role,
-            text: chatPreview(last.text) || (last.renders?.[0]?.title ?? ""),
-            createdAt: last.createdAt,
-          }
-        : null,
-      unread: store!.unseenCount(bot.id),
-      questions: store!.openQuestions(bot.id).length,
-      workThreadId: bot.workThreadId,
-    };
-  });
+  const bots: ReadonlyArray<BotSummary> = yield* Effect.forEach(
+    yield* store?.listBots() ?? Effect.succeed([]),
+    Effect.fnUntraced(function* (bot) {
+      const last = (yield* store!.recentChat(bot.id, 1))[0];
+      return {
+        id: bot.id,
+        name: bot.name,
+        modelSelection: bot.modelSelection,
+        working: (yield* store!.workingSince(bot.id)) !== null,
+        paused: bot.paused,
+        lastMessage: last
+          ? {
+              role: last.role,
+              text: chatPreview(last.text) || (last.renders?.[0]?.title ?? ""),
+              createdAt: last.createdAt,
+            }
+          : null,
+        unread: yield* store!.unseenCount(bot.id),
+        questions: (yield* store!.openQuestions(bot.id)).length,
+        workThreadId: bot.workThreadId,
+      };
+    }),
+  );
   return { bots };
 });
 
@@ -251,7 +254,7 @@ export const readBot = Effect.fn("ForkBot.readBot")(function* (params: URLSearch
   const runtime = yield* BotRuntime;
   const bot = yield* requireBot(params.get("botId") ?? "");
   const store = yield* runtime.store;
-  const since = store.workingSince(bot.id);
+  const since = yield* store.workingSince(bot.id);
   return {
     // A count from an earlier day is spent: today starts at zero.
     bot: {
@@ -265,9 +268,9 @@ export const readBot = Effect.fn("ForkBot.readBot")(function* (params: URLSearch
     role: yield* runtime.files.readRole(runtime.botsDir, bot.id),
     workingSince: since,
     activity: activityOf(runtime, bot.id, since),
-    chat: store.recentChat(bot.id, CHAT_PAGE),
+    chat: yield* store.recentChat(bot.id, CHAT_PAGE),
     notebook: yield* readNotebook(bot.id),
-    questions: store.openQuestions(bot.id),
+    questions: yield* store.openQuestions(bot.id),
     workspacePath: runtime.files.workspacePath(runtime.botsDir, bot.id),
     notesPath: runtime.files.notesPath(runtime.botsDir, bot.id),
     notes: yield* runtime.files.listNotes(runtime.botsDir, bot.id),
@@ -359,7 +362,7 @@ export const createBot = Effect.fn("ForkBot.createBot")(function* (input: unknow
   yield* runtime.files
     .writeToken(runtime.botsDir, id)
     .pipe(Effect.mapError((error) => internal(error.reason.cause)));
-  (yield* runtime.store).createBot(
+  yield* (yield* runtime.store).createBot(
     { id, name, modelSelection, createdAt: yield* nowIso },
     decoded.runtimeMode ?? (yield* runtimeModeFor(modelSelection, "auto")),
     brief === "" ? undefined : { id: newId("msg"), text: brief },
@@ -388,7 +391,7 @@ export const saveRole = Effect.fn("ForkBot.saveRole")(function* (input: unknown)
   yield* runtime.files
     .writeRole(runtime.botsDir, bot.id, decoded.role)
     .pipe(Effect.mapError((error) => internal(error.reason.cause)));
-  (yield* runtime.store).enqueue(bot.id, "The user edited your role.", false, yield* nowIso);
+  yield* (yield* runtime.store).enqueue(bot.id, "The user edited your role.", false, yield* nowIso);
   runtime.publish(bot.id);
   return {};
 });
@@ -401,8 +404,8 @@ export const deleteBot = Effect.fn("ForkBot.deleteBot")(function* (input: unknow
   const bot = yield* requireBot((yield* decode(BotIdInput, input)).botId);
   const store = yield* runtime.store;
   yield* runtime.turnLock.withPermit(
-    Effect.sync(() => {
-      store.deleteBot(bot.id);
+    Effect.gen(function* () {
+      yield* store.deleteBot(bot.id);
       if (bot.workThreadId !== null) runtime.workThreads.delete(bot.workThreadId);
       for (const [threadId, owner] of runtime.ownedThreads) {
         if (owner === bot.id) runtime.ownedThreads.delete(threadId);
@@ -425,7 +428,7 @@ export const sendMessage = Effect.fn("ForkBot.sendMessage")(function* (input: un
     return yield* badRequest(`Write 1 to ${MESSAGE_CHARS} characters.`, "text");
   }
   const messageId = newId("msg");
-  (yield* runtime.store).addChat({
+  yield* (yield* runtime.store).addChat({
     id: messageId,
     botId: bot.id,
     role: "user",
@@ -444,7 +447,7 @@ const steer = Effect.fn("ForkBot.steer")(function* (bot: Bot, messageId: string,
   return yield* runtime.turnLock.withPermit(
     Effect.gen(function* () {
       const store = yield* runtime.store;
-      const turn = store.getTurn(bot.id);
+      const turn = yield* store.getTurn(bot.id);
       if (turn === null || bot.workProjectId === null) return false;
       const sent = yield* Effect.result(
         threads.sendToThread({
@@ -460,7 +463,7 @@ const steer = Effect.fn("ForkBot.steer")(function* (bot: Bot, messageId: string,
         }),
       );
       if (Result.isFailure(sent) || sent.success.delivery !== "steered") return false;
-      store.markAnswered(bot.id, turn.runId, [messageId]);
+      yield* store.markAnswered(bot.id, turn.runId, [messageId]);
       runtime.publish(bot.id);
       return true;
     }),
@@ -469,7 +472,7 @@ const steer = Effect.fn("ForkBot.steer")(function* (bot: Bot, messageId: string,
 
 export const postError = Effect.fn("ForkBot.postError")(function* (botId: string, text: string) {
   const runtime = yield* BotRuntime;
-  (yield* runtime.store).addChat({
+  yield* (yield* runtime.store).addChat({
     id: newId("msg"),
     botId,
     role: "error",
@@ -577,7 +580,7 @@ const dispatch = Effect.fn("ForkBot.dispatch")(function* (
   });
   const run = launched.projection.runs.find((candidate) => candidate.userMessageId === messageId);
   if (run === undefined) return yield* internal("The work thread started no run.");
-  (yield* runtime.store).setWorkThread(bot.id, launched.threadId, projectId);
+  yield* (yield* runtime.store).setWorkThread(bot.id, launched.threadId, projectId);
   runtime.workThreads.set(launched.threadId, bot.id);
   return { threadId: launched.threadId, runId: run.id };
 });
@@ -600,29 +603,29 @@ const wake = Effect.fn("ForkBot.wake")(function* (botId: string) {
   const failure = yield* runtime.turnLock.withPermit(
     Effect.gen(function* () {
       const store = yield* runtime.store;
-      const bot = store.getBot(botId);
-      if (bot === null || bot.paused || store.getTurn(botId) !== null) return null;
-      const waiting = store.waitingMessages(botId);
-      const queued = store.queued(botId);
+      const bot = yield* store.getBot(botId);
+      if (bot === null || bot.paused || (yield* store.getTurn(botId)) !== null) return null;
+      const waiting = yield* store.waitingMessages(botId);
+      const queued = yield* store.queued(botId);
       if (waiting.length === 0 && !queued.some((event) => event.wakes)) return null;
       const now = yield* DateTime.nowInCurrentZone.pipe(DateTime.withCurrentZoneLocal);
       const today = localDay(now);
       const firstTurnToday = bot.lastTurnDay !== today;
       const turnsToday = firstTurnToday ? 0 : bot.turnsToday;
       if (turnsToday >= bot.settings.turnsPerDay) {
-        return store.noteBudgetSpent(botId, today)
+        return (yield* store.noteBudgetSpent(botId, today))
           ? `${bot.name} used its ${bot.settings.turnsPerDay} turns for today. What happens meanwhile waits for tomorrow, or raise its budget.`
           : null;
       }
       yield* runtime.ensureCli;
       yield* runtime.files.writeToken(runtime.botsDir, botId);
       yield* runtime.files.ensureWorkspace(runtime.botsDir, botId);
-      const answered = store
-        .recentChat(botId, RECENT_CHAT_LIMIT + waiting.length)
-        .filter((message) => !waiting.some((candidate) => candidate.id === message.id));
+      const answered = (yield* store.recentChat(botId, RECENT_CHAT_LIMIT + waiting.length)).filter(
+        (message) => !waiting.some((candidate) => candidate.id === message.id),
+      );
       // A new day starts a fresh provider session; the full packet carries all a turn needs. So
       // does a move to another provider, rather than handing it this session's transcript.
-      const seenModel = store.seenModel(botId);
+      const seenModel = yield* store.seenModel(botId);
       const freshContext =
         (firstTurnToday && bot.lastTurnDay !== null) ||
         (bot.workThreadId !== null &&
@@ -631,7 +634,7 @@ const wake = Effect.fn("ForkBot.wake")(function* (botId: string) {
       const seen =
         freshContext || bot.workThreadId === null
           ? null
-          : store.seenPacket(botId, bot.modelSelection);
+          : yield* store.seenPacket(botId, bot.modelSelection);
       const packet = buildPacket(
         {
           name: bot.name,
@@ -643,7 +646,7 @@ const wake = Effect.fn("ForkBot.wake")(function* (botId: string) {
           skillsPath: runtime.files.ownSkillsPath(runtime.botsDir, botId),
           sharedSkillsPath: runtime.files.sharedSkillsPath(runtime.botsDir),
           skills: yield* runtime.files.listSkills(runtime.botsDir, botId),
-          questions: store.openQuestions(botId),
+          questions: yield* store.openQuestions(botId),
           recentChat: answered,
           newMessages: waiting,
           events: queued.map((event) => event.text),
@@ -654,7 +657,11 @@ const wake = Effect.fn("ForkBot.wake")(function* (botId: string) {
         },
         seen,
       );
-      const started = yield* Effect.result(dispatch(bot, packet.text, freshContext));
+      const started = yield* Effect.result(
+        dispatch(bot, packet.text, freshContext).pipe(
+          Effect.catchTags({ BotStoreError: Effect.die }),
+        ),
+      );
       if (Result.isFailure(started)) {
         yield* Effect.logWarning("A bot could not start its turn.", {
           botId,
@@ -662,7 +669,7 @@ const wake = Effect.fn("ForkBot.wake")(function* (botId: string) {
         });
         return `Could not start a turn: ${started.failure.message}`;
       }
-      store.startTurn(
+      yield* store.startTurn(
         {
           botId,
           runId: started.success.runId,
@@ -672,8 +679,8 @@ const wake = Effect.fn("ForkBot.wake")(function* (botId: string) {
         waiting.map((message) => message.id),
         queued.map((event) => event.id),
       );
-      store.setSeenPacket(botId, { model: bot.modelSelection, sections: packet.sections });
-      store.countTurn(botId, today);
+      yield* store.setSeenPacket(botId, { model: bot.modelSelection, sections: packet.sections });
+      yield* store.countTurn(botId, today);
       runtime.publish(botId);
       return null;
     }),
@@ -733,7 +740,7 @@ export const withShown = Effect.fn("ForkBot.withShown")(function* (
             },
           )
           .pipe(Effect.orElseSucceed(() => ({ turnItems: [] })))).turnItems;
-  const postedPages = store.postedRenderIds(bot.id, turn.startedAt);
+  const postedPages = yield* store.postedRenderIds(bot.id, turn.startedAt);
   const posts: ChatPost[] = [];
   let pages: Array<HtmlRenderReference> = [];
   const post = (message: ChatPost) => {
@@ -747,7 +754,7 @@ export const withShown = Effect.fn("ForkBot.withShown")(function* (
     const sent = sentMessageFromToolItem(item)?.trim();
     // Its id comes from the tool call, so a later look at the same run finds it posted.
     const id = `msg_shown_${item.id}`;
-    if (sent && !store.hasChat(id)) {
+    if (sent && !(yield* store.hasChat(id))) {
       post({ id, botId: bot.id, role: "bot", text: sent, createdAt: yield* nowIso });
     }
   }
@@ -786,8 +793,8 @@ export const finishRun = Effect.fn("ForkBot.finishRun")(function* (
   const ended = yield* runtime.turnLock.withPermit(
     Effect.gen(function* () {
       const store = yield* runtime.store;
-      const bot = store.getBot(botId);
-      const turn = store.getTurn(botId);
+      const bot = yield* store.getBot(botId);
+      const turn = yield* store.getTurn(botId);
       if (bot === null || turn === null || turn.runId !== runId) return false;
       const reply =
         status === "completed" && !turn.said && bot.workProjectId !== null
@@ -804,14 +811,14 @@ export const finishRun = Effect.fn("ForkBot.finishRun")(function* (
             ? { role: "bot" as const, text }
             : null;
       // A turn that did not complete may have lost what it was sent; the next one resends it all.
-      if (status !== "completed") store.setSeenPacket(botId, null);
+      if (status !== "completed") yield* store.setSeenPacket(botId, null);
       const posts = yield* withShown(
         bot,
         turn,
         post === null ? null : { id: newId("msg"), botId, createdAt: yield* nowIso, ...post },
       );
       const owed = turn.answersUser && !turn.said && !silent && status === "completed";
-      store.endTurn(
+      yield* store.endTurn(
         botId,
         runId,
         owed && posts.length === 0
@@ -842,7 +849,7 @@ export const notify = Effect.fn("ForkBot.notify")(function* (
   wakes: boolean,
 ) {
   const runtime = yield* BotRuntime;
-  (yield* runtime.store).enqueue(botId, text, wakes, yield* nowIso);
+  yield* (yield* runtime.store).enqueue(botId, text, wakes, yield* nowIso);
   runtime.publish(botId);
   if (wakes) yield* wake(botId);
 });
@@ -855,22 +862,22 @@ export const fireDueRoutines = Effect.fn("ForkBot.fireDueRoutines")(function* (
   const runtime = yield* BotRuntime;
   const store = runtime.existingStore();
   if (store === null) return;
-  for (const botId of store.setAsideStale(
+  for (const botId of yield* store.setAsideStale(
     DateTime.formatIso(DateTime.subtractDuration(now, SET_ASIDE_AFTER_DAYS * 86_400_000)),
   )) {
     runtime.publish(botId);
   }
-  for (const question of store.expireQuestions(DateTime.formatIso(now))) {
+  for (const question of yield* store.expireQuestions(DateTime.formatIso(now))) {
     yield* notify(
       question.botId,
       `Your question ${question.id} lapsed unanswered after 24 hours; it did not run. Ask again only if it still holds.`,
       false,
     );
   }
-  for (const routine of store.listRoutines()) {
+  for (const routine of yield* store.listRoutines()) {
     if (routine.nextDueAt === null || Date.parse(routine.nextDueAt) > DateTime.toEpochMillis(now))
       continue;
-    store.updateRoutine(routine.botId, routine.id, {
+    yield* store.updateRoutine(routine.botId, routine.id, {
       nextDueAt: nextDueAt(routine.schedule, now)?.pipe(DateTime.formatIso) ?? null,
     });
     yield* fireRoutine(
@@ -888,9 +895,9 @@ const fireRoutine = Effect.fn("ForkBot.fireRoutine")(function* (
   dueAt: DateTime.Zoned,
   now: DateTime.Zoned,
 ) {
-  const routine = (yield* (yield* BotRuntime).store)
-    .listRoutines(botId)
-    .find((candidate) => candidate.id === routineId);
+  const routine = (yield* (yield* (yield* BotRuntime).store).listRoutines(botId)).find(
+    (candidate) => candidate.id === routineId,
+  );
   if (routine === undefined) return false;
   const late =
     DateTime.toEpochMillis(now) - DateTime.toEpochMillis(dueAt) > LATE_MS
@@ -927,7 +934,7 @@ export const reopenItem = Effect.fn("ForkBot.reopenItem")(function* (input: unkn
   const runtime = yield* BotRuntime;
   const decoded = yield* decode(ItemInput, input);
   const bot = yield* requireBot(decoded.botId);
-  if (!(yield* runtime.store).updateItem(bot.id, decoded.itemId, {}, yield* nowIso)) {
+  if (!(yield* (yield* runtime.store).updateItem(bot.id, decoded.itemId, {}, yield* nowIso))) {
     return yield* new ForkHttpError({
       status: 404,
       code: "not_found",
@@ -945,7 +952,7 @@ export const forgetMemory = Effect.fn("ForkBot.forgetMemory")(function* (input: 
   const runtime = yield* BotRuntime;
   const decoded = yield* decode(MemoryInput, input);
   const bot = yield* requireBot(decoded.botId);
-  if (!(yield* runtime.store).removeMemory(bot.id, decoded.memoryId)) {
+  if (!(yield* (yield* runtime.store).removeMemory(bot.id, decoded.memoryId))) {
     return yield* new ForkHttpError({
       status: 404,
       code: "not_found",
@@ -962,7 +969,7 @@ export const moveMemoryToRole = Effect.fn("ForkBot.moveMemoryToRole")(function* 
   const decoded = yield* decode(MemoryInput, input);
   const bot = yield* requireBot(decoded.botId);
   const store = yield* runtime.store;
-  const note = store.listMemory(bot.id).find((entry) => entry.id === decoded.memoryId);
+  const note = (yield* store.listMemory(bot.id)).find((entry) => entry.id === decoded.memoryId);
   if (note === undefined) {
     return yield* new ForkHttpError({
       status: 404,
@@ -977,8 +984,13 @@ export const moveMemoryToRole = Effect.fn("ForkBot.moveMemoryToRole")(function* 
   yield* runtime.files
     .writeRole(runtime.botsDir, bot.id, role)
     .pipe(Effect.mapError((error) => internal(error.reason.cause)));
-  store.removeMemory(bot.id, note.id);
-  store.enqueue(bot.id, `The user moved memory ${note.id} into your role.`, false, yield* nowIso);
+  yield* store.removeMemory(bot.id, note.id);
+  yield* store.enqueue(
+    bot.id,
+    `The user moved memory ${note.id} into your role.`,
+    false,
+    yield* nowIso,
+  );
   runtime.publish(bot.id);
   return {};
 });
@@ -989,8 +1001,8 @@ export const reconcile = Effect.fn("ForkBot.reconcile")(function* () {
   const threads = yield* ThreadManagement.ThreadManagementService;
   const store = runtime.existingStore();
   if (store === null) return;
-  for (const turn of store.listTurns()) {
-    const bot = store.getBot(turn.botId);
+  for (const turn of yield* store.listTurns()) {
+    const bot = yield* store.getBot(turn.botId);
     if (bot?.workProjectId == null) continue;
     const records = yield* threads
       .getProjectThreadRecords(
@@ -1004,7 +1016,7 @@ export const reconcile = Effect.fn("ForkBot.reconcile")(function* () {
     if (run === undefined) yield* finishRun(bot.id, turn.runId, "failed");
     else if (isTerminalRunStatus(run.status)) yield* finishRun(bot.id, run.id, run.status);
   }
-  for (const bot of store.listBots()) yield* wake(bot.id);
+  for (const bot of yield* store.listBots()) yield* wake(bot.id);
 });
 
 const SeenInput = Schema.Struct({ botId: Schema.String });
@@ -1014,7 +1026,7 @@ export const markSeen = Effect.fn("ForkBot.markSeen")(function* (input: unknown)
   const runtime = yield* BotRuntime;
   const decoded = yield* decode(SeenInput, input);
   const bot = yield* requireBot(decoded.botId);
-  if ((yield* runtime.store).markSeen(bot.id)) runtime.publish(bot.id);
+  if (yield* (yield* runtime.store).markSeen(bot.id)) runtime.publish(bot.id);
   return {};
 });
 
@@ -1025,7 +1037,7 @@ export const setPaused = Effect.fn("ForkBot.setPaused")(function* (input: unknow
   const runtime = yield* BotRuntime;
   const decoded = yield* decode(PauseInput, input);
   const bot = yield* requireBot(decoded.botId);
-  (yield* runtime.store).setPaused(bot.id, decoded.paused);
+  yield* (yield* runtime.store).setPaused(bot.id, decoded.paused);
   runtime.publish(bot.id);
   if (!decoded.paused) yield* wake(bot.id);
   return {};
@@ -1126,9 +1138,9 @@ export const saveSettings = Effect.fn("ForkBot.saveSettings")(function* (input: 
   yield* alignWorkThreadMode({ ...bot, modelSelection, settings }).pipe(
     Effect.mapError((cause) => badRequest(cause.message, "runtimeMode")),
   );
-  store.setSettings(bot.id, settings);
+  yield* store.setSettings(bot.id, settings);
   if (name !== bot.name || !sameModel(modelSelection, bot.modelSelection)) {
-    store.setProfile(bot.id, name, modelSelection);
+    yield* store.setProfile(bot.id, name, modelSelection);
   }
   if (name !== bot.name) yield* renamed(bot, name);
   for (const { connector, instance } of saved) {
@@ -1170,12 +1182,12 @@ export const handBack = Effect.fn("ForkBot.handBack")(function* (input: unknown)
   const decoded = yield* decode(HandBackInput, input);
   const bot = yield* requireBot(decoded.botId);
   const store = yield* runtime.store;
-  const owned = store.getThread(decoded.threadId);
+  const owned = yield* store.getThread(decoded.threadId);
   if (owned === null || owned.botId !== bot.id) {
     return yield* badRequest("That thread is not this bot's.", "threadId");
   }
   const handedBackAt = yield* nowIso;
-  store.updateThread(owned.threadId, { takenOver: false, handedBackAt }, handedBackAt);
+  yield* store.updateThread(owned.threadId, { takenOver: false, handedBackAt }, handedBackAt);
   yield* notify(
     bot.id,
     `The user handed thread ${owned.threadId}${owned.itemId === null ? "" : ` (item #${owned.itemId})`} back to you. Read it to see what they did, then carry on.`,

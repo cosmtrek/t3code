@@ -31,6 +31,7 @@ import type { HubEvent } from "./channels/hub.ts";
 import { InboxRuntime, type InboxRuntimeShape } from "./inbox/InboxRuntime.ts";
 import * as Artifacts from "./inbox/artifacts.ts";
 import * as Inbox from "./inbox/operations.ts";
+import type * as BotStore from "./bot/store.ts";
 import type * as InboxStore from "./inbox/store.ts";
 
 const FORK_ROUTE_PREFIX = "/api/fork";
@@ -125,7 +126,8 @@ export const makeRoute =
       | Inbox.ForkHttpError
       | BotRuntimeError
       | PlatformError.PlatformError
-      | InboxStore.InboxStoreError,
+      | InboxStore.InboxStoreError
+      | BotStore.BotStoreError,
       R
     >,
   ) =>

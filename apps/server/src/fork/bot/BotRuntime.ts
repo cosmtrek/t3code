@@ -17,7 +17,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import type * as PlatformError from "effect/PlatformError";
-import { BotStore } from "./store.ts";
+import * as BotStore from "./store.ts";
 
 /** `bots` says a bot changed, so views refetch; `bot-activity` carries its turn's latest line. */
 export type BotEvent =
@@ -58,9 +58,9 @@ export class BotRuntime extends Context.Service<
     /** Writes the tool once per server run, so it matches this server. */
     readonly ensureCli: Effect.Effect<void, BotRuntimeError | PlatformError.PlatformError>;
     /** The store, or null while no bot was ever created. */
-    readonly existingStore: () => BotStore | null;
+    readonly existingStore: () => BotStore.BotStore["Service"] | null;
     /** The store, created on first use. */
-    readonly store: Effect.Effect<BotStore, BotRuntimeError>;
+    readonly store: Effect.Effect<BotStore.BotStore["Service"], BotRuntimeError>;
     /** Opens once a bot exists; event following waits on it. */
     readonly active: Latch.Latch;
     /** Starting and ending turns, one at a time, so a bot never runs two. */
@@ -87,33 +87,38 @@ const make = Effect.gen(function* () {
   const files = yield* BotFiles.BotFiles;
   const botsDir = path.join(config.stateDir, "bots");
   const storePath = path.join(botsDir, "bots.sqlite");
-  let store: BotStore | null = null;
+  let store: BotStore.BotStore["Service"] | null = null;
   let closed = false;
   const resourceLock = yield* Semaphore.make(1);
   yield* Effect.addFinalizer(() =>
     resourceLock.withPermit(
       Effect.sync(() => {
         closed = true;
-        store?.close();
         store = null;
       }),
     ),
   );
   const getStore = resourceLock.withPermit(
-    Effect.try({
-      try: () => {
-        if (closed) throw new Error("The bot runtime is closed.");
-        store ??= new BotStore(storePath);
-        return store;
-      },
-      catch: (cause) => new BotRuntimeError({ cause }),
+    Effect.gen(function* () {
+      if (closed)
+        return yield* new BotRuntimeError({ cause: new Error("The bot runtime is closed.") });
+      store ??= yield* BotStore.make(storePath).pipe(
+        Scope.provide(scope),
+        Effect.provideService(FileSystem.FileSystem, fs),
+        Effect.provideService(Path.Path, path),
+        Effect.mapError((cause) => new BotRuntimeError({ cause })),
+      );
+      return store;
     }),
   );
   if (yield* fs.exists(storePath).pipe(Effect.orElseSucceed(() => false))) yield* getStore;
-  const restored = yield* Effect.try({
-    try: () => ({ bots: store?.listBots() ?? [], threads: store?.listThreads() ?? [] }),
-    catch: (cause) => new BotRuntimeError({ cause }),
-  });
+  const restored = yield* Effect.gen(function* () {
+    const existing = store;
+    return {
+      bots: existing === null ? [] : yield* existing.listBots(),
+      threads: existing === null ? [] : yield* existing.listThreads(),
+    };
+  }).pipe(Effect.mapError((cause) => new BotRuntimeError({ cause })));
   const workThreads = new Map<string, string>();
   for (const bot of restored.bots) {
     if (bot.workThreadId !== null) workThreads.set(bot.workThreadId, bot.id);
@@ -150,7 +155,11 @@ const make = Effect.gen(function* () {
             .pipe(Effect.forkIn(scope), Effect.flatMap(Fiber.join)),
     ),
     existingStore: () => store,
-    store: getStore,
+    store: Effect.suspend(() =>
+      closed
+        ? Effect.fail(new BotRuntimeError({ cause: new Error("The bot runtime is closed.") }))
+        : getStore.pipe(Effect.forkIn(scope), Effect.flatMap(Fiber.join)),
+    ),
     active,
     turnLock,
     threadStartLock,

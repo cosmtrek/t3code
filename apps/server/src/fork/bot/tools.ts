@@ -171,7 +171,7 @@ export const authenticateTool = Effect.fn("ForkBot.authenticateTool")(function* 
   const request = yield* decode(ToolRequest, input);
   const given = authorization?.replace(/^Bearer\s+/i, "").trim() ?? "";
   // Only a stored bot's id becomes a path, so the request cannot point the read elsewhere.
-  const known = runtime.existingStore()?.getBot(request.bot) != null;
+  const known = (yield* runtime.existingStore()?.getBot(request.bot) ?? Effect.undefined) != null;
   const expected = known ? yield* runtime.files.readToken(runtime.botsDir, request.bot) : null;
   const ok =
     expected !== null &&
@@ -227,7 +227,7 @@ const gate = Effect.fn("ForkBot.gate")(function* (
   const store = yield* runtime.store;
   if (decide({ permission, overBudget }) === "allow") return null;
   const now = yield* Clock.currentTimeMillis;
-  const id = store.addQuestion({
+  const id = yield* store.addQuestion({
     botId: call.bot,
     text: detail === "" ? what : `${what}\n\n${detail}`,
     argv: call.argv,
@@ -257,7 +257,7 @@ export const runTool = Effect.fn("ForkBot.runTool")(function* (input: ToolCall) 
   switch (command) {
     case undefined:
     case "help": {
-      const bot = store.getBot(botId)!;
+      const bot = (yield* store.getBot(botId))!;
       return HELP.replace("{connectors}", yield* helpFor(bot)).replace(
         "{threadModel}",
         modelFlags(yield* threadModelFor(bot)),
@@ -268,11 +268,11 @@ export const runTool = Effect.fn("ForkBot.runTool")(function* (input: ToolCall) 
       if (text === "" || text.length > SAY_CHARS)
         return yield* fail(`Say 1 to ${SAY_CHARS} characters.`);
       const said = { id: newId("msg"), botId, role: "bot" as const, text, createdAt: at };
-      const bot = store.getBot(botId);
-      const turn = store.getTurn(botId);
+      const bot = yield* store.getBot(botId);
+      const turn = yield* store.getTurn(botId);
       const posts = bot === null || turn === null ? [said] : yield* withShown(bot, turn, said);
-      for (const post of posts) store.addChat(post);
-      store.markSaid(botId);
+      for (const post of posts) yield* store.addChat(post);
+      yield* store.markSaid(botId);
       return touched("Posted.");
     }
     case "notebook":
@@ -308,13 +308,13 @@ export const runTool = Effect.fn("ForkBot.runTool")(function* (input: ToolCall) 
       if (sub === "add") {
         const title = textOf(rest, input.stdin);
         if (title === "") return yield* fail("Give the item a title.");
-        const id = store.addItem(botId, { title, note: flags.get("note") ?? "" }, at);
+        const id = yield* store.addItem(botId, { title, note: flags.get("note") ?? "" }, at);
         return touched(`Item #${id} added.`);
       }
       if (sub === "list") {
-        const items = store
-          .listItems(botId)
-          .filter((item) => flags.has("all") || (item.status !== "done" && !item.setAside));
+        const items = (yield* store.listItems(botId)).filter(
+          (item) => flags.has("all") || (item.status !== "done" && !item.setAside),
+        );
         return items.length === 0
           ? "(no items)"
           : items
@@ -330,7 +330,7 @@ export const runTool = Effect.fn("ForkBot.runTool")(function* (input: ToolCall) 
         return yield* fail("--status is open, waiting or done.");
       }
       if (sub !== "edit" && sub !== "done") return yield* fail("item add | edit | done | list");
-      const changed = store.updateItem(
+      const changed = yield* store.updateItem(
         botId,
         id,
         {
@@ -345,36 +345,34 @@ export const runTool = Effect.fn("ForkBot.runTool")(function* (input: ToolCall) 
     case "routine":
       return yield* routineCommand(botId, sub, rest, flags, input.stdin);
     case "memory": {
-      const total = (excludeId?: number) =>
-        store
-          .listMemory(botId)
-          .filter((note) => note.id !== excludeId)
-          .reduce((sum, note) => sum + Buffer.byteLength(note.text), 0);
-      const check = (text: string, excludeId?: number) =>
-        text === ""
-          ? Effect.fail(fail("Write the note."))
-          : total(excludeId) + Buffer.byteLength(text) > MEMORY_BYTES
-            ? Effect.fail(
-                fail(
-                  `Memory would pass ${MEMORY_BYTES} bytes (now ${total()}). Merge or remove notes first.`,
-                ),
-              )
-            : Effect.void;
+      const check = Effect.fn("ForkBot.checkMemory")(function* (text: string, excludeId?: number) {
+        if (text === "") return yield* fail("Write the note.");
+        const notes = yield* store.listMemory(botId);
+        const total = (except?: number) =>
+          notes
+            .filter((note) => note.id !== except)
+            .reduce((sum, note) => sum + Buffer.byteLength(note.text), 0);
+        if (total(excludeId) + Buffer.byteLength(text) > MEMORY_BYTES) {
+          return yield* fail(
+            `Memory would pass ${MEMORY_BYTES} bytes (now ${total()}). Merge or remove notes first.`,
+          );
+        }
+      });
       if (sub === "add") {
         const text = textOf(rest, input.stdin);
         yield* check(text);
-        return touched(`Note ${store.addMemory(botId, text)} saved.`);
+        return touched(`Note ${yield* store.addMemory(botId, text)} saved.`);
       }
       const id = yield* idOf(rest[0], "note");
       if (sub === "edit") {
         const text = textOf(rest.slice(1), input.stdin);
         yield* check(text, id);
-        return store.editMemory(botId, id, text)
+        return (yield* store.editMemory(botId, id, text))
           ? touched(`Note ${id} rewritten.`)
           : yield* fail(`You have no note ${id}.`);
       }
       if (sub === "remove") {
-        return store.removeMemory(botId, id)
+        return (yield* store.removeMemory(botId, id))
           ? touched(`Note ${id} removed.`)
           : yield* fail(`You have no note ${id}.`);
       }
@@ -400,7 +398,7 @@ const routineCommand = Effect.fn("ForkBot.routineCommand")(function* (
   const store = yield* runtime.store;
   const now = yield* DateTime.nowInCurrentZone.pipe(DateTime.withCurrentZoneLocal);
   if (sub === "list") {
-    const routines = store.listRoutines(botId);
+    const routines = yield* store.listRoutines(botId);
     return routines.length === 0
       ? "(no routines)"
       : routines
@@ -416,7 +414,7 @@ const routineCommand = Effect.fn("ForkBot.routineCommand")(function* (
     const title = flags.get("title")?.trim() ?? "";
     const prompt = textOf(rest, stdin);
     if (title === "" || prompt === "") return yield* fail("Give --title and the prompt it runs.");
-    const id = store.addRoutine(botId, {
+    const id = yield* store.addRoutine(botId, {
       title,
       prompt,
       schedule,
@@ -427,7 +425,7 @@ const routineCommand = Effect.fn("ForkBot.routineCommand")(function* (
   }
   const id = yield* idOf(rest[0], "routine");
   if (sub === "remove") {
-    if (!store.removeRoutine(botId, id)) return yield* fail(`You have no routine ${id}.`);
+    if (!(yield* store.removeRoutine(botId, id))) return yield* fail(`You have no routine ${id}.`);
     runtime.publish(botId);
     return `Routine ${id} removed.`;
   }
@@ -436,7 +434,7 @@ const routineCommand = Effect.fn("ForkBot.routineCommand")(function* (
   const schedule = changesSchedule ? parseSchedule(flags) : undefined;
   if (typeof schedule === "string") return yield* fail(schedule);
   const prompt = textOf(rest.slice(1), stdin);
-  const changed = store.updateRoutine(botId, id, {
+  const changed = yield* store.updateRoutine(botId, id, {
     ...(flags.has("title") ? { title: flags.get("title")! } : {}),
     ...(prompt !== "" ? { prompt } : {}),
     ...(schedule !== undefined
@@ -568,7 +566,7 @@ const threadCommand = Effect.fn("ForkBot.threadCommand")(function* (
   const runtime = yield* BotRuntime;
   const threads = yield* ThreadManagement.ThreadManagementService;
   const store = yield* runtime.store;
-  const bot = store.getBot(botId)!;
+  const bot = (yield* store.getBot(botId))!;
 
   if (sub === "list") {
     const notebook = yield* readNotebook(botId);
@@ -591,7 +589,10 @@ const threadCommand = Effect.fn("ForkBot.threadCommand")(function* (
     }
     const item = flags.get("item");
     const itemId = item === undefined ? null : yield* idOf(item, "item");
-    if (itemId !== null && !store.listItems(botId).some((candidate) => candidate.id === itemId)) {
+    if (
+      itemId !== null &&
+      !(yield* store.listItems(botId)).some((candidate) => candidate.id === itemId)
+    ) {
       return yield* fail(`You have no item #${itemId}.`);
     }
     const wanted = flags.get("project")?.trim() ?? "";
@@ -622,9 +623,9 @@ const threadCommand = Effect.fn("ForkBot.threadCommand")(function* (
     // One start at a time, so two starts in one turn cannot both fit under the limit.
     return yield* runtime.threadStartLock.withPermit(
       Effect.gen(function* () {
-        const running = store
-          .listThreads(botId)
-          .filter((thread) => !thread.takenOver && !isTerminalRunStatus(thread.status)).length;
+        const running = (yield* store.listThreads(botId)).filter(
+          (thread) => !thread.takenOver && !isTerminalRunStatus(thread.status),
+        ).length;
         const overBudget = running >= bot.settings.maxThreads;
         const asked = yield* gate(
           call,
@@ -637,7 +638,7 @@ const threadCommand = Effect.fn("ForkBot.threadCommand")(function* (
         const commandId = CommandId.make(newId("fork-bot"));
         const threadId = ThreadId.make(commandId);
         // Owned before it launches: a run that ends at once is still reported.
-        store.addThread({
+        yield* store.addThread({
           threadId,
           botId,
           projectId: project.id,
@@ -657,12 +658,12 @@ const threadCommand = Effect.fn("ForkBot.threadCommand")(function* (
         ).pipe(
           Effect.onError(() =>
             Effect.gen(function* () {
-              store.removeThread(threadId, yield* nowIso);
+              yield* store.removeThread(threadId, yield* nowIso);
               runtime.ownedThreads.delete(threadId);
-            }),
+            }).pipe(Effect.orDie),
           ),
         );
-        if (itemId !== null) store.updateItem(botId, itemId, {}, yield* nowIso);
+        if (itemId !== null) yield* store.updateItem(botId, itemId, {}, yield* nowIso);
         runtime.publish(botId);
         return `Thread ${threadId} started in ${project.title}. ${
           follow === "now"
@@ -677,7 +678,7 @@ const threadCommand = Effect.fn("ForkBot.threadCommand")(function* (
   if (threadId === undefined) return yield* fail("Name the thread.");
 
   if (sub === "send") {
-    const owned = store.listThreads(botId).find((thread) => thread.threadId === threadId);
+    const owned = (yield* store.listThreads(botId)).find((thread) => thread.threadId === threadId);
     if (owned === undefined) return yield* fail("You can only message threads you started.");
     if (
       owned.takenOver ||
@@ -753,7 +754,7 @@ const threadCommand = Effect.fn("ForkBot.threadCommand")(function* (
 
 /** Earlier builds had one `chat` command for every channel; each channel is its own now. */
 const chatMoved = Effect.fn("ForkBot.chatMoved")(function* (botId: string) {
-  const bot = (yield* (yield* BotRuntime).store).getBot(botId)!;
+  const bot = (yield* (yield* (yield* BotRuntime).store).getBot(botId))!;
   const chats = (yield* enabledFor(bot)).filter((entry) => entry.instance.kind === "chat");
   return yield* fail(
     chats.length === 0
@@ -768,7 +769,7 @@ const chatMoved = Effect.fn("ForkBot.chatMoved")(function* (botId: string) {
  */
 const connectorCommand = Effect.fn("ForkBot.connectorCommand")(function* (call: ToolCall) {
   const [command, operation] = call.argv;
-  const bot = (yield* (yield* BotRuntime).store).getBot(call.bot)!;
+  const bot = (yield* (yield* (yield* BotRuntime).store).getBot(call.bot))!;
   const entry = (yield* listInstances()).find(
     (candidate) => candidate.callable && candidate.instance.id === command,
   );
@@ -823,12 +824,14 @@ export const answerQuestion = Effect.fn("ForkBot.answerQuestion")(function* (inp
   const decoded = yield* decode(AnswerInput, input);
   const store = runtime.existingStore();
   const question =
-    store?.answerQuestion(
-      decoded.botId,
-      decoded.questionId,
-      decoded.approve ? "approved" : "declined",
-      yield* nowIso,
-    ) ?? null;
+    (yield* (
+      store?.answerQuestion(
+        decoded.botId,
+        decoded.questionId,
+        decoded.approve ? "approved" : "declined",
+        yield* nowIso,
+      ) ?? Effect.undefined
+    )) ?? null;
   if (question === null) {
     return yield* new ForkHttpError({
       status: 409,
@@ -856,7 +859,7 @@ export const answerQuestion = Effect.fn("ForkBot.answerQuestion")(function* (inp
       ForkHttpError: (error) => Effect.succeed({ ok: false, output: error.detail }),
     }),
   );
-  store!.setQuestionResult(question.id, outcome.output);
+  yield* store!.setQuestionResult(question.id, outcome.output);
   yield* notify(
     question.botId,
     outcome.ok

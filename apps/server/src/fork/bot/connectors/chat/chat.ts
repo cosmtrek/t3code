@@ -15,10 +15,14 @@ import { InboxRuntime } from "../../../inbox/InboxRuntime.ts";
 import * as Inbox from "../../../inbox/operations.ts";
 import { BotRuntime } from "../../BotRuntime.ts";
 import { notify } from "../../operations.ts";
-import { connectorSettings, type Bot, type BotStore, type ConnectorSettings } from "../../store.ts";
+import {
+  connectorSettings,
+  type Bot,
+  type BotStore,
+  type ConnectorSettings,
+  type MentionMark,
+} from "../../store.ts";
 import { toolError } from "../types.ts";
-import * as State from "./state.ts";
-import type { MentionMark } from "./state.ts";
 
 /** The sender gets this long to finish, and the user to answer first. */
 export const MENTION_DELAY_MS = 30_000;
@@ -100,9 +104,16 @@ export const chatConfig = (settings: ConnectorSettings): ChatConfig => {
 };
 
 /** The bot that wakes on the user's mentions in this channel, if any. */
-export const mentionBotFor = (store: BotStore, channelId: string): Bot | null =>
-  store.listBots().find((bot) => chatConfig(connectorSettings(bot.settings, channelId)).mentions) ??
-  null;
+export const mentionBotFor = Effect.fn("ForkBot.mentionBotFor")(function* (
+  store: BotStore["Service"],
+  channelId: string,
+) {
+  return (
+    (yield* store.listBots()).find(
+      (bot) => chatConfig(connectorSettings(bot.settings, channelId)).mentions,
+    ) ?? null
+  );
+});
 
 type MentionStep =
   | {
@@ -406,8 +417,7 @@ export const sendAsUser = Effect.fn("ForkBot.sendAsUser")(function* (input: {
     format: "markdown",
     ...(mentions.length === 0 ? {} : { mentions }),
   });
-  State.recordSent(
-    store,
+  yield* store.recordSent(
     input.botId,
     input.target.channel.id,
     sent.messageId,
@@ -435,8 +445,7 @@ export const userWroteSince = Effect.fn("ForkBot.userWroteSince")(function* (
   if (!later(target.raw?.lastSelfMessageAt, at)) return false;
   const store = yield* (yield* BotRuntime).store;
   const messages = yield* newestPage(target);
-  const sent = State.sentByBots(
-    store,
+  const sent = yield* store.sentByBots(
     target.channel.id,
     messages.map((message) => message.id),
   );
@@ -449,22 +458,21 @@ export const userWroteSince = Effect.fn("ForkBot.userWroteSince")(function* (
  */
 export const scanMentions = Effect.fn("ForkBot.scanMentions")(function* (channelId: string) {
   const store = (yield* BotRuntime).existingStore();
-  const bot = store === null ? null : mentionBotFor(store, channelId);
+  const bot = store === null ? null : yield* mentionBotFor(store, channelId);
   if (store === null || bot === null) return;
   if ((yield* readableChannel(channelId)) === null) return;
   const listing = yield* readChannel(channelId);
   const steps = trackMentions({
     conversations: listing.raw,
-    marks: State.listMentions(store, channelId),
+    marks: yield* store.listMentions(channelId),
     since: chatConfig(connectorSettings(bot.settings, channelId)).mentionsSince ?? bot.createdAt,
     now: DateTime.toDateUtc(yield* DateTime.now),
   });
   for (const step of steps) {
     if (step.type === "handled") {
-      State.markMentionHandled(store, channelId, step.conversationId, step.through);
+      yield* store.markMentionHandled(channelId, step.conversationId, step.through);
     } else {
-      State.markMentionPending(
-        store,
+      yield* store.markMentionPending(
         channelId,
         step.conversationId,
         step.pendingAt,
@@ -480,7 +488,7 @@ export const fireDueMentions = Effect.fn("ForkBot.fireDueMentions")(function* ()
   const now = DateTime.toDateUtc(yield* DateTime.now);
   const store = (yield* BotRuntime).existingStore();
   if (store === null) return;
-  for (const mark of State.dueMentions(store, now.toISOString())) {
+  for (const mark of yield* store.dueMentions(now.toISOString())) {
     const handled = yield* fireMention(store, mark).pipe(
       Effect.as(true),
       Effect.catchCause((cause) =>
@@ -490,8 +498,7 @@ export const fireDueMentions = Effect.fn("ForkBot.fireDueMentions")(function* ()
       ),
     );
     if (!handled) {
-      State.delayMention(
-        store,
+      yield* store.delayMention(
         mark.channelId,
         mark.conversationId,
         DateTime.formatIso(DateTime.makeUnsafe(now.getTime() + RETRY_MS)),
@@ -501,21 +508,21 @@ export const fireDueMentions = Effect.fn("ForkBot.fireDueMentions")(function* ()
 });
 
 const fireMention = Effect.fn("ForkBot.fireMention")(function* (
-  store: BotStore,
+  store: BotStore["Service"],
   mark: MentionMark,
 ) {
   const pendingAt = mark.pendingAt ?? mark.handledThrough;
-  const bot = mentionBotFor(store, mark.channelId);
+  const bot = yield* mentionBotFor(store, mark.channelId);
   const channel = yield* readableChannel(mark.channelId);
   if (bot === null || channel === null) {
-    State.markMentionHandled(store, mark.channelId, mark.conversationId, pendingAt);
+    yield* store.markMentionHandled(mark.channelId, mark.conversationId, pendingAt);
     return;
   }
   const listing = yield* readChannel(mark.channelId);
   const conversation = listing.raw.find((candidate) => candidate.id === mark.conversationId);
   const latest = latestOf(pendingAt, conversation?.lastMentionAt);
   if (conversation?.lastSelfMessageAt && !later(latest, conversation.lastSelfMessageAt)) {
-    State.markMentionHandled(store, mark.channelId, mark.conversationId, latest);
+    yield* store.markMentionHandled(mark.channelId, mark.conversationId, latest);
     return;
   }
   // Back to the handled mark, so a mention a busy conversation pushed off the first page is found.
@@ -539,7 +546,7 @@ const fireMention = Effect.fn("ForkBot.fireMention")(function* (
     read.toSorted((left, right) => ms(left.createdAt) - ms(right.createdAt)),
     mark.handledThrough,
   );
-  State.markMentionHandled(store, mark.channelId, mark.conversationId, latest);
+  yield* store.markMentionHandled(mark.channelId, mark.conversationId, latest);
   const command = channel.id;
   const where = `"${conversation?.name ?? mark.conversationId}" in ${channelName(channel)} (${mark.conversationId})`;
   const lines =

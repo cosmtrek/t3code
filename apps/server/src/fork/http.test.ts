@@ -9,6 +9,7 @@ import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import { InboxRuntime } from "./inbox/InboxRuntime.ts";
 import { BotRuntime } from "./bot/BotRuntime.ts";
 import * as Artifacts from "./inbox/artifacts.ts";
+import * as BotStore from "./bot/store.ts";
 import * as InboxStore from "./inbox/store.ts";
 
 import { attachmentDisposition, okRevalidated, makeRoute } from "./http.ts";
@@ -44,6 +45,8 @@ describe("makeRoute", () => {
     Effect.gen(function* () {
       const store = yield* InboxStore.make(":memory:");
       yield* store.close();
+      const botStore = yield* BotStore.make(":memory:");
+      yield* botStore.close();
       const route = makeRoute(
         unusedService<InboxRuntime["Service"]>(),
         unusedService<BotRuntime["Service"]>(),
@@ -60,6 +63,7 @@ describe("makeRoute", () => {
             }),
           ),
           route("GET", "/store", AuthOrchestrationReadScope, store.listConversationReads("a")),
+          route("GET", "/bot-store", AuthOrchestrationReadScope, botStore.listBots()),
         ).pipe(
           Layer.provideMerge(
             Layer.mock(EnvironmentAuth.EnvironmentAuth)({
@@ -90,6 +94,7 @@ describe("makeRoute", () => {
       expect(before.status).toBe(500);
       expect(before.body).toBe("");
       expect(after).toEqual(before);
+      expect(yield* read("/bot-store")).toEqual(before);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 });

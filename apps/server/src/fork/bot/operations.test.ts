@@ -1,6 +1,10 @@
 // @effect-diagnostics nodeBuiltinImport:off globalDateInEffect:off - Bots keep their role in a temporary folder; routines run on local wall-clock dates.
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
+import * as NodeSqlite from "node:sqlite";
+import { vi } from "vite-plus/test";
+import * as Cause from "effect/Cause";
+import * as Exit from "effect/Exit";
 import * as NodePath from "node:path";
 
 import { ProjectId, type OrchestrationV2RunStatus } from "@t3tools/contracts";
@@ -18,7 +22,6 @@ import * as Artifacts from "../inbox/artifacts.ts";
 import * as BotFiles from "./BotFiles.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Chat from "./connectors/chat/chat.ts";
-import * as ChatState from "./connectors/chat/state.ts";
 
 import * as ServerConfig from "../../config.ts";
 import * as ThreadLaunch from "../../orchestration-v2/ThreadLaunchService.ts";
@@ -36,7 +39,7 @@ import { BotRuntime } from "./BotRuntime.ts";
 import { followThreads, reconcileThreads } from "./events.ts";
 import * as Bots from "./operations.ts";
 import { answerQuestion, authenticateTool, MEMORY_BYTES, parseArgs, runTool } from "./tools.ts";
-import { BotStore } from "./store.ts";
+import * as BotStore from "./store.ts";
 
 const isHttpError = Schema.is(ForkHttpError);
 
@@ -110,8 +113,10 @@ type HarnessServices =
   | FileSystem.FileSystem
   | Project.ProjectService;
 
-const harness = (store = new BotStore(":memory:")) =>
+const harness = (providedStore?: BotStore.BotStore["Service"]) =>
   Effect.gen(function* () {
+    const store =
+      providedStore ?? (yield* BotStore.make(":memory:").pipe(Effect.provide(NodeServices.layer)));
     const botsDir = yield* Effect.promise(() =>
       NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-bots-")),
     );
@@ -129,11 +134,9 @@ const harness = (store = new BotStore(":memory:")) =>
       turnLock: Semaphore.makeUnsafe(1),
       threadStartLock: Semaphore.makeUnsafe(1),
       workThreads: new Map(
-        store
-          .listBots()
-          .flatMap((bot) =>
-            bot.workThreadId === null ? [] : [[bot.workThreadId, bot.id] as const],
-          ),
+        (yield* store.listBots()).flatMap((bot) =>
+          bot.workThreadId === null ? [] : [[bot.workThreadId, bot.id] as const],
+        ),
       ),
       activity: new Map(),
       publish: () => undefined,
@@ -298,11 +301,12 @@ const harness = (store = new BotStore(":memory:")) =>
     return h;
   });
 
-const chatOf = (h: Harness, botId: string) =>
-  h.runtime
-    .existingStore()!
-    .recentChat(botId, 100)
-    .map((message) => [message.role, message.text]);
+const chatOf = Effect.fn("Test.chatOf")(function* (h: Harness, botId: string) {
+  return (yield* h.runtime.existingStore()!.recentChat(botId, 100)).map((message) => [
+    message.role,
+    message.text,
+  ]);
+});
 
 /** T3 ends the run with this reply, as the domain event follower would report it. */
 const endRun = (h: Harness, botId: string, index: number, reply: string | null) => {
@@ -314,7 +318,7 @@ const endRun = (h: Harness, botId: string, index: number, reply: string | null) 
 
 const withHarness = <E>(
   program: (h: Harness) => Effect.Effect<void, E, HarnessServices>,
-  store?: BotStore,
+  store?: BotStore.BotStore["Service"],
 ) =>
   harness(store).pipe(
     Effect.flatMap((h) =>
@@ -384,14 +388,14 @@ describe("bot creation", () => {
           brief: `  ${brief}\n`,
         });
 
-        expect(chatOf(h, botId)).toEqual([["user", brief]]);
+        expect(yield* chatOf(h, botId)).toEqual([["user", brief]]);
         expect(h.runs).toHaveLength(1);
         expect(h.packets[0]).toContain(brief);
 
         yield* endRun(h, botId, 0, "I'll watch for new releases.");
 
         expect(h.runs).toHaveLength(1);
-        expect(chatOf(h, botId)).toEqual([
+        expect(yield* chatOf(h, botId)).toEqual([
           ["user", brief],
           ["bot", "I'll watch for new releases."],
         ]);
@@ -408,7 +412,7 @@ describe("bot creation", () => {
             modelSelection: MODEL,
             ...optional,
           });
-          expect(chatOf(h, botId)).toEqual([]);
+          expect(yield* chatOf(h, botId)).toEqual([]);
         }
         expect(h.runs).toEqual([]);
       }),
@@ -423,7 +427,7 @@ describe("bot creation", () => {
         );
 
         expect(error).toMatchObject({ status: 400, code: "bad_request", field: "brief" });
-        expect(h.runtime.existingStore()!.listBots()).toEqual([]);
+        expect(yield* h.runtime.existingStore()!.listBots()).toEqual([]);
         expect(yield* Effect.promise(() => NodeFSP.readdir(h.runtime.botsDir))).toEqual([]);
         expect(h.runtime.active.isOpen()).toBe(false);
         expect(h.runs).toEqual([]);
@@ -455,13 +459,13 @@ describe("bot turns", () => {
         expect(h.packets[1]).not.toContain("Keep fork releases healthy.");
 
         yield* endRun(h, botId, 1, null);
-        expect(chatOf(h, botId)).toEqual([
+        expect(yield* chatOf(h, botId)).toEqual([
           ["user", "What do you do?"],
           ["user", "And how often?"],
           ["bot", "I watch the fork's releases."],
           ["error", "The turn ended without a reply."],
         ]);
-        expect(h.runtime.existingStore()!.getTurn(botId)).toBeNull();
+        expect(yield* h.runtime.existingStore()!.getTurn(botId)).toBeNull();
         // Its posts count as unread on the Bots entry until the user sees its chat.
         const unread = () => Bots.listBots().pipe(Effect.map(({ bots }) => bots[0]!.unread));
         expect(yield* unread()).toBe(2);
@@ -477,36 +481,61 @@ describe("bot turns", () => {
     ),
   );
 
-  it.effect("finishes a turn whose run ended while the server was down, once", () => {
-    const store = new BotStore(":memory:");
-    store.createBot(
-      { id: "bot_1", name: "Bot", modelSelection: MODEL as never, createdAt: "t0" },
-      "auto",
-    );
-    store.setWorkThread("bot_1", "thread-1", SCRATCH);
-    store.addChat({ id: "m1", botId: "bot_1", role: "user", text: "Hi", createdAt: "t1" });
-    store.startTurn(
-      { botId: "bot_1", runId: "run-down", threadId: "thread-1", startedAt: "t1" },
-      ["m1"],
-      [],
-    );
-    return withHarness(
-      (h) =>
+  it.effect(
+    "keeps a dispatch store failure as a defect instead of reporting a successful send",
+    () =>
+      withHarness((h) =>
         Effect.gen(function* () {
-          h.runStatus.set("run-down", "completed");
-          h.replies.set("run-down", "Hello.");
-          yield* Bots.reconcile();
-          // The event for the same run, arriving late, posts nothing more.
-          yield* Bots.finishRun("bot_1", "run-down", "completed");
-          expect(chatOf(h, "bot_1")).toEqual([
-            ["user", "Hi"],
-            ["bot", "Hello."],
-          ]);
-          expect(h.runs).toHaveLength(0);
+          const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
+          const prepare = NodeSqlite.DatabaseSync.prototype.prepare;
+          using _prepare = vi
+            .spyOn(NodeSqlite.DatabaseSync.prototype, "prepare")
+            .mockImplementation(function (this: NodeSqlite.DatabaseSync, sql) {
+              if (sql === "UPDATE bots SET work_thread_id = ?, work_project_id = ? WHERE id = ?")
+                throw new Error("write failed");
+              return prepare.call(this, sql);
+            });
+          const exit = yield* Effect.exit(Bots.sendMessage({ botId, text: "Start." }));
+          expect(Exit.isFailure(exit)).toBe(true);
+          if (Exit.isFailure(exit)) expect(Cause.hasDies(exit.cause)).toBe(true);
+          expect(yield* chatOf(h, botId)).toEqual([["user", "Start."]]);
+          expect(yield* h.runtime.existingStore()!.getTurn(botId)).toBeNull();
         }),
-      store,
-    );
-  });
+      ),
+  );
+
+  it.effect("finishes a turn whose run ended while the server was down, once", () =>
+    Effect.gen(function* () {
+      const store = yield* BotStore.make(":memory:");
+      yield* store.createBot(
+        { id: "bot_1", name: "Bot", modelSelection: MODEL as never, createdAt: "t0" },
+        "auto",
+      );
+      yield* store.setWorkThread("bot_1", "thread-1", SCRATCH);
+      yield* store.addChat({ id: "m1", botId: "bot_1", role: "user", text: "Hi", createdAt: "t1" });
+      yield* store.startTurn(
+        { botId: "bot_1", runId: "run-down", threadId: "thread-1", startedAt: "t1" },
+        ["m1"],
+        [],
+      );
+      yield* withHarness(
+        (h) =>
+          Effect.gen(function* () {
+            h.runStatus.set("run-down", "completed");
+            h.replies.set("run-down", "Hello.");
+            yield* Bots.reconcile();
+            // The event for the same run, arriving late, posts nothing more.
+            yield* Bots.finishRun("bot_1", "run-down", "completed");
+            expect(yield* chatOf(h, "bot_1")).toEqual([
+              ["user", "Hi"],
+              ["bot", "Hello."],
+            ]);
+            expect(h.runs).toHaveLength(0);
+          }),
+        store,
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
 
   it.effect(
     "fires a routine missed while down once, saying it is late, then sets the next time",
@@ -515,7 +544,7 @@ describe("bot turns", () => {
         Effect.gen(function* () {
           const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
           const store = h.runtime.existingStore()!;
-          const id = store.addRoutine(botId, {
+          const id = yield* store.addRoutine(botId, {
             title: "PR check",
             prompt: "Check open PRs.",
             schedule: { type: "daily", time: "09:00" },
@@ -527,12 +556,12 @@ describe("bot turns", () => {
           expect(h.packets[0]).toContain(
             'Routine 1 "PR check" is due. It was due at 09:00 and starts late, at 11:40.',
           );
-          expect(store.listRoutines(botId).find((routine) => routine.id === id)?.nextDueAt).toBe(
-            new Date(2026, 10, 24, 9, 0).toISOString(),
-          );
+          expect(
+            (yield* store.listRoutines(botId)).find((routine) => routine.id === id)?.nextDueAt,
+          ).toBe(new Date(2026, 10, 24, 9, 0).toISOString());
           // A turn with nothing worth telling ends with NO_REPLY and posts nothing.
           yield* endRun(h, botId, 0, Bots.NO_REPLY);
-          expect(chatOf(h, botId)).toEqual([]);
+          expect(yield* chatOf(h, botId)).toEqual([]);
         }),
       ),
   );
@@ -546,7 +575,7 @@ describe("bot turns", () => {
           ["t-attention", "attention"],
           ["t-now", "now"],
         ] as const) {
-          store.addThread({
+          yield* store.addThread({
             threadId,
             botId,
             projectId: "p",
@@ -563,7 +592,7 @@ describe("bot turns", () => {
           Stream.make(ended("t-attention", "completed"), ended("t-attention", "completed")),
         );
         expect(h.runs).toHaveLength(0);
-        expect(store.queued(botId).map((event) => event.wakes)).toEqual([false]);
+        expect((yield* store.queued(botId)).map((event) => event.wakes)).toEqual([false]);
         // A finished now thread wakes the bot, and that turn takes both events.
         h.replies.set("t-now-run", "Found it:\nthe cache was stale.");
         yield* followThreads(Stream.make(ended("t-now", "completed")));
@@ -573,7 +602,7 @@ describe("bot turns", () => {
         expect(h.packets[0]).toContain(
           "Thread t-now completed. Its last message:\n  > Found it:\n  > the cache was stale.",
         );
-        expect(store.queued(botId)).toEqual([]);
+        expect(yield* store.queued(botId)).toEqual([]);
       }),
     ),
   );
@@ -590,15 +619,12 @@ describe("bot turns", () => {
         expect(full.detail).toContain("Merge or remove notes first");
         yield* runTool({ bot: botId, argv: ["say", "Noted: UTC+8."], stdin: "" });
         yield* endRun(h, botId, 0, "I saved it with memory add and replied.");
-        expect(chatOf(h, botId)).toEqual([
+        expect(yield* chatOf(h, botId)).toEqual([
           ["user", "Remember my timezone."],
           ["bot", "Noted: UTC+8."],
         ]);
         expect(
-          h.runtime
-            .existingStore()!
-            .listMemory(botId)
-            .map((note) => note.text),
+          (yield* h.runtime.existingStore()!.listMemory(botId)).map((note) => note.text),
         ).toEqual(["The user is in UTC+8."]);
       }),
     ),
@@ -609,11 +635,11 @@ describe("bot turns", () => {
       Effect.gen(function* () {
         const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
         const page = (id: string) => ({ attachmentId: id, title: `Map ${id}`, height: 400 });
-        const rendersOf = () =>
-          h.runtime
-            .existingStore()!
-            .recentChat(botId, 100)
-            .map((message) => message.renders?.map((render) => render.attachmentId) ?? []);
+        const rendersOf = Effect.fn("Test.rendersOf")(function* () {
+          return (yield* h.runtime.existingStore()!.recentChat(botId, 100)).map(
+            (message) => message.renders?.map((render) => render.attachmentId) ?? [],
+          );
+        });
 
         yield* Bots.sendMessage({ botId, text: "Draw the map." });
         h.pages.set(h.runs[0]!.runId, [page("a")]);
@@ -625,14 +651,14 @@ describe("bot turns", () => {
         h.pages.set(h.runs[1]!.runId, [page("c")]);
         yield* endRun(h, botId, 1, "Redrawn.");
 
-        expect(chatOf(h, botId)).toEqual([
+        expect(yield* chatOf(h, botId)).toEqual([
           ["user", "Draw the map."],
           ["bot", "Here it is."],
           ["bot", ""],
           ["user", "Again, plainly."],
           ["bot", "Redrawn."],
         ]);
-        expect(rendersOf()).toEqual([[], ["a"], ["b"], [], ["c"]]);
+        expect(yield* rendersOf()).toEqual([[], ["a"], ["b"], [], ["c"]]);
       }),
     ),
   );
@@ -647,7 +673,7 @@ describe("bot turns", () => {
         yield* runTool({ bot: botId, argv: ["say", "Waiting."], stdin: "" });
         yield* endRun(h, botId, 0, null);
 
-        const chat = h.runtime.existingStore()!.recentChat(botId, 100);
+        const chat = yield* h.runtime.existingStore()!.recentChat(botId, 100);
         expect(chat.map((message) => [message.role, message.text])).toEqual([
           ["user", "Show me, then wait."],
           ["bot", "Here is the plan."],
@@ -666,7 +692,7 @@ describe("bot turns", () => {
         yield* Bots.sendMessage({ botId, text: "Ping." });
         h.pages.set(h.runs[0]!.runId, ["Pong."]);
         yield* endRun(h, botId, 0, null);
-        expect(chatOf(h, botId)).toEqual([
+        expect(yield* chatOf(h, botId)).toEqual([
           ["user", "Ping."],
           ["bot", "Pong."],
         ]);
@@ -688,7 +714,7 @@ describe("bot turns", () => {
 
           // Editing its role asks by default: nothing changes until the user approves.
           expect(yield* edit("Watch CI.")).toContain("the user must approve");
-          const [question] = store.openQuestions(botId);
+          const [question] = yield* store.openQuestions(botId);
           expect(question).toMatchObject({
             createdAt: "1970-01-01T00:00:00.000Z",
             expiresAt: "1970-01-02T00:00:00.000Z",
@@ -721,11 +747,11 @@ describe("bot turns", () => {
           yield* edit("Watch nothing.");
           yield* TestClock.adjust(86_400_000 - 1);
           yield* Bots.fireDueRoutines();
-          expect(store.openQuestions(botId)).toHaveLength(1);
+          expect(yield* store.openQuestions(botId)).toHaveLength(1);
           yield* TestClock.adjust(1);
           yield* Bots.fireDueRoutines();
-          expect(store.openQuestions(botId)).toEqual([]);
-          expect(store.queued(botId).at(-1)?.text).toContain("lapsed unanswered");
+          expect(yield* store.openQuestions(botId)).toEqual([]);
+          expect((yield* store.queued(botId)).at(-1)?.text).toContain("lapsed unanswered");
           expect(yield* Effect.promise(roleOf)).toBe("Watch CI.");
         }),
       ),
@@ -763,7 +789,7 @@ describe("bot turns", () => {
         yield* Bots.sendMessage({ botId, text: "Still there?" });
         yield* Bots.sendMessage({ botId, text: "Hello?" });
         expect(h.runs).toHaveLength(1);
-        expect(chatOf(h, botId).filter(([role]) => role === "error")).toEqual([
+        expect((yield* chatOf(h, botId)).filter(([role]) => role === "error")).toEqual([
           [
             "error",
             "Bot used its 1 turns for today. What happens meanwhile waits for tomorrow, or raise its budget.",
@@ -787,7 +813,7 @@ describe("bot turns", () => {
         expect((yield* read()).bot.turnsToday).toBe(1);
 
         // A count left from an earlier day reads as none used today.
-        h.runtime.existingStore()!.countTurn(botId, "2000-01-01");
+        yield* h.runtime.existingStore()!.countTurn(botId, "2000-01-01");
         expect((yield* read()).bot.turnsToday).toBe(0);
       }),
     ),
@@ -798,7 +824,7 @@ describe("bot turns", () => {
       Effect.gen(function* () {
         const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
         yield* Bots.sendMessage({ botId, text: "Clean up" });
-        const threadId = h.runtime.existingStore()!.getBot(botId)!.workThreadId!;
+        const threadId = (yield* h.runtime.existingStore()!.getBot(botId))!.workThreadId!;
         const runId = h.runs[0]!.runId;
         const item = (fields: Record<string, unknown>) =>
           ({ type: "turn-item.updated", threadId, payload: { runId, ...fields } }) as never;
@@ -853,7 +879,7 @@ describe("bot turns", () => {
           ["t-now", "now"],
           ["t-attention", "attention"],
         ] as const) {
-          store.addThread({
+          yield* store.addThread({
             threadId,
             botId,
             projectId: "p",
@@ -864,7 +890,7 @@ describe("bot turns", () => {
           h.runtime.ownedThreads.set(threadId, botId);
         }
         yield* endRun(h, botId, 0, "NO_REPLY");
-        expect(chatOf(h, botId).filter(([role]) => role !== "user")).toEqual([]);
+        expect((yield* chatOf(h, botId)).filter(([role]) => role !== "user")).toEqual([]);
         expect((yield* read()).workingSince).toBe(since);
         expect((yield* Bots.listBots()).bots[0]!.working).toBe(true);
 
@@ -908,9 +934,9 @@ describe("bot turns", () => {
       Effect.gen(function* () {
         // No pick: the broadest the provider offers up to auto, which it lacks.
         const unpicked = yield* Bots.createBot({ name: "Default", modelSelection: MODEL });
-        expect(h.runtime.existingStore()!.getBot(unpicked.botId)?.settings.runtimeMode).toBe(
-          "auto-accept-edits",
-        );
+        expect(
+          (yield* h.runtime.existingStore()!.getBot(unpicked.botId))?.settings.runtimeMode,
+        ).toBe("auto-accept-edits");
         const { botId } = yield* Bots.createBot({
           name: "Ops",
           modelSelection: MODEL,
@@ -922,10 +948,12 @@ describe("bot turns", () => {
           settings: { turnsPerDay: 100, maxThreads: 3, runtimeMode: "auto" },
         });
         expect(h.modes).toEqual(["full-access", "auto-accept-edits"]);
-        expect(h.runtime.existingStore()!.getBot(botId)?.settings.runtimeMode).toBe("auto");
+        expect((yield* h.runtime.existingStore()!.getBot(botId))?.settings.runtimeMode).toBe(
+          "auto",
+        );
 
         // Sending from the thread's composer set its own mode; the next turn restores the bot's.
-        const threadId = h.runtime.existingStore()!.getBot(botId)!.workThreadId!;
+        const threadId = (yield* h.runtime.existingStore()!.getBot(botId))!.workThreadId!;
         h.threadModes.set(threadId, "full-access");
         yield* endRun(h, botId, h.runs.length - 1, "Hello");
         yield* Bots.sendMessage({ botId, text: "Again" });
@@ -949,7 +977,7 @@ describe("bot turns", () => {
           },
         });
         yield* Chat.scanMentions("example");
-        const pending = ChatState.listMentions(h.runtime.existingStore()!, "example").filter(
+        const pending = (yield* h.runtime.existingStore()!.listMentions("example")).filter(
           (mark) => mark.dueAt !== null,
         );
         expect(pending.length).toBeGreaterThan(0);
@@ -961,7 +989,7 @@ describe("bot turns", () => {
         yield* Chat.fireDueMentions();
         expect(h.runs).toHaveLength(1);
         expect(
-          ChatState.listMentions(h.runtime.existingStore()!, "example").every(
+          (yield* h.runtime.existingStore()!.listMentions("example")).every(
             (mark) => mark.dueAt === null,
           ),
         ).toBe(true);
@@ -988,22 +1016,24 @@ describe("bot turns", () => {
                 },
               },
             });
-          const example = (botId: string) => store.getBot(botId)!.settings.connectors.example;
-          expect(example(first.botId)).toBeUndefined();
+          const example = Effect.fn("Test.example")(function* (botId: string) {
+            return (yield* store.getBot(botId))!.settings.connectors.example;
+          });
+          expect(yield* example(first.botId)).toBeUndefined();
 
           yield* save(first.botId, true, true);
-          const since = example(first.botId)?.config.mentionsSince;
+          const since = (yield* example(first.botId))?.config.mentionsSince;
           expect(since).toEqual(expect.any(String));
           // Saving again keeps when it took mentions on.
           yield* save(first.botId, true, true);
-          expect(example(first.botId)?.config.mentionsSince).toBe(since);
+          expect((yield* example(first.botId))?.config.mentionsSince).toBe(since);
 
           yield* save(second.botId, true, true);
-          expect(example(first.botId)?.config.mentions).toBe(false);
-          expect(example(second.botId)?.config.mentions).toBe(true);
+          expect((yield* example(first.botId))?.config.mentions).toBe(false);
+          expect((yield* example(second.botId))?.config.mentions).toBe(true);
 
           yield* save(second.botId, false, true);
-          expect(example(second.botId)?.config.mentions).toBe(false);
+          expect((yield* example(second.botId))?.config.mentions).toBe(false);
 
           const unknown = yield* httpFailure(
             Bots.saveSettings({
@@ -1020,34 +1050,36 @@ describe("bot turns", () => {
       ),
   );
 
-  it("keeps legacy chat settings and drops obsolete thread permissions", () => {
-    const store = new BotStore(":memory:");
-    store.createBot(
-      { id: "bot_1", name: "Old", modelSelection: MODEL as never, createdAt: "2026-11-01" },
-      "auto",
-    );
-    store.setSettings("bot_1", {
-      threads: "ask",
-      channelsEnabled: true,
-      signature: "-- {bot}",
-      channels: { lark: { send: "allow", mentions: true, mentionsSince: "2026-11-02" } },
-    } as never);
-    const settings = store.getBot("bot_1")!.settings;
-    expect(settings).not.toHaveProperty("threads");
-    expect(settings.turnsPerDay).toBe(200);
-    expect(settings.connectors).toEqual({
-      lark: {
-        enabled: true,
-        permissions: { send: "allow" },
-        config: { signature: "-- {bot}", mentions: true, mentionsSince: "2026-11-02" },
-      },
-    });
-    store.setSettings("bot_1", {
-      permissions: { "thread.start": "deny", "thread.send": "allow" },
-    } as never);
-    expect(store.getBot("bot_1")!.settings).not.toHaveProperty("threads");
-    store.close();
-  });
+  it.effect("keeps legacy chat settings and drops obsolete thread permissions", () =>
+    Effect.gen(function* () {
+      const store = yield* BotStore.make(":memory:");
+      yield* store.createBot(
+        { id: "bot_1", name: "Old", modelSelection: MODEL as never, createdAt: "2026-11-01" },
+        "auto",
+      );
+      yield* store.setSettings("bot_1", {
+        threads: "ask",
+        channelsEnabled: true,
+        signature: "-- {bot}",
+        channels: { lark: { send: "allow", mentions: true, mentionsSince: "2026-11-02" } },
+      } as never);
+      const settings = (yield* store.getBot("bot_1"))!.settings;
+      expect(settings).not.toHaveProperty("threads");
+      expect(settings.turnsPerDay).toBe(200);
+      expect(settings.connectors).toEqual({
+        lark: {
+          enabled: true,
+          permissions: { send: "allow" },
+          config: { signature: "-- {bot}", mentions: true, mentionsSince: "2026-11-02" },
+        },
+      });
+      yield* store.setSettings("bot_1", {
+        permissions: { "thread.start": "deny", "thread.send": "allow" },
+      } as never);
+      expect((yield* store.getBot("bot_1"))!.settings).not.toHaveProperty("threads");
+      yield* store.close();
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
 
   it.effect("offers no chat where the environment has no chat channel", () =>
     withHarness(() =>
@@ -1100,7 +1132,7 @@ describe("bot turns", () => {
         // Asking stores the call; nothing reaches the channel until the user approves it.
         const asked = yield* tool("example", "send", "c-dm-jordan", "On", "it");
         expect(asked).toContain("the user must approve this");
-        const [question] = store.openQuestions(botId);
+        const [question] = yield* store.openQuestions(botId);
         expect(question?.text).toBe('Example: send as you to "Jordan Lee"\n\nOn it\n\n-- Bot');
         expect(yield* tool("example", "read", "c-dm-jordan")).not.toContain("On it");
         const approved = yield* answerQuestion({ botId, questionId: question!.id, approve: true });
@@ -1109,7 +1141,7 @@ describe("bot turns", () => {
 
         // Approval resolves the call again: a channel turned off since runs nothing.
         yield* tool("example", "send", "c-dm-jordan", "Later");
-        const [later] = store.openQuestions(botId);
+        const [later] = yield* store.openQuestions(botId);
         yield* save(false, "ask");
         const lapsed = yield* answerQuestion({ botId, questionId: later!.id, approve: true });
         expect(lapsed).toEqual({
@@ -1132,10 +1164,9 @@ describe("bot turns", () => {
         yield* Bots.sendMessage({ botId, text: "Start." });
         h.steerDelivery = "steered";
         const { messageId } = yield* Bots.sendMessage({ botId, text: "Also this." });
-        const steered = h.runtime
-          .existingStore()!
-          .recentChat(botId, 10)
-          .find((message) => message.id === messageId);
+        const steered = (yield* h.runtime.existingStore()!.recentChat(botId, 10)).find(
+          (message) => message.id === messageId,
+        );
         expect(steered?.turnRunId).toBe(h.runs[0]!.runId);
         // Nothing waits, so the end of the turn starts no other.
         yield* endRun(h, botId, 0, "Done both.");
@@ -1150,8 +1181,8 @@ describe("bot turns", () => {
         const ownModel = { ...MODEL, options: [{ id: "effort", value: "medium" }] };
         const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: ownModel });
         const store = h.runtime.existingStore()!;
-        const legacySettings = { ...store.getBot(botId)!.settings, threads: "ask" };
-        store.setSettings(botId, legacySettings);
+        const legacySettings = { ...(yield* store.getBot(botId))!.settings, threads: "ask" };
+        yield* store.setSettings(botId, legacySettings);
         h.projects.push({ id: "p1", title: "Repo", workspaceRoot: "/repo" });
         const start = (prompt: string) =>
           runTool({
@@ -1161,7 +1192,7 @@ describe("bot turns", () => {
           });
         expect(yield* start("Fix --flaky tests")).toContain("started in Repo");
         expect(h.ownedAtLaunch).toEqual([true]);
-        const [owned] = store.listThreads(botId);
+        const [owned] = yield* store.listThreads(botId);
         expect(owned?.follow).toBe("now");
         expect(h.packets.at(-1)).toBe("Fix --flaky tests");
         // Its own model, so its own effort rather than the provider's default.
@@ -1169,7 +1200,7 @@ describe("bot turns", () => {
 
         const failed = yield* httpFailure(start("fail"));
         expect(failed.detail).toContain("did not start");
-        expect(store.listThreads(botId)).toHaveLength(1);
+        expect(yield* store.listThreads(botId)).toHaveLength(1);
         expect(h.runtime.ownedThreads.size).toBe(1);
 
         yield* Bots.saveSettings({
@@ -1177,10 +1208,10 @@ describe("bot turns", () => {
           settings: { turnsPerDay: 200, maxThreads: 1, threads: "retired value" },
         });
         expect(yield* start("Another task")).toContain("the user must approve this");
-        expect(store.openQuestions(botId).map((question) => question.text)).toEqual([
+        expect((yield* store.openQuestions(botId)).map((question) => question.text)).toEqual([
           "start a thread in Repo (1 of its 1 threads already run)\n\nAnother task",
         ]);
-        expect(store.listThreads(botId)).toHaveLength(1);
+        expect(yield* store.listThreads(botId)).toHaveLength(1);
       }),
     ),
   );
@@ -1190,9 +1221,9 @@ describe("bot turns", () => {
       Effect.gen(function* () {
         const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
         const store = h.runtime.existingStore()!;
-        const legacySettings = { ...store.getBot(botId)!.settings, threads: "ask" };
-        store.setSettings(botId, legacySettings);
-        store.addThread({
+        const legacySettings = { ...(yield* store.getBot(botId))!.settings, threads: "ask" };
+        yield* store.setSettings(botId, legacySettings);
+        yield* store.addThread({
           threadId: "t1",
           botId,
           projectId: "p",
@@ -1232,7 +1263,7 @@ describe("bot turns", () => {
         h.projects.push({ id: "p1", title: "Repo", workspaceRoot: "/repo" });
         yield* Bots.sendMessage({ botId, text: "Hi" });
         yield* endRun(h, botId, 0, "Hello.");
-        const workThreadId = store.getBot(botId)!.workThreadId!;
+        const workThreadId = (yield* store.getBot(botId))!.workThreadId!;
         const limits = { turnsPerDay: 100, maxThreads: 3 };
         const codex = {
           instanceId: "codex",
@@ -1241,9 +1272,9 @@ describe("bot turns", () => {
         };
 
         yield* Bots.saveSettings({ botId, name: " DevOps ", settings: limits });
-        expect(store.getBot(botId)?.name).toBe("DevOps");
+        expect((yield* store.getBot(botId))?.name).toBe("DevOps");
         expect(h.titles).toEqual([{ threadId: workThreadId, title: "DevOps (bot)" }]);
-        expect(store.queued(botId).map((event) => event.text)).toEqual([
+        expect((yield* store.queued(botId)).map((event) => event.text)).toEqual([
           "The user renamed you from Ops to DevOps.",
         ]);
         expect(
@@ -1271,7 +1302,7 @@ describe("bot turns", () => {
 
         // Its own turns move to another provider on a fresh session, not a handed-over one.
         yield* Bots.saveSettings({ botId, modelSelection: codex, settings: limits });
-        expect(store.getBot(botId)?.modelSelection).toEqual(codex);
+        expect((yield* store.getBot(botId))?.modelSelection).toEqual(codex);
         yield* Bots.sendMessage({ botId, text: "Still there?" });
         expect(h.sends.at(-1)).toEqual({ mode: "queue", freshContext: true });
       }),
@@ -1324,7 +1355,7 @@ describe("bot turns", () => {
           const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
           const store = h.runtime.existingStore()!;
           for (const threadId of ["t-down", "t-taken"]) {
-            store.addThread({
+            yield* store.addThread({
               threadId,
               botId,
               projectId: "p",
@@ -1345,8 +1376,8 @@ describe("bot turns", () => {
           const run = (status: string) =>
             ({ type: "run.updated", threadId: "t-taken", payload: { id: "r2", status } }) as never;
           yield* followThreads(Stream.make(run("running"), run("failed")));
-          expect(store.getThread("t-taken")?.takenOver).toBe(true);
-          expect(store.queued(botId).map((event) => event.text)).toEqual([
+          expect((yield* store.getThread("t-taken"))?.takenOver).toBe(true);
+          expect((yield* store.queued(botId)).map((event) => event.text)).toEqual([
             expect.stringContaining("The user took over thread t-taken"),
           ]);
           const refused = yield* httpFailure(
@@ -1355,9 +1386,9 @@ describe("bot turns", () => {
           expect(refused.detail).toContain("took this thread over");
 
           yield* Bots.handBack({ botId, threadId: "t-taken" });
-          expect(store.getThread("t-taken")?.takenOver).toBe(false);
-          expect(store.queued(botId).at(-1)).toMatchObject({ wakes: true });
-          expect(store.queued(botId).at(-1)?.text).toContain("handed thread t-taken back");
+          expect((yield* store.getThread("t-taken"))?.takenOver).toBe(false);
+          expect((yield* store.queued(botId)).at(-1)).toMatchObject({ wakes: true });
+          expect((yield* store.queued(botId)).at(-1)?.text).toContain("handed thread t-taken back");
         }),
       ),
   );
@@ -1377,7 +1408,7 @@ describe("bot turns", () => {
             ["t-delegated", { createdBy: "user", delegatedCompletion: {} }],
             ["t-compacted", { createdBy: "user", idleCompaction: {} }],
           ] as const) {
-            store.addThread({
+            yield* store.addThread({
               threadId,
               botId,
               projectId: "p",
@@ -1390,14 +1421,14 @@ describe("bot turns", () => {
             h.shells.set(threadId, { latestRunId: `${threadId}-run`, status: "completed" });
           }
           yield* reconcileThreads();
-          const queued = store.queued(botId).map((event) => event.text);
+          const queued = (yield* store.queued(botId)).map((event) => event.text);
           expect(queued).toContainEqual(
             expect.stringContaining("The user took over thread t-user-down"),
           );
           expect(queued).not.toContainEqual(expect.stringContaining("t-user-down completed"));
-          expect(store.getThread("t-user-down")?.takenOver).toBe(true);
+          expect((yield* store.getThread("t-user-down"))?.takenOver).toBe(true);
           for (const threadId of ["t-notified", "t-delegated", "t-compacted"]) {
-            expect(store.getThread(threadId)?.takenOver).toBe(false);
+            expect((yield* store.getThread(threadId))?.takenOver).toBe(false);
             expect(queued).toContainEqual(expect.stringContaining(`Thread ${threadId} completed`));
           }
         }),
@@ -1537,12 +1568,12 @@ describe("bot role", () => {
         const store = h.runtime.existingStore()!;
         const roleOf = () =>
           NodeFSP.readFile(NodePath.join(h.runtime.botsDir, botId, "role.md"), "utf8");
-        const approveLast = () => {
-          const question = store.openQuestions(botId).at(-1)!;
-          return answerQuestion({ botId, questionId: question.id, approve: true }).pipe(
+        const approveLast = Effect.fn("Test.approveLast")(function* () {
+          const question = (yield* store.openQuestions(botId)).at(-1)!;
+          return yield* answerQuestion({ botId, questionId: question.id, approve: true }).pipe(
             Effect.as(question.text),
           );
-        };
+        });
 
         yield* Bots.saveRole({ botId, role: "Watch CI.\n\n## Rules\n- Ask before main." });
         yield* runTool({
@@ -1582,11 +1613,13 @@ describe("bot memory", () => {
       Effect.gen(function* () {
         const { botId } = yield* Bots.createBot({ name: "Release Watcher", modelSelection: MODEL });
         const store = h.runtime.existingStore()!;
-        const kept = store.addMemory(botId, "Releases ship from r/main.");
-        const dropped = store.addMemory(botId, "Old host is gone.");
+        const kept = yield* store.addMemory(botId, "Releases ship from r/main.");
+        const dropped = yield* store.addMemory(botId, "Old host is gone.");
 
         yield* Bots.forgetMemory({ botId, memoryId: dropped });
-        expect(store.listMemory(botId)).toEqual([{ id: kept, text: "Releases ship from r/main." }]);
+        expect(yield* store.listMemory(botId)).toEqual([
+          { id: kept, text: "Releases ship from r/main." },
+        ]);
 
         const missing = yield* httpFailure(Bots.forgetMemory({ botId, memoryId: dropped }));
         expect(missing.status).toBe(404);
@@ -1600,10 +1633,10 @@ describe("bot memory", () => {
         const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
         const store = h.runtime.existingStore()!;
         yield* Bots.saveRole({ botId, role: "Watch CI." });
-        const rule = store.addMemory(botId, "Never run bare t3 update.");
+        const rule = yield* store.addMemory(botId, "Never run bare t3 update.");
 
         yield* Bots.moveMemoryToRole({ botId, memoryId: rule });
-        expect(store.listMemory(botId)).toEqual([]);
+        expect(yield* store.listMemory(botId)).toEqual([]);
         expect(
           yield* Effect.promise(() =>
             NodeFSP.readFile(NodePath.join(h.runtime.botsDir, botId, "role.md"), "utf8"),

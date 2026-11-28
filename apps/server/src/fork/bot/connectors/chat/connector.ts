@@ -199,7 +199,7 @@ const config: Connector["config"] = Effect.fn("ForkBot.chat.config")(function* (
 
 const info: NonNullable<Connector["info"]> = Effect.fn("ForkBot.chat.info")(function* (instanceId) {
   const store = (yield* BotRuntime).existingStore();
-  const holder = store === null ? null : mentionBotFor(store, instanceId);
+  const holder = store === null ? null : yield* mentionBotFor(store, instanceId);
   return { mentionBot: holder === null ? null : { id: holder.id, name: holder.name } };
 });
 
@@ -208,14 +208,14 @@ const afterSave: NonNullable<Connector["afterSave"]> = Effect.fn("ForkBot.chat.a
   function* (botId, instanceId) {
     const runtime = yield* BotRuntime;
     const store = yield* runtime.store;
-    const saved = store.getBot(botId);
+    const saved = yield* store.getBot(botId);
     if (saved === null || !chatConfig(connectorSettings(saved.settings, instanceId)).mentions) {
       return;
     }
-    for (const other of store.listBots()) {
+    for (const other of yield* store.listBots()) {
       const held = connectorSettings(other.settings, instanceId);
       if (other.id === botId || !chatConfig(held).mentions) continue;
-      store.setSettings(other.id, {
+      yield* store.setSettings(other.id, {
         ...other.settings,
         connectors: {
           ...other.settings.connectors,

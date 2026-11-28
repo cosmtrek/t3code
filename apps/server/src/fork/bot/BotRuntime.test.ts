@@ -21,7 +21,7 @@ import { vi } from "vite-plus/test";
 import * as ServerConfig from "../../config.ts";
 import * as BotFiles from "./BotFiles.ts";
 import * as BotRuntime from "./BotRuntime.ts";
-import { BotStore } from "./store.ts";
+import * as BotStore from "./store.ts";
 
 const setup = Effect.gen(function* () {
   const root = yield* Effect.promise(() =>
@@ -51,7 +51,7 @@ describe("BotRuntime", () => {
   it.effect("opens the lazy store once and closes it with the owning scope", () =>
     Effect.gen(function* () {
       const h = yield* setup;
-      using close = vi.spyOn(BotStore.prototype, "close");
+      using close = vi.spyOn(NodeSqlite.DatabaseSync.prototype, "close");
       const runtime = yield* h.build();
       expect(runtime.existingStore()).toBeNull();
       expect(yield* h.fs.exists(runtime.botsDir)).toBe(false);
@@ -65,6 +65,37 @@ describe("BotRuntime", () => {
       expect(Exit.isFailure(yield* Effect.exit(runtime.store))).toBe(true);
       expect(close).toHaveBeenCalledTimes(1);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("interrupts a pending store directory acquisition when its scope closes", () =>
+    Effect.gen(function* () {
+      const h = yield* setup;
+      const started = yield* Deferred.make<void>();
+      let released = false;
+      const runtime = yield* h.build(
+        FileSystem.FileSystem.of({
+          ...h.fs,
+          makeDirectory: (directory, options) =>
+            directory !== NodePath.join(h.root, "userdata", "bots")
+              ? h.fs.makeDirectory(directory, options)
+              : Deferred.succeed(started, undefined).pipe(
+                  Effect.andThen(Effect.never),
+                  Effect.ensuring(
+                    Effect.sync(() => {
+                      released = true;
+                    }),
+                  ),
+                ),
+        }),
+      );
+      const opening = yield* runtime.store.pipe(Effect.exit, Effect.forkChild);
+      yield* Deferred.await(started);
+      yield* Scope.close(h.scope, Exit.void);
+      expect(released).toBe(true);
+      expect(Exit.isFailure(yield* Fiber.join(opening))).toBe(true);
+      expect(runtime.existingStore()).toBeNull();
+      expect(Exit.isFailure(yield* Effect.exit(runtime.store))).toBe(true);
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 
   it.effect("shares concurrent CLI writes and retries a typed write failure", () =>
@@ -127,7 +158,7 @@ describe("BotRuntime", () => {
       expect(runtime.existingStore()).toBeNull();
       yield* h.fs.remove(file);
       const store = yield* runtime.store;
-      expect(store.listBots()).toEqual([]);
+      expect(yield* store.listBots()).toEqual([]);
       yield* Scope.close(h.scope, Exit.void);
       expect(close).toHaveBeenCalledTimes(2);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
@@ -184,12 +215,16 @@ describe("BotRuntime", () => {
   it.effect("releases an existing store when startup indexing fails", () =>
     Effect.gen(function* () {
       const h = yield* setup;
-      const seed = new BotStore(NodePath.join(h.root, "userdata", "bots", "bots.sqlite"));
-      seed.close();
-      using close = vi.spyOn(BotStore.prototype, "close");
-      using _list = vi.spyOn(BotStore.prototype, "listBots").mockImplementation(() => {
-        throw new Error("indexing failed");
-      });
+      const seed = yield* BotStore.make(NodePath.join(h.root, "userdata", "bots", "bots.sqlite"));
+      yield* seed.close();
+      using close = vi.spyOn(NodeSqlite.DatabaseSync.prototype, "close");
+      const prepare = NodeSqlite.DatabaseSync.prototype.prepare;
+      using _list = vi
+        .spyOn(NodeSqlite.DatabaseSync.prototype, "prepare")
+        .mockImplementation(function (this: NodeSqlite.DatabaseSync, sql) {
+          if (sql === "SELECT * FROM bots ORDER BY created_at") throw new Error("indexing failed");
+          return prepare.call(this, sql);
+        });
       expect(Exit.isFailure(yield* Effect.exit(h.build()))).toBe(true);
       expect(close).toHaveBeenCalledTimes(1);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),

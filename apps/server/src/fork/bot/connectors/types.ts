@@ -12,7 +12,7 @@ import type { Artifacts } from "../../inbox/artifacts.ts";
 import type { BotRuntime } from "../BotRuntime.ts";
 import type { notify } from "../operations.ts";
 import type { InboxStoreError } from "../../inbox/store.ts";
-import type { Bot, ConnectorSettings } from "../store.ts";
+import type { Bot, BotStoreError, ConnectorSettings } from "../store.ts";
 
 /** What a connector may use: the bot's own services, its threads, and waking bots. */
 export type BotServices =
@@ -102,12 +102,16 @@ export interface Connector {
   /** Facts the settings dialog shows for an instance, beside the bot's own settings. */
   readonly info?: (
     instanceId: string,
-  ) => Effect.Effect<Readonly<Record<string, unknown>>, never, BotRuntime>;
+  ) => Effect.Effect<Readonly<Record<string, unknown>>, BotStoreError, BotRuntime>;
   /** Rules across bots, after one bot's settings for the instance were saved. */
   readonly afterSave?: (
     botId: string,
     instanceId: string,
-  ) => Effect.Effect<void, Effect.Error<BotRuntime["Service"]["store"]>, BotRuntime>;
+  ) => Effect.Effect<
+    void,
+    Effect.Error<BotRuntime["Service"]["store"]> | BotStoreError,
+    BotRuntime
+  >;
   /** Runs while any bot exists; wakes bots with `notify`. */
   readonly start?: Effect.Effect<void, never, BotServices | Scope.Scope>;
 }

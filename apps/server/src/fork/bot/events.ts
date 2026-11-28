@@ -54,12 +54,12 @@ const observeThread = Effect.fn("ForkBot.observeThread")(function* (
   const store = yield* runtime.store;
   const botId = owned.botId;
   const touch = Effect.gen(function* () {
-    if (owned.itemId !== null) store.updateItem(botId, owned.itemId, {}, yield* nowIso);
+    if (owned.itemId !== null) yield* store.updateItem(botId, owned.itemId, {}, yield* nowIso);
   });
 
   if (change.type === "request") {
     if (owned.takenOver || owned.lastRequestId === change.requestId) return;
-    store.updateThread(owned.threadId, { lastRequestId: change.requestId }, yield* nowIso);
+    yield* store.updateThread(owned.threadId, { lastRequestId: change.requestId }, yield* nowIso);
     yield* touch;
     const what = change.kind === "user_input" ? "a question answered" : "an approval";
     // Blocked until someone answers, so it always wakes the bot.
@@ -79,7 +79,7 @@ const observeThread = Effect.fn("ForkBot.observeThread")(function* (
     !seenRun &&
     (yield* takenOverByUser(owned.projectId, owned.threadId, owned.handedBackAt));
   if (takenNow) {
-    store.updateThread(owned.threadId, { takenOver: true }, yield* nowIso);
+    yield* store.updateThread(owned.threadId, { takenOver: true }, yield* nowIso);
     yield* notify(
       botId,
       `The user took over ${describe(owned).toLowerCase()}. Leave it to them until they hand it back.`,
@@ -90,7 +90,7 @@ const observeThread = Effect.fn("ForkBot.observeThread")(function* (
 
   if (!isTerminalRunStatus(change.status)) {
     if (owned.status === change.status && seenRun) return;
-    store.updateThread(
+    yield* store.updateThread(
       owned.threadId,
       {
         status: change.status,
@@ -105,11 +105,15 @@ const observeThread = Effect.fn("ForkBot.observeThread")(function* (
   const key = `${change.runId}:${change.status}`;
   if (owned.lastRunKey === key) return;
   if (takenOver) {
-    store.updateThread(owned.threadId, { status: change.status, lastRunKey: key }, yield* nowIso);
+    yield* store.updateThread(
+      owned.threadId,
+      { status: change.status, lastRunKey: key },
+      yield* nowIso,
+    );
     runtime.publish(botId);
     return;
   }
-  store.updateThread(owned.threadId, { lastRunKey: key }, yield* nowIso);
+  yield* store.updateThread(owned.threadId, { lastRunKey: key }, yield* nowIso);
   yield* touch;
   const failed = change.status !== "completed";
   const wakes = owned.follow === "now" || (owned.follow === "attention" && failed);
@@ -121,8 +125,8 @@ const observeThread = Effect.fn("ForkBot.observeThread")(function* (
   yield* notify(botId, stoppedEvent(describe(owned), change.status, reply), wakes).pipe(
     Effect.ensuring(
       Effect.gen(function* () {
-        store.updateThread(owned.threadId, { status: change.status }, yield* nowIso);
-      }),
+        yield* store.updateThread(owned.threadId, { status: change.status }, yield* nowIso);
+      }).pipe(Effect.orDie),
     ),
   );
 });
@@ -133,20 +137,24 @@ export const followThreads = Effect.fn("ForkBot.followThreads")(function* <E, R>
   const runtime = yield* BotRuntime;
   // Work-thread requests already posted; a request is updated more than once while pending.
   const posted = new Set<string>();
-  const showActivity = (botId: string, threadId: string, line: ActivityLine | null) => {
+  const showActivity = Effect.fn("ForkBot.showActivity")(function* (
+    botId: string,
+    threadId: string,
+    line: ActivityLine | null,
+  ) {
     if (line === null) return;
-    const since = runtime.existingStore()?.workingSince(botId) ?? null;
+    const since = (yield* runtime.existingStore()?.workingSince(botId) ?? Effect.undefined) ?? null;
     const latest = runtime.activity.get(botId);
     if (since === null || (latest?.key === line.key && latest.since === since)) return;
     runtime.publishActivity(botId, { threadId, ...line, since });
-  };
+  });
   // Untraced: it runs for every domain event in the environment.
   const handle = Effect.fnUntraced(function* (event: OrchestrationV2DomainEvent) {
     const workBot = runtime.workThreads.get(event.threadId);
     if (workBot !== undefined) {
       if (event.type === "turn-item.updated") {
         const shown = runtime.activity.get(workBot)?.key;
-        showActivity(workBot, event.threadId, activityLine(event.payload, shown));
+        yield* showActivity(workBot, event.threadId, activityLine(event.payload, shown));
       }
       if (event.type === "run.updated" && isTerminalRunStatus(event.payload.status)) {
         yield* finishRun(workBot, event.payload.id, event.payload.status);
@@ -170,11 +178,11 @@ export const followThreads = Effect.fn("ForkBot.followThreads")(function* <E, R>
     const shown = runtime.activity.get(runtime.ownedThreads.get(event.threadId) ?? "")?.key;
     const line = event.type === "turn-item.updated" ? activityLine(event.payload, shown) : null;
     if (event.type === "turn-item.updated" && (line === null || line.key === shown)) return;
-    const owned = (yield* runtime.store).getThread(event.threadId);
+    const owned = yield* (yield* runtime.store).getThread(event.threadId);
     if (owned === null) return;
     if (event.type === "turn-item.updated") {
       if (owned.follow === "now" && !owned.takenOver)
-        showActivity(owned.botId, owned.threadId, line);
+        yield* showActivity(owned.botId, owned.threadId, line);
       return;
     }
     if (event.type === "run.updated") {
@@ -212,21 +220,21 @@ export const reconcileThreads = Effect.fn("ForkBot.reconcileThreads")(function* 
   const threads = yield* ThreadManagement.ThreadManagementService;
   const store = runtime.existingStore();
   if (store === null) return;
-  for (const listed of store.listThreads()) {
+  for (const listed of yield* store.listThreads()) {
     if (listed.takenOver) continue;
     const shell = yield* threads
       .getThreadShell(ThreadId.make(listed.threadId))
       .pipe(Effect.orElseSucceed(() => null));
     if (shell === null) continue;
     if (shell.latestRunId !== null && shell.status !== "idle") {
-      yield* observeThread(store.getThread(listed.threadId) ?? listed, {
+      yield* observeThread((yield* store.getThread(listed.threadId)) ?? listed, {
         type: "run",
         runId: shell.latestRunId,
         status: shell.status,
       });
     }
     if (shell.pendingRuntimeRequest !== null) {
-      yield* observeThread(store.getThread(listed.threadId) ?? listed, {
+      yield* observeThread((yield* store.getThread(listed.threadId)) ?? listed, {
         type: "request",
         requestId: shell.pendingRuntimeRequest.id,
         kind: shell.pendingRuntimeRequest.kind,
