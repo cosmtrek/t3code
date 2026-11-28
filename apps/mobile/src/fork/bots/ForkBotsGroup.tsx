@@ -96,7 +96,6 @@ export function ForkBotsGroup(props: { readonly searching: boolean }) {
               bot={bot}
               status={status}
               pane={pane}
-              environmentLabel={listings.length > 1 ? listing.label : null}
               selected={selected === `${listing.environmentId}:${bot.id}`}
               showTrailingDivider={index < rows.length - 1}
             />
@@ -142,7 +141,6 @@ function BotRow(props: {
   readonly bot: BotSummary;
   readonly status: BotRowStatus<ThreadListV2Status>;
   readonly pane: "screen" | "sidebar";
-  readonly environmentLabel: string | null;
   readonly selected: boolean;
   readonly showTrailingDivider: boolean;
 }) {
@@ -153,7 +151,9 @@ function BotRow(props: {
   const appearance = getThreadListV2RowAppearance(theme, sidebarPane, props.selected);
   const { bot, status, selected } = props;
   const recede = !selected && status.kind === "working";
-  const preview = bot.lastMessage ? plainPreview(bot.lastMessage.text) : "No messages yet";
+  const preview = bot.lastMessage
+    ? `${bot.lastMessage.role === "user" ? "You: " : ""}${plainPreview(bot.lastMessage.text)}`
+    : "No messages yet";
   const foreground = selected
     ? selectedThreadRowColors.foregroundClassName
     : appearance.foregroundClassName;
@@ -162,7 +162,7 @@ function BotRow(props: {
     : appearance.mutedForegroundClassName;
 
   const content = (
-    <View style={recede ? { opacity: 0.55 } : undefined}>
+    <View>
       <View className="flex-row items-center gap-2.5">
         <View className="size-5 items-center justify-center rounded-full bg-subtle">
           <Text className={cn("text-[11px] font-t3-bold", muted)}>
@@ -170,7 +170,12 @@ function BotRow(props: {
           </Text>
         </View>
         <Text
-          className={cn("flex-1 text-base", !recede && "font-t3-medium", foreground)}
+          className={cn(
+            "flex-1 text-base",
+            !recede && "font-t3-medium",
+            foreground,
+            recede && "opacity-55",
+          )}
           numberOfLines={1}
         >
           {bot.name}
@@ -181,14 +186,30 @@ function BotRow(props: {
           tertiary={appearance.tertiaryForegroundClassName}
         />
       </View>
-      <Text className={cn("mt-1 pl-[30px] text-sm", muted)} numberOfLines={1}>
-        {props.environmentLabel ? `${props.environmentLabel} · ${preview}` : preview}
+      <Text
+        className={cn(
+          "mt-1 pl-[30px] text-sm",
+          bot.lastMessage === null
+            ? muted
+            : bot.lastMessage.role === "error"
+              ? "text-danger-foreground"
+              : status.kind === "question" || status.kind === "unread"
+                ? foreground
+                : muted,
+          bot.lastMessage === null && "italic",
+        )}
+        numberOfLines={1}
+      >
+        {preview}
       </Text>
     </View>
   );
 
   return (
-    <View style={appearance.swipeContainerStyle}>
+    <View
+      className={status.kind === "paused" ? "opacity-60" : undefined}
+      style={appearance.swipeContainerStyle}
+    >
       <RowPressable
         accessibilityRole="button"
         accessibilityLabel={[bot.name, statusText(status, m), preview].filter(Boolean).join(", ")}
