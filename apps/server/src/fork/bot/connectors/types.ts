@@ -52,7 +52,11 @@ export interface ConnectorCall {
   readonly stdin: string;
 }
 
-type Run = Effect.Effect<string, ForkHttpError, BotServices>;
+type Run = Effect.Effect<
+  string,
+  ForkHttpError | Effect.Error<ReturnType<typeof notify>>,
+  BotServices
+>;
 
 export type Action =
   | { readonly effect: "read"; readonly run: Run }
@@ -76,7 +80,9 @@ export interface Connector {
   readonly help: (instance: Instance) => string;
   /** Lines for the wake packet's brief, for a bot that has the instance on. */
   readonly brief: (instance: Instance, settings: ConnectorSettings) => ReadonlyArray<string>;
-  readonly resolve: (call: ConnectorCall) => Effect.Effect<Action, ForkHttpError, BotServices>;
+  readonly resolve: (
+    call: ConnectorCall,
+  ) => Effect.Effect<Action, ForkHttpError | Effect.Error<ReturnType<typeof notify>>, BotServices>;
   /** The kind's own settings from what the user saved. */
   readonly config: (
     input: unknown,
@@ -94,7 +100,7 @@ export interface Connector {
   readonly afterSave?: (
     botId: string,
     instanceId: string,
-  ) => Effect.Effect<void, never, BotRuntime>;
+  ) => Effect.Effect<void, Effect.Error<BotRuntime["Service"]["store"]>, BotRuntime>;
   /** Runs while any bot exists; wakes bots with `notify`. */
   readonly start?: Effect.Effect<void, never, BotServices | Scope.Scope>;
 }

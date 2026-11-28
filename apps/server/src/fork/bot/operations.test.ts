@@ -10,9 +10,12 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Latch from "effect/Latch";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
+import * as BotFiles from "./BotFiles.ts";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Chat from "./connectors/chat/chat.ts";
 import * as ChatState from "./connectors/chat/state.ts";
 
@@ -24,19 +27,31 @@ import * as DocumentText from "../../provider/DocumentText.ts";
 import { ManagedProjectFolders } from "../../project/ManagedProjectFolders.ts";
 import * as ProviderRegistry from "../../provider/ProviderRegistry.ts";
 import { ChannelHub } from "../channels/hub.ts";
+import { ForkHttpError } from "../inbox/operations.ts";
 import { InboxRuntime } from "../inbox/InboxRuntime.ts";
 import { InboxStore } from "../inbox/store.ts";
-import { BotRuntime, type BotRuntimeShape } from "./BotRuntime.ts";
+import { BotRuntime } from "./BotRuntime.ts";
 import { followThreads, reconcileThreads } from "./events.ts";
 import * as Bots from "./operations.ts";
 import { answerQuestion, authenticateTool, MEMORY_BYTES, parseArgs, runTool } from "./tools.ts";
 import { BotStore } from "./store.ts";
 
+const isHttpError = Schema.is(ForkHttpError);
+
+const httpFailure = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  Effect.flip(effect).pipe(
+    Effect.map((error) => {
+      expect(error).toBeInstanceOf(ForkHttpError);
+      if (isHttpError(error)) return error;
+      throw error;
+    }),
+  );
+
 const MODEL = { instanceId: "claudeAgent", model: "claude-haiku-5-5" };
 const SCRATCH = ProjectId.make("scratch");
 
 interface Harness {
-  readonly runtime: BotRuntimeShape;
+  readonly runtime: BotRuntime["Service"];
   /** Every packet the bot was sent, launch or send, in order. */
   readonly packets: string[];
   /** Thread id and run id of each turn, in order. */
@@ -92,187 +107,196 @@ type HarnessServices =
   | FileSystem.FileSystem
   | Project.ProjectService;
 
-async function harness(store = new BotStore(":memory:")): Promise<Harness> {
-  const botsDir = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-bots-"));
-  const runtime: BotRuntimeShape = {
-    botsDir,
-    cliPath: "/bin/t3bot",
-    ensureCli: Effect.void,
-    ownedThreads: new Map(),
-    existingStore: () => store,
-    store: () => store,
-    active: Latch.makeUnsafe(false),
-    turnLock: Semaphore.makeUnsafe(1),
-    threadStartLock: Semaphore.makeUnsafe(1),
-    workThreads: new Map(
-      store
-        .listBots()
-        .flatMap((bot) => (bot.workThreadId === null ? [] : [[bot.workThreadId, bot.id] as const])),
-    ),
-    activity: new Map(),
-    publish: () => undefined,
-    publishActivity: (botId, activity) => runtime.activity.set(botId, activity),
-    subscribe: () => () => undefined,
-  };
-  const packets: string[] = [];
-  const runs: Array<{ threadId: string; runId: string }> = [];
-  const runStatus = new Map<string, OrchestrationV2RunStatus>();
-  const replies = new Map<string, string>();
-  const pages: Harness["pages"] = new Map();
-  const shells = new Map<string, { latestRunId: string; status: string }>();
-  const userMessages = new Map<string, Array<UserMessage>>();
-  const projects: Harness["projects"] = [];
-  const ownedAtLaunch: boolean[] = [];
-  const modes: string[] = [];
-  const threadModes = new Map<string, string>();
-  const models: unknown[] = [];
-  const sends: Harness["sends"] = [];
-  const titles: Harness["titles"] = [];
-  const usage: Harness["usage"] = new Map();
-  const nextRun = (threadId: string) => {
-    const runId = `run-${runs.length + 1}`;
-    runs.push({ threadId, runId });
-    runStatus.set(runId, "running");
-    return runId;
-  };
-  const layer = Layer.mergeAll(
-    Layer.succeed(BotRuntime, runtime),
-    Layer.mock(ThreadManagement.ThreadManagementService)({
-      getThreadTitles: () => Effect.succeed({}),
-      dispatch: (command) => {
-        if (command.type === "thread.metadata.update") {
-          titles.push({ threadId: command.threadId, title: command.title });
-        }
-        if (command.type === "thread.runtime-mode.set") {
-          modes.push(command.runtimeMode);
-          threadModes.set(command.threadId, command.runtimeMode);
-        }
-        return Effect.succeed({} as never);
-      },
-      sendToThread: (input) => {
-        // No turn is ever mid-provider-turn here, so a steer lands in the queue as T3 would.
-        if (input.mode === "steer") {
-          return Effect.succeed({ delivery: h.steerDelivery, run: { id: "steer" } } as never);
-        }
-        packets.push(input.text);
-        sends.push({ mode: input.mode, freshContext: input.freshContext === true });
-        return Effect.succeed({
-          delivery: "queued",
-          run: { id: nextRun(input.threadId) },
-        } as never);
-      },
-      getThreadShell: (threadId) => {
-        const shell = shells.get(threadId);
-        const runtimeMode = threadModes.get(threadId);
-        if (shell === undefined && runtimeMode === undefined)
-          return Effect.fail("missing" as never);
-        return Effect.succeed({ ...shell, runtimeMode, pendingRuntimeRequest: null } as never);
-      },
-      getProjectThreadRecords: (input, _fields, filter) =>
-        Effect.succeed({
-          thread: { activeProviderThreadId: "pt" },
-          providerTurns: usage.has(input.threadId)
-            ? [
-                {
-                  providerThreadId: "pt",
-                  tokenUsage: { ...usage.get(input.threadId), updatedAt: "2026-01-01T00:00:00Z" },
-                },
-              ]
-            : [],
-          runs: (filter?.runIds ?? []).flatMap((id) =>
-            runStatus.has(id) ? [{ id, status: runStatus.get(id) }] : [],
+const harness = (store = new BotStore(":memory:")) =>
+  Effect.gen(function* () {
+    const botsDir = yield* Effect.promise(() =>
+      NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-bots-")),
+    );
+    const runtime: BotRuntime["Service"] = {
+      botsDir,
+      files: yield* BotFiles.BotFiles.pipe(
+        Effect.provide(BotFiles.layer.pipe(Layer.provideMerge(NodeServices.layer))),
+      ),
+      cliPath: "/bin/t3bot",
+      ensureCli: Effect.void,
+      ownedThreads: new Map(),
+      existingStore: () => store,
+      store: Effect.succeed(store),
+      active: Latch.makeUnsafe(false),
+      turnLock: Semaphore.makeUnsafe(1),
+      threadStartLock: Semaphore.makeUnsafe(1),
+      workThreads: new Map(
+        store
+          .listBots()
+          .flatMap((bot) =>
+            bot.workThreadId === null ? [] : [[bot.workThreadId, bot.id] as const],
           ),
-          messages:
-            filter?.messageRunIds === undefined
-              ? (userMessages.get(input.threadId) ?? [])
-              : filter.messageRunIds.flatMap((id) =>
-                  replies.has(id)
-                    ? [{ text: replies.get(id), createdAt: DateTime.makeUnsafe(0) }]
-                    : [],
-                ),
-          turnItems: (pages.get(filter?.turnItemRunId ?? "") ?? []).map((shown, ordinal) =>
-            typeof shown === "string"
-              ? {
-                  id: `sent-${ordinal}`,
-                  ordinal,
-                  type: "dynamic_tool",
-                  status: "completed",
-                  toolName: "mcp__t3-code__send_to_user",
-                  output: { sentMessage: shown },
-                }
-              : {
-                  id: `page-${ordinal}`,
-                  ordinal,
-                  type: "dynamic_tool",
-                  status: "completed",
-                  toolName: "mcp__t3-code__html_render",
-                  output: { structuredContent: { htmlRender: shown }, content: [] },
-                },
-          ),
-        } as never),
-    }),
-    Layer.mock(ThreadLaunch.ThreadLaunchService)({
-      launch: (input) => {
-        if (input.projectId !== SCRATCH) {
-          ownedAtLaunch.push(runtime.ownedThreads.has(input.threadId!));
-          if (input.initialMessage?.text === "fail") return Effect.fail({ message: "no" } as never);
-        }
-        packets.push(input.initialMessage?.text ?? "");
-        modes.push(input.runtimeMode);
-        threadModes.set(input.threadId!, input.runtimeMode);
-        models.push(input.modelSelection);
-        const runId = nextRun(input.threadId!);
-        return Effect.succeed({
-          threadId: input.threadId,
-          projection: { runs: [{ id: runId, userMessageId: input.initialMessage?.messageId }] },
-        } as never);
-      },
-    }),
-    Layer.mock(ManagedProjectFolders)({
-      namedProjectsRoot: botsDir,
-      ensureScratchProject: Effect.succeed({ projectId: SCRATCH }),
-    }),
-    Layer.mock(DocumentText.DocumentText)({}),
-    Layer.mock(Project.ProjectService)({ listShells: () => Effect.succeed(projects as never) }),
-    // The model's provider, like Antigravity, offers every mode but auto.
-    Layer.mock(ProviderRegistry.ProviderRegistry)({
-      getProviders: Effect.succeed([
-        {
-          instanceId: MODEL.instanceId,
-          supportedRuntimeModes: ["approval-required", "auto-accept-edits", "full-access"],
+      ),
+      activity: new Map(),
+      publish: () => undefined,
+      publishActivity: (botId, activity) => runtime.activity.set(botId, activity),
+      subscribe: () => () => undefined,
+    };
+    const packets: string[] = [];
+    const runs: Array<{ threadId: string; runId: string }> = [];
+    const runStatus = new Map<string, OrchestrationV2RunStatus>();
+    const replies = new Map<string, string>();
+    const pages: Harness["pages"] = new Map();
+    const shells = new Map<string, { latestRunId: string; status: string }>();
+    const userMessages = new Map<string, Array<UserMessage>>();
+    const projects: Harness["projects"] = [];
+    const ownedAtLaunch: boolean[] = [];
+    const modes: string[] = [];
+    const threadModes = new Map<string, string>();
+    const models: unknown[] = [];
+    const sends: Harness["sends"] = [];
+    const titles: Harness["titles"] = [];
+    const usage: Harness["usage"] = new Map();
+    const nextRun = (threadId: string) => {
+      const runId = `run-${runs.length + 1}`;
+      runs.push({ threadId, runId });
+      runStatus.set(runId, "running");
+      return runId;
+    };
+    const layer = Layer.mergeAll(
+      Layer.succeed(BotRuntime, runtime),
+      Layer.mock(ThreadManagement.ThreadManagementService)({
+        getThreadTitles: () => Effect.succeed({}),
+        dispatch: (command) => {
+          if (command.type === "thread.metadata.update") {
+            titles.push({ threadId: command.threadId, title: command.title });
+          }
+          if (command.type === "thread.runtime-mode.set") {
+            modes.push(command.runtimeMode);
+            threadModes.set(command.threadId, command.runtimeMode);
+          }
+          return Effect.succeed({} as never);
         },
-        { instanceId: "codex", supportedRuntimeModes: ["auto", "full-access"] },
-      ] as never),
-    }),
-    Layer.succeed(ServerConfig.ServerConfig, {} as never),
-    FileSystem.layerNoop({}),
-  );
-  const h: Harness = {
-    runtime,
-    packets,
-    runs,
-    runStatus,
-    replies,
-    pages,
-    shells,
-    userMessages,
-    steerDelivery: "queued",
-    sends,
-    titles,
-    usage,
-    projects,
-    ownedAtLaunch,
-    modes,
-    threadModes,
-    models,
-    layer,
-  };
-  return h;
-}
+        sendToThread: (input) => {
+          // No turn is ever mid-provider-turn here, so a steer lands in the queue as T3 would.
+          if (input.mode === "steer") {
+            return Effect.succeed({ delivery: h.steerDelivery, run: { id: "steer" } } as never);
+          }
+          packets.push(input.text);
+          sends.push({ mode: input.mode, freshContext: input.freshContext === true });
+          return Effect.succeed({
+            delivery: "queued",
+            run: { id: nextRun(input.threadId) },
+          } as never);
+        },
+        getThreadShell: (threadId) => {
+          const shell = shells.get(threadId);
+          const runtimeMode = threadModes.get(threadId);
+          if (shell === undefined && runtimeMode === undefined)
+            return Effect.fail("missing" as never);
+          return Effect.succeed({ ...shell, runtimeMode, pendingRuntimeRequest: null } as never);
+        },
+        getProjectThreadRecords: (input, _fields, filter) =>
+          Effect.succeed({
+            thread: { activeProviderThreadId: "pt" },
+            providerTurns: usage.has(input.threadId)
+              ? [
+                  {
+                    providerThreadId: "pt",
+                    tokenUsage: { ...usage.get(input.threadId), updatedAt: "2026-01-01T00:00:00Z" },
+                  },
+                ]
+              : [],
+            runs: (filter?.runIds ?? []).flatMap((id) =>
+              runStatus.has(id) ? [{ id, status: runStatus.get(id) }] : [],
+            ),
+            messages:
+              filter?.messageRunIds === undefined
+                ? (userMessages.get(input.threadId) ?? [])
+                : filter.messageRunIds.flatMap((id) =>
+                    replies.has(id)
+                      ? [{ text: replies.get(id), createdAt: DateTime.makeUnsafe(0) }]
+                      : [],
+                  ),
+            turnItems: (pages.get(filter?.turnItemRunId ?? "") ?? []).map((shown, ordinal) =>
+              typeof shown === "string"
+                ? {
+                    id: `sent-${ordinal}`,
+                    ordinal,
+                    type: "dynamic_tool",
+                    status: "completed",
+                    toolName: "mcp__t3-code__send_to_user",
+                    output: { sentMessage: shown },
+                  }
+                : {
+                    id: `page-${ordinal}`,
+                    ordinal,
+                    type: "dynamic_tool",
+                    status: "completed",
+                    toolName: "mcp__t3-code__html_render",
+                    output: { structuredContent: { htmlRender: shown }, content: [] },
+                  },
+            ),
+          } as never),
+      }),
+      Layer.mock(ThreadLaunch.ThreadLaunchService)({
+        launch: (input) => {
+          if (input.projectId !== SCRATCH) {
+            ownedAtLaunch.push(runtime.ownedThreads.has(input.threadId!));
+            if (input.initialMessage?.text === "fail")
+              return Effect.fail({ message: "no" } as never);
+          }
+          packets.push(input.initialMessage?.text ?? "");
+          modes.push(input.runtimeMode);
+          threadModes.set(input.threadId!, input.runtimeMode);
+          models.push(input.modelSelection);
+          const runId = nextRun(input.threadId!);
+          return Effect.succeed({
+            threadId: input.threadId,
+            projection: { runs: [{ id: runId, userMessageId: input.initialMessage?.messageId }] },
+          } as never);
+        },
+      }),
+      Layer.mock(ManagedProjectFolders)({
+        namedProjectsRoot: botsDir,
+        ensureScratchProject: Effect.succeed({ projectId: SCRATCH }),
+      }),
+      Layer.mock(DocumentText.DocumentText)({}),
+      Layer.mock(Project.ProjectService)({ listShells: () => Effect.succeed(projects as never) }),
+      // The model's provider, like Antigravity, offers every mode but auto.
+      Layer.mock(ProviderRegistry.ProviderRegistry)({
+        getProviders: Effect.succeed([
+          {
+            instanceId: MODEL.instanceId,
+            supportedRuntimeModes: ["approval-required", "auto-accept-edits", "full-access"],
+          },
+          { instanceId: "codex", supportedRuntimeModes: ["auto", "full-access"] },
+        ] as never),
+      }),
+      Layer.succeed(ServerConfig.ServerConfig, {} as never),
+      FileSystem.layerNoop({}),
+    );
+    const h: Harness = {
+      runtime,
+      packets,
+      runs,
+      runStatus,
+      replies,
+      pages,
+      shells,
+      userMessages,
+      steerDelivery: "queued",
+      sends,
+      titles,
+      usage,
+      projects,
+      ownedAtLaunch,
+      modes,
+      threadModes,
+      models,
+      layer,
+    };
+    return h;
+  });
 
 const chatOf = (h: Harness, botId: string) =>
   h.runtime
-    .store()
+    .existingStore()!
     .recentChat(botId, 100)
     .map((message) => [message.role, message.text]);
 
@@ -288,7 +312,7 @@ const withHarness = <E>(
   program: (h: Harness) => Effect.Effect<void, E, HarnessServices>,
   store?: BotStore,
 ) =>
-  Effect.promise(() => harness(store)).pipe(
+  harness(store).pipe(
     Effect.flatMap((h) =>
       program(h).pipe(
         Effect.provide(h.layer),
@@ -386,12 +410,12 @@ describe("bot creation", () => {
   it.effect("rejects an overlong brief before creating a bot or its files", () =>
     withHarness((h) =>
       Effect.gen(function* () {
-        const error = yield* Effect.flip(
+        const error = yield* httpFailure(
           Bots.createBot({ name: "Bot", modelSelection: MODEL, brief: "x".repeat(20_001) }),
         );
 
         expect(error).toMatchObject({ status: 400, code: "bad_request", field: "brief" });
-        expect(h.runtime.store().listBots()).toEqual([]);
+        expect(h.runtime.existingStore()!.listBots()).toEqual([]);
         expect(yield* Effect.promise(() => NodeFSP.readdir(h.runtime.botsDir))).toEqual([]);
         expect(h.runtime.active.isOpen()).toBe(false);
         expect(h.runs).toEqual([]);
@@ -429,7 +453,7 @@ describe("bot turns", () => {
           ["bot", "I watch the fork's releases."],
           ["error", "The turn ended without a reply."],
         ]);
-        expect(h.runtime.store().getTurn(botId)).toBeNull();
+        expect(h.runtime.existingStore()!.getTurn(botId)).toBeNull();
         // Its posts count as unread on the Bots entry until the user sees its chat.
         const unread = () => Bots.listBots().pipe(Effect.map(({ bots }) => bots[0]!.unread));
         expect(yield* unread()).toBe(2);
@@ -482,7 +506,7 @@ describe("bot turns", () => {
       withHarness((h) =>
         Effect.gen(function* () {
           const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
-          const store = h.runtime.store();
+          const store = h.runtime.existingStore()!;
           const id = store.addRoutine(botId, {
             title: "PR check",
             prompt: "Check open PRs.",
@@ -509,7 +533,7 @@ describe("bot turns", () => {
     withHarness((h) =>
       Effect.gen(function* () {
         const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
-        const store = h.runtime.store();
+        const store = h.runtime.existingStore()!;
         for (const [threadId, follow] of [
           ["t-attention", "attention"],
           ["t-now", "now"],
@@ -552,7 +576,7 @@ describe("bot turns", () => {
         const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
         yield* Bots.sendMessage({ botId, text: "Remember my timezone." });
         yield* runTool({ bot: botId, argv: ["memory", "add", "The user is in UTC+8."], stdin: "" });
-        const full = yield* Effect.flip(
+        const full = yield* httpFailure(
           runTool({ bot: botId, argv: ["memory", "add", "x".repeat(MEMORY_BYTES)], stdin: "" }),
         );
         expect(full.detail).toContain("Merge or remove notes first");
@@ -564,7 +588,7 @@ describe("bot turns", () => {
         ]);
         expect(
           h.runtime
-            .store()
+            .existingStore()!
             .listMemory(botId)
             .map((note) => note.text),
         ).toEqual(["The user is in UTC+8."]);
@@ -579,7 +603,7 @@ describe("bot turns", () => {
         const page = (id: string) => ({ attachmentId: id, title: `Map ${id}`, height: 400 });
         const rendersOf = () =>
           h.runtime
-            .store()
+            .existingStore()!
             .recentChat(botId, 100)
             .map((message) => message.renders?.map((render) => render.attachmentId) ?? []);
 
@@ -615,7 +639,7 @@ describe("bot turns", () => {
         yield* runTool({ bot: botId, argv: ["say", "Waiting."], stdin: "" });
         yield* endRun(h, botId, 0, null);
 
-        const chat = h.runtime.store().recentChat(botId, 100);
+        const chat = h.runtime.existingStore()!.recentChat(botId, 100);
         expect(chat.map((message) => [message.role, message.text])).toEqual([
           ["user", "Show me, then wait."],
           ["bot", "Here is the plan."],
@@ -648,8 +672,9 @@ describe("bot turns", () => {
       withHarness((h) =>
         Effect.gen(function* () {
           const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
-          const store = h.runtime.store();
-          const roleOf = () => NodeFSP.readFile(Bots.rolePath(h.runtime.botsDir, botId), "utf8");
+          const store = h.runtime.existingStore()!;
+          const roleOf = () =>
+            NodeFSP.readFile(NodePath.join(h.runtime.botsDir, botId, "role.md"), "utf8");
           const edit = (role: string) =>
             runTool({ bot: botId, argv: ["role", "edit", "-"], stdin: role });
 
@@ -679,7 +704,7 @@ describe("bot turns", () => {
             "approved your question 1, and it ran: Role replaced.",
           );
           // A question is answered once.
-          const again = yield* Effect.flip(
+          const again = yield* httpFailure(
             answerQuestion({ botId, questionId: question!.id, approve: true }),
           );
           expect(again.code).toBe("question_closed");
@@ -754,7 +779,7 @@ describe("bot turns", () => {
         expect((yield* read()).bot.turnsToday).toBe(1);
 
         // A count left from an earlier day reads as none used today.
-        h.runtime.store().countTurn(botId, "2000-01-01");
+        h.runtime.existingStore()!.countTurn(botId, "2000-01-01");
         expect((yield* read()).bot.turnsToday).toBe(0);
       }),
     ),
@@ -765,7 +790,7 @@ describe("bot turns", () => {
       Effect.gen(function* () {
         const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
         yield* Bots.sendMessage({ botId, text: "Clean up" });
-        const threadId = h.runtime.store().getBot(botId)!.workThreadId!;
+        const threadId = h.runtime.existingStore()!.getBot(botId)!.workThreadId!;
         const runId = h.runs[0]!.runId;
         const item = (fields: Record<string, unknown>) =>
           ({ type: "turn-item.updated", threadId, payload: { runId, ...fields } }) as never;
@@ -809,7 +834,7 @@ describe("bot turns", () => {
     withHarness((h) =>
       Effect.gen(function* () {
         const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
-        const store = h.runtime.store();
+        const store = h.runtime.existingStore()!;
         const read = () => Bots.readBot(new URLSearchParams({ botId }));
         yield* Bots.sendMessage({ botId, text: "Find old backups" });
         const since = (yield* read()).workingSince;
@@ -875,7 +900,7 @@ describe("bot turns", () => {
       Effect.gen(function* () {
         // No pick: the broadest the provider offers up to auto, which it lacks.
         const unpicked = yield* Bots.createBot({ name: "Default", modelSelection: MODEL });
-        expect(h.runtime.store().getBot(unpicked.botId)?.settings.runtimeMode).toBe(
+        expect(h.runtime.existingStore()!.getBot(unpicked.botId)?.settings.runtimeMode).toBe(
           "auto-accept-edits",
         );
         const { botId } = yield* Bots.createBot({
@@ -889,10 +914,10 @@ describe("bot turns", () => {
           settings: { turnsPerDay: 100, maxThreads: 3, runtimeMode: "auto" },
         });
         expect(h.modes).toEqual(["full-access", "auto-accept-edits"]);
-        expect(h.runtime.store().getBot(botId)?.settings.runtimeMode).toBe("auto");
+        expect(h.runtime.existingStore()!.getBot(botId)?.settings.runtimeMode).toBe("auto");
 
         // Sending from the thread's composer set its own mode; the next turn restores the bot's.
-        const threadId = h.runtime.store().getBot(botId)!.workThreadId!;
+        const threadId = h.runtime.existingStore()!.getBot(botId)!.workThreadId!;
         h.threadModes.set(threadId, "full-access");
         yield* endRun(h, botId, h.runs.length - 1, "Hello");
         yield* Bots.sendMessage({ botId, text: "Again" });
@@ -916,7 +941,7 @@ describe("bot turns", () => {
           },
         });
         yield* Chat.scanMentions("example");
-        const pending = ChatState.listMentions(h.runtime.store(), "example").filter(
+        const pending = ChatState.listMentions(h.runtime.existingStore()!, "example").filter(
           (mark) => mark.dueAt !== null,
         );
         expect(pending.length).toBeGreaterThan(0);
@@ -928,7 +953,9 @@ describe("bot turns", () => {
         yield* Chat.fireDueMentions();
         expect(h.runs).toHaveLength(1);
         expect(
-          ChatState.listMentions(h.runtime.store(), "example").every((mark) => mark.dueAt === null),
+          ChatState.listMentions(h.runtime.existingStore()!, "example").every(
+            (mark) => mark.dueAt === null,
+          ),
         ).toBe(true);
       }),
     ),
@@ -939,7 +966,7 @@ describe("bot turns", () => {
     () =>
       withChat((h) =>
         Effect.gen(function* () {
-          const store = h.runtime.store();
+          const store = h.runtime.existingStore()!;
           const first = yield* Bots.createBot({ name: "Inbox", modelSelection: MODEL });
           const second = yield* Bots.createBot({ name: "Other", modelSelection: MODEL });
           const save = (botId: string, enabled: boolean, mentions: boolean) =>
@@ -970,7 +997,7 @@ describe("bot turns", () => {
           yield* save(second.botId, false, true);
           expect(example(second.botId)?.config.mentions).toBe(false);
 
-          const unknown = yield* Effect.flip(
+          const unknown = yield* httpFailure(
             Bots.saveSettings({
               botId: first.botId,
               settings: {
@@ -1021,13 +1048,13 @@ describe("bot turns", () => {
         expect(yield* runTool({ bot: botId, argv: ["help"], stdin: "" })).not.toContain(
           "send <conversation>",
         );
-        const refused = yield* Effect.flip(
+        const refused = yield* httpFailure(
           runTool({ bot: botId, argv: ["chat", "unread"], stdin: "" }),
         );
         expect(refused.detail).toBe(
           "No chat channel is on for you; the user can turn one on in your settings.",
         );
-        const unknown = yield* Effect.flip(
+        const unknown = yield* httpFailure(
           runTool({ bot: botId, argv: ["example", "unread"], stdin: "" }),
         );
         expect(unknown.detail).toBe('Unknown command "example". Run help.');
@@ -1038,7 +1065,7 @@ describe("bot turns", () => {
   it.effect("names each chat channel as its own command, and gates every send", () =>
     withChat((h) =>
       Effect.gen(function* () {
-        const store = h.runtime.store();
+        const store = h.runtime.existingStore()!;
         const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
         const tool = (...argv: string[]) => runTool({ bot: botId, argv, stdin: "" });
         const save = (enabled: boolean, send: "allow" | "ask", signature = "") =>
@@ -1051,13 +1078,13 @@ describe("bot turns", () => {
             },
           });
 
-        expect((yield* Effect.flip(tool("example", "unread"))).detail).toBe(
+        expect((yield* httpFailure(tool("example", "unread"))).detail).toBe(
           "Example is off for you; the user can turn it on in your settings.",
         );
         yield* save(true, "ask", "-- {bot}");
         const help = yield* tool("help");
         expect(help).toContain("example send <conversation>");
-        expect((yield* Effect.flip(tool("chat", "unread"))).detail).toContain(
+        expect((yield* httpFailure(tool("chat", "unread"))).detail).toContain(
           "`example …` for Example",
         );
         expect(yield* tool("example", "list")).toContain('c-dm-jordan "Jordan Lee"');
@@ -1098,7 +1125,7 @@ describe("bot turns", () => {
         h.steerDelivery = "steered";
         const { messageId } = yield* Bots.sendMessage({ botId, text: "Also this." });
         const steered = h.runtime
-          .store()
+          .existingStore()!
           .recentChat(botId, 10)
           .find((message) => message.id === messageId);
         expect(steered?.turnRunId).toBe(h.runs[0]!.runId);
@@ -1114,7 +1141,7 @@ describe("bot turns", () => {
       Effect.gen(function* () {
         const ownModel = { ...MODEL, options: [{ id: "effort", value: "medium" }] };
         const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: ownModel });
-        const store = h.runtime.store();
+        const store = h.runtime.existingStore()!;
         const legacySettings = { ...store.getBot(botId)!.settings, threads: "ask" };
         store.setSettings(botId, legacySettings);
         h.projects.push({ id: "p1", title: "Repo", workspaceRoot: "/repo" });
@@ -1132,7 +1159,7 @@ describe("bot turns", () => {
         // Its own model, so its own effort rather than the provider's default.
         expect(h.models.at(-1)).toEqual(ownModel);
 
-        const failed = yield* Effect.flip(start("fail"));
+        const failed = yield* httpFailure(start("fail"));
         expect(failed.detail).toContain("did not start");
         expect(store.listThreads(botId)).toHaveLength(1);
         expect(h.runtime.ownedThreads.size).toBe(1);
@@ -1154,7 +1181,7 @@ describe("bot turns", () => {
     withHarness((h) =>
       Effect.gen(function* () {
         const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
-        const store = h.runtime.store();
+        const store = h.runtime.existingStore()!;
         const legacySettings = { ...store.getBot(botId)!.settings, threads: "ask" };
         store.setSettings(botId, legacySettings);
         store.addThread({
@@ -1193,7 +1220,7 @@ describe("bot turns", () => {
     withHarness((h) =>
       Effect.gen(function* () {
         const { botId } = yield* Bots.createBot({ name: "Ops", modelSelection: MODEL });
-        const store = h.runtime.store();
+        const store = h.runtime.existingStore()!;
         h.projects.push({ id: "p1", title: "Repo", workspaceRoot: "/repo" });
         yield* Bots.sendMessage({ botId, text: "Hi" });
         yield* endRun(h, botId, 0, "Hello.");
@@ -1212,7 +1239,7 @@ describe("bot turns", () => {
           "The user renamed you from Ops to DevOps.",
         ]);
         expect(
-          (yield* Effect.flip(Bots.saveSettings({ botId, name: " ", settings: limits }))).detail,
+          (yield* httpFailure(Bots.saveSettings({ botId, name: " ", settings: limits }))).detail,
         ).toContain("Name the bot");
 
         // Its threads run on the model set for them, effort included, unless it names another.
@@ -1248,17 +1275,17 @@ describe("bot turns", () => {
       Effect.gen(function* () {
         const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
         const token = yield* Effect.promise(() =>
-          NodeFSP.readFile(Bots.tokenPath(h.runtime.botsDir, botId), "utf8"),
+          NodeFSP.readFile(NodePath.join(h.runtime.botsDir, botId, "token"), "utf8"),
         );
         const call = (bot: string, given: string) =>
           authenticateTool(`Bearer ${given}`, { bot, argv: ["help"], stdin: "" });
         expect((yield* call(botId, token)).bot).toBe(botId);
-        expect((yield* Effect.flip(call(botId, "wrong"))).status).toBe(401);
+        expect((yield* httpFailure(call(botId, "wrong"))).status).toBe(401);
         // A token file outside any stored bot is never read.
         yield* Effect.promise(() =>
           NodeFSP.writeFile(NodePath.join(h.runtime.botsDir, "token"), "planted"),
         );
-        expect((yield* Effect.flip(call(".", "planted"))).status).toBe(401);
+        expect((yield* httpFailure(call(".", "planted"))).status).toBe(401);
       }),
     ),
   );
@@ -1276,7 +1303,7 @@ describe("bot turns", () => {
         });
         const read = (name: string) => Bots.readNote(new URLSearchParams({ botId, name }));
         expect((yield* read("plan.md")).text).toBe("Plan");
-        expect((yield* Effect.flip(read("link.md"))).status).toBe(404);
+        expect((yield* httpFailure(read("link.md"))).status).toBe(404);
       }),
     ),
   );
@@ -1287,7 +1314,7 @@ describe("bot turns", () => {
       withHarness((h) =>
         Effect.gen(function* () {
           const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
-          const store = h.runtime.store();
+          const store = h.runtime.existingStore()!;
           for (const threadId of ["t-down", "t-taken"]) {
             store.addThread({
               threadId,
@@ -1314,7 +1341,7 @@ describe("bot turns", () => {
           expect(store.queued(botId).map((event) => event.text)).toEqual([
             expect.stringContaining("The user took over thread t-taken"),
           ]);
-          const refused = yield* Effect.flip(
+          const refused = yield* httpFailure(
             runTool({ bot: botId, argv: ["thread", "send", "t-taken", "Carry on"], stdin: "" }),
           );
           expect(refused.detail).toContain("took this thread over");
@@ -1333,7 +1360,7 @@ describe("bot turns", () => {
       withHarness((h) =>
         Effect.gen(function* () {
           const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
-          const store = h.runtime.store();
+          const store = h.runtime.existingStore()!;
           for (const [threadId, message] of [
             // The user typed here while the server was down; only the end of their run is seen.
             ["t-user-down", { createdBy: "user" }],
@@ -1499,8 +1526,9 @@ describe("bot role", () => {
     withHarness((h) =>
       Effect.gen(function* () {
         const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
-        const store = h.runtime.store();
-        const roleOf = () => NodeFSP.readFile(Bots.rolePath(h.runtime.botsDir, botId), "utf8");
+        const store = h.runtime.existingStore()!;
+        const roleOf = () =>
+          NodeFSP.readFile(NodePath.join(h.runtime.botsDir, botId, "role.md"), "utf8");
         const approveLast = () => {
           const question = store.openQuestions(botId).at(-1)!;
           return answerQuestion({ botId, questionId: question.id, approve: true }).pipe(
@@ -1545,14 +1573,14 @@ describe("bot memory", () => {
     withHarness((h) =>
       Effect.gen(function* () {
         const { botId } = yield* Bots.createBot({ name: "Release Watcher", modelSelection: MODEL });
-        const store = h.runtime.store();
+        const store = h.runtime.existingStore()!;
         const kept = store.addMemory(botId, "Releases ship from r/main.");
         const dropped = store.addMemory(botId, "Old host is gone.");
 
         yield* Bots.forgetMemory({ botId, memoryId: dropped });
         expect(store.listMemory(botId)).toEqual([{ id: kept, text: "Releases ship from r/main." }]);
 
-        const missing = yield* Bots.forgetMemory({ botId, memoryId: dropped }).pipe(Effect.flip);
+        const missing = yield* httpFailure(Bots.forgetMemory({ botId, memoryId: dropped }));
         expect(missing.status).toBe(404);
       }),
     ),
@@ -1562,7 +1590,7 @@ describe("bot memory", () => {
     withHarness((h) =>
       Effect.gen(function* () {
         const { botId } = yield* Bots.createBot({ name: "Bot", modelSelection: MODEL });
-        const store = h.runtime.store();
+        const store = h.runtime.existingStore()!;
         yield* Bots.saveRole({ botId, role: "Watch CI." });
         const rule = store.addMemory(botId, "Never run bare t3 update.");
 
@@ -1570,7 +1598,7 @@ describe("bot memory", () => {
         expect(store.listMemory(botId)).toEqual([]);
         expect(
           yield* Effect.promise(() =>
-            NodeFSP.readFile(Bots.rolePath(h.runtime.botsDir, botId), "utf8"),
+            NodeFSP.readFile(NodePath.join(h.runtime.botsDir, botId, "role.md"), "utf8"),
           ),
         ).toBe("Watch CI.\n- Never run bare t3 update.");
       }),

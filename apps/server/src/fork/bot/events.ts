@@ -51,7 +51,7 @@ const observeThread = Effect.fn("ForkBot.observeThread")(function* (
   change: ThreadChange,
 ) {
   const runtime = yield* BotRuntime;
-  const store = runtime.store();
+  const store = yield* runtime.store;
   const botId = owned.botId;
   const touch = Effect.gen(function* () {
     if (owned.itemId !== null) store.updateItem(botId, owned.itemId, {}, yield* nowIso);
@@ -135,7 +135,7 @@ export const followThreads = Effect.fn("ForkBot.followThreads")(function* <E, R>
   const posted = new Set<string>();
   const showActivity = (botId: string, threadId: string, line: ActivityLine | null) => {
     if (line === null) return;
-    const since = runtime.store().workingSince(botId);
+    const since = runtime.existingStore()?.workingSince(botId) ?? null;
     const latest = runtime.activity.get(botId);
     if (since === null || (latest?.key === line.key && latest.since === since)) return;
     runtime.publishActivity(botId, { threadId, ...line, since });
@@ -170,7 +170,7 @@ export const followThreads = Effect.fn("ForkBot.followThreads")(function* <E, R>
     const shown = runtime.activity.get(runtime.ownedThreads.get(event.threadId) ?? "")?.key;
     const line = event.type === "turn-item.updated" ? activityLine(event.payload, shown) : null;
     if (event.type === "turn-item.updated" && (line === null || line.key === shown)) return;
-    const owned = runtime.store().getThread(event.threadId);
+    const owned = (yield* runtime.store).getThread(event.threadId);
     if (owned === null) return;
     if (event.type === "turn-item.updated") {
       if (owned.follow === "now" && !owned.takenOver)

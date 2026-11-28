@@ -6,6 +6,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
 import { ThreadManagementService } from "../orchestration-v2/ThreadManagementService.ts";
+import * as BotFiles from "./bot/BotFiles.ts";
 import * as BotRuntime from "./bot/BotRuntime.ts";
 import { startConnectors } from "./bot/connectors/registry.ts";
 import { followThreads, reconcileThreads } from "./bot/events.ts";
@@ -68,5 +69,7 @@ const botsLayer = Layer.effectDiscard(
 );
 
 export const layer = Layer.mergeAll(routesLayer, linkedThreadsLayer, botsLayer).pipe(
-  Layer.provide(Layer.merge(InboxRuntime.layer, BotRuntime.layer)),
+  Layer.provide(
+    Layer.merge(InboxRuntime.layer, BotRuntime.layer.pipe(Layer.provide(BotFiles.layer))),
+  ),
 );

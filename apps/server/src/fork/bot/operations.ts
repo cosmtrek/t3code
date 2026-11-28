@@ -1,12 +1,10 @@
-// @effect-diagnostics nodeBuiltinImport:off globalDate:off globalDateInEffect:off - role.md and the token are plain files; times are stored as ISO text.
+// @effect-diagnostics nodeBuiltinImport:off globalDate:off globalDateInEffect:off - UUIDs remain synchronous; calendar calculations still use local Date values.
 /**
  * Bots: create one, talk to it, and run its turns. A turn starts when the user writes, a routine
  * comes due, or one of its threads needs it; it runs in the bot's one work thread and acts through
  * the `t3bot` tools.
  */
 import * as NodeCrypto from "node:crypto";
-import * as NodeFSP from "node:fs/promises";
-import * as NodePath from "node:path";
 
 import { expandAssistantCitationsForProvider } from "@t3tools/shared/assistantCitations";
 import type { HtmlRenderReference } from "@t3tools/shared/htmlRender";
@@ -35,10 +33,9 @@ import * as ThreadMessageIntake from "../../orchestration-v2/ThreadMessageIntake
 import { ManagedProjectFolders } from "../../project/ManagedProjectFolders.ts";
 import * as ProviderRegistry from "../../provider/ProviderRegistry.ts";
 import { firstProviderDefault, ForkHttpError } from "../inbox/operations.ts";
-import { BotRuntime, type BotRuntimeShape } from "./BotRuntime.ts";
+import { BotRuntime } from "./BotRuntime.ts";
 import { buildPacket, chatPreview, RECENT_CHAT_LIMIT, type Notebook } from "./packet.ts";
 import { nextDueAt } from "./routines.ts";
-import { listSkills, ownSkillsPath, sharedSkillsPath } from "./skills.ts";
 import { briefFor, listInstances } from "./connectors/registry.ts";
 import {
   connectorSettings,
@@ -88,58 +85,6 @@ export const decode = <S extends Schema.Top>(schema: S, input: unknown) =>
     Effect.mapError(() => badRequest("The request is not valid.")),
   );
 
-export const rolePath = (botsDir: string, botId: string) =>
-  NodePath.join(botsDir, botId, "role.md");
-/** The bot's own folder: its work thread runs here, and it keeps longer notes in `notes/`. */
-const workspacePath = (botsDir: string, botId: string) =>
-  NodePath.join(botsDir, botId, "workspace");
-const notesPath = (botsDir: string, botId: string) =>
-  NodePath.join(workspacePath(botsDir, botId), "notes");
-const NOTES_LISTED = 50;
-
-export interface NoteFile {
-  readonly name: string;
-  readonly bytes: number;
-  readonly updatedAt: string;
-}
-
-/** The files in the bot's notes folder, newest first. */
-const listNotes = (botsDir: string, botId: string) =>
-  Effect.promise(async (): Promise<ReadonlyArray<NoteFile>> => {
-    const dir = notesPath(botsDir, botId);
-    const entries = await NodeFSP.readdir(dir, { withFileTypes: true }).catch(() => []);
-    const files = await Promise.all(
-      entries
-        .filter((entry) => entry.isFile() && !entry.name.startsWith("."))
-        .map(async (entry) => {
-          const stat = await NodeFSP.stat(NodePath.join(dir, entry.name));
-          return { name: entry.name, bytes: stat.size, updatedAt: stat.mtime.toISOString() };
-        }),
-    );
-    return files
-      .toSorted((left, right) => right.updatedAt.localeCompare(left.updatedAt))
-      .slice(0, NOTES_LISTED);
-  });
-
-const ensureWorkspace = async (botsDir: string, botId: string) => {
-  await NodeFSP.mkdir(notesPath(botsDir, botId), { recursive: true });
-  await NodeFSP.mkdir(ownSkillsPath(botsDir, botId), { recursive: true });
-  await NodeFSP.mkdir(sharedSkillsPath(botsDir), { recursive: true });
-};
-export const tokenPath = (botsDir: string, botId: string) => NodePath.join(botsDir, botId, "token");
-
-/** Each bot's tool token; written once, kept until the bot is deleted. */
-const writeToken = (botsDir: string, botId: string) =>
-  NodeFSP.writeFile(tokenPath(botsDir, botId), NodeCrypto.randomBytes(32).toString("hex"), {
-    mode: 0o600,
-    flag: "wx",
-  }).catch((error: NodeJS.ErrnoException) => {
-    if (error.code !== "EEXIST") throw error;
-  });
-
-export const readRole = (botsDir: string, botId: string) =>
-  Effect.promise(() => NodeFSP.readFile(rolePath(botsDir, botId), "utf8").catch(() => ""));
-
 const requireBot = Effect.fn("ForkBot.requireBot")(function* (botId: string) {
   const runtime = yield* BotRuntime;
   const bot = runtime.existingStore()?.getBot(botId) ?? null;
@@ -151,7 +96,7 @@ const requireBot = Effect.fn("ForkBot.requireBot")(function* (botId: string) {
 export const readNotebook = Effect.fn("ForkBot.readNotebook")(function* (botId: string) {
   const runtime = yield* BotRuntime;
   const threads = yield* ThreadManagement.ThreadManagementService;
-  const store = runtime.store();
+  const store = yield* runtime.store;
   const owned = store.listThreads(botId);
   const titles = yield* threads
     .getThreadTitles(owned.map((thread) => ThreadId.make(thread.threadId)))
@@ -287,7 +232,7 @@ export function activityLine(
 }
 
 /** The latest line since it started working, and the thread it came from. */
-const activityOf = (runtime: BotRuntimeShape, botId: string, since: string | null) => {
+const activityOf = (runtime: BotRuntime["Service"], botId: string, since: string | null) => {
   const latest = runtime.activity.get(botId);
   return since === null || latest?.since !== since
     ? null
@@ -301,7 +246,7 @@ const activityOf = (runtime: BotRuntimeShape, botId: string, since: string | nul
 export const readBot = Effect.fn("ForkBot.readBot")(function* (params: URLSearchParams) {
   const runtime = yield* BotRuntime;
   const bot = yield* requireBot(params.get("botId") ?? "");
-  const store = runtime.store();
+  const store = yield* runtime.store;
   const since = store.workingSince(bot.id);
   return {
     // A count from an earlier day is spent: today starts at zero.
@@ -310,16 +255,16 @@ export const readBot = Effect.fn("ForkBot.readBot")(function* (params: URLSearch
       turnsToday:
         bot.lastTurnDay === localDay(DateTime.toDateUtc(yield* DateTime.now)) ? bot.turnsToday : 0,
     },
-    role: yield* readRole(runtime.botsDir, bot.id),
+    role: yield* runtime.files.readRole(runtime.botsDir, bot.id),
     workingSince: since,
     activity: activityOf(runtime, bot.id, since),
     chat: store.recentChat(bot.id, CHAT_PAGE),
     notebook: yield* readNotebook(bot.id),
     questions: store.openQuestions(bot.id),
-    workspacePath: workspacePath(runtime.botsDir, bot.id),
-    notesPath: notesPath(runtime.botsDir, bot.id),
-    notes: yield* listNotes(runtime.botsDir, bot.id),
-    skills: yield* Effect.promise(() => listSkills(runtime.botsDir, bot.id)),
+    workspacePath: runtime.files.workspacePath(runtime.botsDir, bot.id),
+    notesPath: runtime.files.notesPath(runtime.botsDir, bot.id),
+    notes: yield* runtime.files.listNotes(runtime.botsDir, bot.id),
+    skills: yield* runtime.files.listSkills(runtime.botsDir, bot.id),
     // For its settings: the environment's connector instances, with what each kind adds.
     connectors: yield* Effect.forEach(yield* listInstances(), ({ connector, instance }) =>
       (connector.info?.(instance.id) ?? Effect.succeed({})).pipe(
@@ -340,29 +285,20 @@ export const readNote = Effect.fn("ForkBot.readNote")(function* (params: URLSear
   const runtime = yield* BotRuntime;
   const input = yield* decode(NoteInput, Object.fromEntries(params));
   const bot = yield* requireBot(input.botId);
-  if (NodePath.basename(input.name) !== input.name || input.name.startsWith(".")) {
+  if (!runtime.files.validName(input.name)) {
     return yield* badRequest("Name a file in the bot's folder.", "name");
   }
   const base =
     input.kind === "skill"
-      ? ownSkillsPath(runtime.botsDir, bot.id)
+      ? runtime.files.ownSkillsPath(runtime.botsDir, bot.id)
       : input.kind === "shared-skill"
-        ? sharedSkillsPath(runtime.botsDir)
-        : notesPath(runtime.botsDir, bot.id);
-  const filePath =
-    input.kind === undefined || input.kind === "note"
-      ? NodePath.join(base, input.name)
-      : NodePath.join(base, input.name, "SKILL.md");
-  // The bot writes these folders, so a symlink in them must not reach past them.
-  const text = yield* Effect.promise(async () => {
-    try {
-      const [root, real] = await Promise.all([NodeFSP.realpath(base), NodeFSP.realpath(filePath)]);
-      if (!real.startsWith(root + NodePath.sep)) return null;
-      return await NodeFSP.readFile(real, "utf8");
-    } catch {
-      return null;
-    }
-  });
+        ? runtime.files.sharedSkillsPath(runtime.botsDir)
+        : runtime.files.notesPath(runtime.botsDir, bot.id);
+  const text = yield* runtime.files.readNote(
+    base,
+    input.name,
+    input.kind === "skill" || input.kind === "shared-skill",
+  );
   if (text === null) {
     return yield* new ForkHttpError({ status: 404, code: "not_found", detail: "No such note." });
   }
@@ -410,20 +346,17 @@ export const createBot = Effect.fn("ForkBot.createBot")(function* (input: unknow
     ),
   );
   const id = newId("bot");
-  yield* Effect.tryPromise({
-    try: async () => {
-      await ensureWorkspace(runtime.botsDir, id);
-      await writeToken(runtime.botsDir, id);
-    },
-    catch: internal,
-  });
-  runtime
-    .store()
-    .createBot(
-      { id, name, modelSelection, createdAt: yield* nowIso },
-      decoded.runtimeMode ?? (yield* runtimeModeFor(modelSelection, "auto")),
-      brief === "" ? undefined : { id: newId("msg"), text: brief },
-    );
+  yield* runtime.files
+    .ensureWorkspace(runtime.botsDir, id)
+    .pipe(Effect.mapError((error) => internal(error.reason.cause)));
+  yield* runtime.files
+    .writeToken(runtime.botsDir, id)
+    .pipe(Effect.mapError((error) => internal(error.reason.cause)));
+  (yield* runtime.store).createBot(
+    { id, name, modelSelection, createdAt: yield* nowIso },
+    decoded.runtimeMode ?? (yield* runtimeModeFor(modelSelection, "auto")),
+    brief === "" ? undefined : { id: newId("msg"), text: brief },
+  );
   yield* runtime.active.open;
   runtime.publish(id);
   if (brief !== "") yield* wake(id);
@@ -445,11 +378,10 @@ export const saveRole = Effect.fn("ForkBot.saveRole")(function* (input: unknown)
   if (decoded.role.length > ROLE_CHARS) {
     return yield* badRequest(`Keep the role under ${ROLE_CHARS} characters.`, "role");
   }
-  yield* Effect.tryPromise({
-    try: () => NodeFSP.writeFile(rolePath(runtime.botsDir, bot.id), decoded.role),
-    catch: internal,
-  });
-  runtime.store().enqueue(bot.id, "The user edited your role.", false, yield* nowIso);
+  yield* runtime.files
+    .writeRole(runtime.botsDir, bot.id, decoded.role)
+    .pipe(Effect.mapError((error) => internal(error.reason.cause)));
+  (yield* runtime.store).enqueue(bot.id, "The user edited your role.", false, yield* nowIso);
   runtime.publish(bot.id);
   return {};
 });
@@ -460,18 +392,17 @@ const BotIdInput = Schema.Struct({ botId: Schema.String });
 export const deleteBot = Effect.fn("ForkBot.deleteBot")(function* (input: unknown) {
   const runtime = yield* BotRuntime;
   const bot = yield* requireBot((yield* decode(BotIdInput, input)).botId);
+  const store = yield* runtime.store;
   yield* runtime.turnLock.withPermit(
     Effect.sync(() => {
-      runtime.store().deleteBot(bot.id);
+      store.deleteBot(bot.id);
       if (bot.workThreadId !== null) runtime.workThreads.delete(bot.workThreadId);
       for (const [threadId, owner] of runtime.ownedThreads) {
         if (owner === bot.id) runtime.ownedThreads.delete(threadId);
       }
     }),
   );
-  yield* Effect.promise(() =>
-    NodeFSP.rm(NodePath.join(runtime.botsDir, bot.id), { recursive: true, force: true }),
-  );
+  yield* runtime.files.removeBot(runtime.botsDir, bot.id);
   runtime.publish(bot.id);
   return {};
 });
@@ -487,9 +418,13 @@ export const sendMessage = Effect.fn("ForkBot.sendMessage")(function* (input: un
     return yield* badRequest(`Write 1 to ${MESSAGE_CHARS} characters.`, "text");
   }
   const messageId = newId("msg");
-  runtime
-    .store()
-    .addChat({ id: messageId, botId: bot.id, role: "user", text, createdAt: yield* nowIso });
+  (yield* runtime.store).addChat({
+    id: messageId,
+    botId: bot.id,
+    role: "user",
+    text,
+    createdAt: yield* nowIso,
+  });
   runtime.publish(bot.id);
   if (!(yield* steer(bot, messageId, text))) yield* wake(bot.id);
   return { messageId };
@@ -501,7 +436,7 @@ const steer = Effect.fn("ForkBot.steer")(function* (bot: Bot, messageId: string,
   const threads = yield* ThreadManagement.ThreadManagementService;
   return yield* runtime.turnLock.withPermit(
     Effect.gen(function* () {
-      const store = runtime.store();
+      const store = yield* runtime.store;
       const turn = store.getTurn(bot.id);
       if (turn === null || bot.workProjectId === null) return false;
       const sent = yield* Effect.result(
@@ -527,9 +462,13 @@ const steer = Effect.fn("ForkBot.steer")(function* (bot: Bot, messageId: string,
 
 export const postError = Effect.fn("ForkBot.postError")(function* (botId: string, text: string) {
   const runtime = yield* BotRuntime;
-  runtime
-    .store()
-    .addChat({ id: newId("msg"), botId, role: "error", text, createdAt: yield* nowIso });
+  (yield* runtime.store).addChat({
+    id: newId("msg"),
+    botId,
+    role: "error",
+    text,
+    createdAt: yield* nowIso,
+  });
   runtime.publish(botId);
 });
 
@@ -623,7 +562,7 @@ const dispatch = Effect.fn("ForkBot.dispatch")(function* (
     interactionMode: "default",
     workspaceStrategy: {
       type: "existing_worktree",
-      worktreePath: workspacePath(runtime.botsDir, bot.id),
+      worktreePath: runtime.files.workspacePath(runtime.botsDir, bot.id),
     },
     initialMessage: { messageId, text: packet, attachments: [] },
     createdBy: "system",
@@ -631,7 +570,7 @@ const dispatch = Effect.fn("ForkBot.dispatch")(function* (
   });
   const run = launched.projection.runs.find((candidate) => candidate.userMessageId === messageId);
   if (run === undefined) return yield* internal("The work thread started no run.");
-  runtime.store().setWorkThread(bot.id, launched.threadId, projectId);
+  (yield* runtime.store).setWorkThread(bot.id, launched.threadId, projectId);
   runtime.workThreads.set(launched.threadId, bot.id);
   return { threadId: launched.threadId, runId: run.id };
 });
@@ -645,7 +584,7 @@ const sameModel = (left: ModelSelection, right: ModelSelection) =>
 export const shellQuote = (word: string) =>
   /^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replaceAll("'", `'\\''`)}'`;
 
-const toolCommand = (runtime: BotRuntimeShape, botId: string) =>
+const toolCommand = (runtime: BotRuntime["Service"], botId: string) =>
   `${shellQuote(runtime.cliPath)} --bot ${shellQuote(botId)}`;
 
 /** Starts a turn when the user wrote or something that wakes the bot is queued, unless one runs. */
@@ -653,7 +592,7 @@ const wake = Effect.fn("ForkBot.wake")(function* (botId: string) {
   const runtime = yield* BotRuntime;
   const failure = yield* runtime.turnLock.withPermit(
     Effect.gen(function* () {
-      const store = runtime.store();
+      const store = yield* runtime.store;
       const bot = store.getBot(botId);
       if (bot === null || bot.paused || store.getTurn(botId) !== null) return null;
       const waiting = store.waitingMessages(botId);
@@ -669,10 +608,8 @@ const wake = Effect.fn("ForkBot.wake")(function* (botId: string) {
           : null;
       }
       yield* runtime.ensureCli;
-      yield* Effect.promise(async () => {
-        await writeToken(runtime.botsDir, botId);
-        await ensureWorkspace(runtime.botsDir, botId);
-      });
+      yield* runtime.files.writeToken(runtime.botsDir, botId);
+      yield* runtime.files.ensureWorkspace(runtime.botsDir, botId);
       const answered = store
         .recentChat(botId, RECENT_CHAT_LIMIT + waiting.length)
         .filter((message) => !waiting.some((candidate) => candidate.id === message.id));
@@ -691,14 +628,14 @@ const wake = Effect.fn("ForkBot.wake")(function* (botId: string) {
       const packet = buildPacket(
         {
           name: bot.name,
-          role: yield* readRole(runtime.botsDir, botId),
+          role: yield* runtime.files.readRole(runtime.botsDir, botId),
           tool: toolCommand(runtime, botId),
           notebook: yield* readNotebook(botId),
-          notesPath: notesPath(runtime.botsDir, botId),
-          notes: yield* listNotes(runtime.botsDir, botId),
-          skillsPath: ownSkillsPath(runtime.botsDir, botId),
-          sharedSkillsPath: sharedSkillsPath(runtime.botsDir),
-          skills: yield* Effect.promise(() => listSkills(runtime.botsDir, botId)),
+          notesPath: runtime.files.notesPath(runtime.botsDir, botId),
+          notes: yield* runtime.files.listNotes(runtime.botsDir, botId),
+          skillsPath: runtime.files.ownSkillsPath(runtime.botsDir, botId),
+          sharedSkillsPath: runtime.files.sharedSkillsPath(runtime.botsDir),
+          skills: yield* runtime.files.listSkills(runtime.botsDir, botId),
           questions: store.openQuestions(botId),
           recentChat: answered,
           newMessages: waiting,
@@ -771,7 +708,7 @@ export const withShown = Effect.fn("ForkBot.withShown")(function* (
   turn: Turn,
   last: ChatPost | null,
 ) {
-  const store = (yield* BotRuntime).store();
+  const store = yield* (yield* BotRuntime).store;
   const items =
     bot.workProjectId === null
       ? []
@@ -841,7 +778,7 @@ export const finishRun = Effect.fn("ForkBot.finishRun")(function* (
   const runtime = yield* BotRuntime;
   const ended = yield* runtime.turnLock.withPermit(
     Effect.gen(function* () {
-      const store = runtime.store();
+      const store = yield* runtime.store;
       const bot = store.getBot(botId);
       const turn = store.getTurn(botId);
       if (bot === null || turn === null || turn.runId !== runId) return false;
@@ -898,7 +835,7 @@ export const notify = Effect.fn("ForkBot.notify")(function* (
   wakes: boolean,
 ) {
   const runtime = yield* BotRuntime;
-  runtime.store().enqueue(botId, text, wakes, yield* nowIso);
+  (yield* runtime.store).enqueue(botId, text, wakes, yield* nowIso);
   runtime.publish(botId);
   if (wakes) yield* wake(botId);
 });
@@ -936,8 +873,7 @@ const fireRoutine = Effect.fn("ForkBot.fireRoutine")(function* (
   dueAt: Date,
   now: Date,
 ) {
-  const routine = (yield* BotRuntime)
-    .store()
+  const routine = (yield* (yield* BotRuntime).store)
     .listRoutines(botId)
     .find((candidate) => candidate.id === routineId);
   if (routine === undefined) return false;
@@ -976,7 +912,7 @@ export const reopenItem = Effect.fn("ForkBot.reopenItem")(function* (input: unkn
   const runtime = yield* BotRuntime;
   const decoded = yield* decode(ItemInput, input);
   const bot = yield* requireBot(decoded.botId);
-  if (!runtime.store().updateItem(bot.id, decoded.itemId, {}, yield* nowIso)) {
+  if (!(yield* runtime.store).updateItem(bot.id, decoded.itemId, {}, yield* nowIso)) {
     return yield* new ForkHttpError({
       status: 404,
       code: "not_found",
@@ -994,7 +930,7 @@ export const forgetMemory = Effect.fn("ForkBot.forgetMemory")(function* (input: 
   const runtime = yield* BotRuntime;
   const decoded = yield* decode(MemoryInput, input);
   const bot = yield* requireBot(decoded.botId);
-  if (!runtime.store().removeMemory(bot.id, decoded.memoryId)) {
+  if (!(yield* runtime.store).removeMemory(bot.id, decoded.memoryId)) {
     return yield* new ForkHttpError({
       status: 404,
       code: "not_found",
@@ -1010,7 +946,7 @@ export const moveMemoryToRole = Effect.fn("ForkBot.moveMemoryToRole")(function* 
   const runtime = yield* BotRuntime;
   const decoded = yield* decode(MemoryInput, input);
   const bot = yield* requireBot(decoded.botId);
-  const store = runtime.store();
+  const store = yield* runtime.store;
   const note = store.listMemory(bot.id).find((entry) => entry.id === decoded.memoryId);
   if (note === undefined) {
     return yield* new ForkHttpError({
@@ -1019,14 +955,13 @@ export const moveMemoryToRole = Effect.fn("ForkBot.moveMemoryToRole")(function* 
       detail: "That memory does not exist.",
     });
   }
-  const role = appendRule(yield* readRole(runtime.botsDir, bot.id), note.text);
+  const role = appendRule(yield* runtime.files.readRole(runtime.botsDir, bot.id), note.text);
   if (role.length > ROLE_CHARS) {
     return yield* badRequest(`Keep the role under ${ROLE_CHARS} characters.`, "role");
   }
-  yield* Effect.tryPromise({
-    try: () => NodeFSP.writeFile(rolePath(runtime.botsDir, bot.id), role),
-    catch: internal,
-  });
+  yield* runtime.files
+    .writeRole(runtime.botsDir, bot.id, role)
+    .pipe(Effect.mapError((error) => internal(error.reason.cause)));
   store.removeMemory(bot.id, note.id);
   store.enqueue(bot.id, `The user moved memory ${note.id} into your role.`, false, yield* nowIso);
   runtime.publish(bot.id);
@@ -1064,7 +999,7 @@ export const markSeen = Effect.fn("ForkBot.markSeen")(function* (input: unknown)
   const runtime = yield* BotRuntime;
   const decoded = yield* decode(SeenInput, input);
   const bot = yield* requireBot(decoded.botId);
-  if (runtime.store().markSeen(bot.id)) runtime.publish(bot.id);
+  if ((yield* runtime.store).markSeen(bot.id)) runtime.publish(bot.id);
   return {};
 });
 
@@ -1075,7 +1010,7 @@ export const setPaused = Effect.fn("ForkBot.setPaused")(function* (input: unknow
   const runtime = yield* BotRuntime;
   const decoded = yield* decode(PauseInput, input);
   const bot = yield* requireBot(decoded.botId);
-  runtime.store().setPaused(bot.id, decoded.paused);
+  (yield* runtime.store).setPaused(bot.id, decoded.paused);
   runtime.publish(bot.id);
   if (!decoded.paused) yield* wake(bot.id);
   return {};
@@ -1111,7 +1046,7 @@ export const saveSettings = Effect.fn("ForkBot.saveSettings")(function* (input: 
   const runtime = yield* BotRuntime;
   const decoded = yield* decode(SettingsInput, input);
   const bot = yield* requireBot(decoded.botId);
-  const store = runtime.store();
+  const store = yield* runtime.store;
   const { turnsPerDay, maxThreads } = decoded.settings;
   const runtimeMode = decoded.settings.runtimeMode ?? bot.settings.runtimeMode;
   if (!Number.isInteger(turnsPerDay) || turnsPerDay < 1 || turnsPerDay > 10_000) {
@@ -1219,7 +1154,7 @@ export const handBack = Effect.fn("ForkBot.handBack")(function* (input: unknown)
   const runtime = yield* BotRuntime;
   const decoded = yield* decode(HandBackInput, input);
   const bot = yield* requireBot(decoded.botId);
-  const store = runtime.store();
+  const store = yield* runtime.store;
   const owned = store.getThread(decoded.threadId);
   if (owned === null || owned.botId !== bot.id) {
     return yield* badRequest("That thread is not this bot's.", "threadId");

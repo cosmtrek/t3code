@@ -1,11 +1,8 @@
-// @effect-diagnostics nodeBuiltinImport:off - Writes the tool script next to the bots' state.
 /**
  * The `t3bot` tool a bot runs from its work thread's shell. The server writes it at startup, so it
  * always matches the running server: a shell wrapper around the server's own executable that
  * reads the server's current address on each run (desktop binds a port only known later).
  */
-import * as NodeFSP from "node:fs/promises";
-import * as NodePath from "node:path";
 import * as NodeSea from "node:sea";
 
 import { runBotTool } from "./toolCli.ts";
@@ -29,17 +26,19 @@ const seaWrapper = (botsDir: string, stateDir: string) =>
 const nodeWrapper = (scriptPath: string) =>
   `${header}ELECTRON_RUN_AS_NODE=1 exec ${JSON.stringify(process.execPath)} ${JSON.stringify(scriptPath)} "$@"\n`;
 
-/** Writes `bin/t3bot` and returns its path. */
-export async function writeCli(botsDir: string, stateDir: string): Promise<string> {
-  const binDir = NodePath.join(botsDir, "bin");
-  const cliPath = NodePath.join(binDir, "t3bot");
-  await NodeFSP.mkdir(binDir, { recursive: true });
-  if (NodeSea.isSea()) {
-    await NodeFSP.writeFile(cliPath, seaWrapper(botsDir, stateDir), { mode: 0o755 });
-    return cliPath;
-  }
-  const scriptPath = NodePath.join(binDir, "t3bot.mjs");
-  await NodeFSP.writeFile(scriptPath, script(botsDir, stateDir));
-  await NodeFSP.writeFile(cliPath, nodeWrapper(scriptPath), { mode: 0o755 });
-  return cliPath;
+export function cliFiles(
+  botsDir: string,
+  stateDir: string,
+  scriptPath: string,
+): ReadonlyArray<{
+  readonly name: string;
+  readonly content: string;
+  readonly mode?: number;
+}> {
+  if (NodeSea.isSea())
+    return [{ name: "t3bot", content: seaWrapper(botsDir, stateDir), mode: 0o755 }];
+  return [
+    { name: "t3bot.mjs", content: script(botsDir, stateDir) },
+    { name: "t3bot", content: nodeWrapper(scriptPath), mode: 0o755 },
+  ];
 }

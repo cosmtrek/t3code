@@ -9,7 +9,7 @@ import {
 } from "@t3tools/shared/assistantCitations";
 
 import { describeSchedule } from "./routines.ts";
-import type { Skill } from "./skills.ts";
+import type { Skill } from "./BotFiles.ts";
 import type { ChatMessage, Item, MemoryNote, OwnedThread, Question, Routine } from "./store.ts";
 
 /** Chat before the new messages; older chat lives in the work thread or is not needed. */

@@ -15,6 +15,7 @@ import * as ByteSize from "effect/ByteSize";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import type * as PlatformError from "effect/PlatformError";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
@@ -23,7 +24,7 @@ import * as HttpIncomingMessage from "effect/http/HttpIncomingMessage";
 
 import { authenticateMediaRequest } from "../auth/http.ts";
 import { requestUrl } from "../requestUrl.ts";
-import { BotRuntime, type BotEvent, type BotRuntimeShape } from "./bot/BotRuntime.ts";
+import { BotRuntime, type BotEvent, type BotRuntimeError } from "./bot/BotRuntime.ts";
 import * as Bots from "./bot/operations.ts";
 import { answerQuestion, authenticateTool, runTool } from "./bot/tools.ts";
 import type { HubEvent } from "./channels/hub.ts";
@@ -108,12 +109,16 @@ const fileBody = Effect.gen(function* () {
 });
 
 const makeRoute =
-  (runtime: InboxRuntimeShape, bots: BotRuntimeShape) =>
+  (runtime: InboxRuntimeShape, bots: BotRuntime["Service"]) =>
   <A, R>(
     method: "GET" | "POST",
     path: HttpRouter.PathInput,
     scope: AuthEnvironmentScope,
-    handle: Effect.Effect<A, Inbox.ForkHttpError, R>,
+    handle: Effect.Effect<
+      A,
+      Inbox.ForkHttpError | BotRuntimeError | PlatformError.PlatformError,
+      R
+    >,
   ) =>
     HttpRouter.add(
       method,
@@ -144,7 +149,7 @@ const channelIdOf = (input: unknown) =>
       );
 
 /** One stream for every fork view: inbox and channel changes, and which bot changed. */
-const eventsRoute = (runtime: InboxRuntimeShape, bots: BotRuntimeShape) =>
+const eventsRoute = (runtime: InboxRuntimeShape, bots: BotRuntime["Service"]) =>
   HttpRouter.add(
     "GET",
     `${INBOX}/events`,
@@ -179,7 +184,7 @@ const eventsRoute = (runtime: InboxRuntimeShape, bots: BotRuntimeShape) =>
   );
 
 /** The `t3bot` CLI in a bot's work thread: no session, the bot's own token instead. */
-const toolRoute = (runtime: InboxRuntimeShape, bots: BotRuntimeShape) =>
+const toolRoute = (runtime: InboxRuntimeShape, bots: BotRuntime["Service"]) =>
   HttpRouter.add(
     "POST",
     `${BOTS}/tool`,
@@ -221,7 +226,7 @@ const mediaRoute = (route: ReturnType<typeof makeRoute>) =>
     }),
   );
 
-const routes = (runtime: InboxRuntimeShape, bots: BotRuntimeShape) => {
+const routes = (runtime: InboxRuntimeShape, bots: BotRuntime["Service"]) => {
   const route = makeRoute(runtime, bots);
   return Layer.mergeAll(
     route("GET", CHANNELS, AuthOrchestrationReadScope, Inbox.listChannels()),

@@ -207,7 +207,7 @@ const info: NonNullable<Connector["info"]> = Effect.fn("ForkBot.chat.info")(func
 const afterSave: NonNullable<Connector["afterSave"]> = Effect.fn("ForkBot.chat.afterSave")(
   function* (botId, instanceId) {
     const runtime = yield* BotRuntime;
-    const store = runtime.store();
+    const store = yield* runtime.store;
     const saved = store.getBot(botId);
     if (saved === null || !chatConfig(connectorSettings(saved.settings, instanceId)).mentions) {
       return;

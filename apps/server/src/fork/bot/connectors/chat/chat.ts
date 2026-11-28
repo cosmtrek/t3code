@@ -381,7 +381,7 @@ export const sendAsUser = Effect.fn("ForkBot.sendAsUser")(function* (input: {
   readonly text: string;
   readonly replyToId?: string;
 }) {
-  const store = (yield* BotRuntime).store();
+  const store = yield* (yield* BotRuntime).store;
   // People on the newest page, and whoever wrote the message it answers.
   const known = input.text.includes("@")
     ? [
@@ -431,7 +431,7 @@ export const userWroteSince = Effect.fn("ForkBot.userWroteSince")(function* (
   at: string,
 ) {
   if (!later(target.raw?.lastSelfMessageAt, at)) return false;
-  const store = (yield* BotRuntime).store();
+  const store = yield* (yield* BotRuntime).store;
   const messages = yield* newestPage(target);
   const sent = State.sentByBots(
     store,

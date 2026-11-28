@@ -1,19 +1,22 @@
-// @effect-diagnostics nodeBuiltinImport:off - node:fs checks for the store file before opening it.
 /**
  * Holds the bot store for the life of the server, under `<stateDir>/bots/`. Nothing is opened
  * until the first bot exists, so an environment without bots runs none of this.
  */
-import * as NodeFS from "node:fs";
-import * as NodePath from "node:path";
 
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Latch from "effect/Latch";
+import * as Fiber from "effect/Fiber";
+import * as Scope from "effect/Scope";
 import * as Layer from "effect/Layer";
 import * as Semaphore from "effect/Semaphore";
 
 import * as ServerConfig from "../../config.ts";
-import { writeCli } from "./cli.ts";
+import * as BotFiles from "./BotFiles.ts";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
+import type * as PlatformError from "effect/PlatformError";
 import { BotStore } from "./store.ts";
 
 /** `bots` says a bot changed, so views refetch; `bot-activity` carries its turn's latest line. */
@@ -37,74 +40,117 @@ interface Activity {
   readonly since: string;
 }
 
-export interface BotRuntimeShape {
-  readonly botsDir: string;
-  /** The `t3bot` tool, written by `ensureCli`. */
-  readonly cliPath: string;
-  /** Writes the tool once per server run, so it matches this server. */
-  readonly ensureCli: Effect.Effect<void>;
-  /** The store, or null while no bot was ever created. */
-  readonly existingStore: () => BotStore | null;
-  /** The store, created on first use. */
-  readonly store: () => BotStore;
-  /** Opens once a bot exists; event following waits on it. */
-  readonly active: Latch.Latch;
-  /** Starting and ending turns, one at a time, so a bot never runs two. */
-  readonly turnLock: Semaphore.Semaphore;
-  /** Thread starts, one at a time, so concurrent starts respect the thread limit. */
-  readonly threadStartLock: Semaphore.Semaphore;
-  /** Work thread id to bot id, for one lookup per domain event. */
-  readonly workThreads: Map<string, string>;
-  /** Threads bots started, by id, to the bot that owns each. */
-  readonly ownedThreads: Map<string, string>;
-  /** By bot: the latest line its work thread or a thread it follows `now` showed, in memory only. */
-  readonly activity: Map<string, Activity>;
-  readonly publish: (botId: string) => void;
-  readonly publishActivity: (botId: string, activity: Activity) => void;
-  readonly subscribe: (listener: (event: BotEvent) => void) => () => void;
+export class BotRuntimeError extends Schema.TaggedError<BotRuntimeError>()("BotRuntimeError", {
+  cause: Schema.Defect(),
+}) {
+  override get message() {
+    return "The bot runtime could not acquire its resources.";
+  }
 }
 
-export class BotRuntime extends Context.Service<BotRuntime, BotRuntimeShape>()(
-  "t3/fork/bot/BotRuntime",
-) {}
+export class BotRuntime extends Context.Service<
+  BotRuntime,
+  {
+    readonly files: BotFiles.BotFiles["Service"];
+    readonly botsDir: string;
+    /** The `t3bot` tool, written by `ensureCli`. */
+    readonly cliPath: string;
+    /** Writes the tool once per server run, so it matches this server. */
+    readonly ensureCli: Effect.Effect<void, BotRuntimeError | PlatformError.PlatformError>;
+    /** The store, or null while no bot was ever created. */
+    readonly existingStore: () => BotStore | null;
+    /** The store, created on first use. */
+    readonly store: Effect.Effect<BotStore, BotRuntimeError>;
+    /** Opens once a bot exists; event following waits on it. */
+    readonly active: Latch.Latch;
+    /** Starting and ending turns, one at a time, so a bot never runs two. */
+    readonly turnLock: Semaphore.Semaphore;
+    /** Thread starts, one at a time, so concurrent starts respect the thread limit. */
+    readonly threadStartLock: Semaphore.Semaphore;
+    /** Work thread id to bot id, for one lookup per domain event. */
+    readonly workThreads: Map<string, string>;
+    /** Threads bots started, by id, to the bot that owns each. */
+    readonly ownedThreads: Map<string, string>;
+    /** By bot: the latest line its work thread or a thread it follows `now` showed, in memory only. */
+    readonly activity: Map<string, Activity>;
+    readonly publish: (botId: string) => void;
+    readonly publishActivity: (botId: string, activity: Activity) => void;
+    readonly subscribe: (listener: (event: BotEvent) => void) => () => void;
+  }
+>()("t3/fork/bot/BotRuntime") {}
 
 const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
-  const botsDir = NodePath.join(config.stateDir, "bots");
-  const storePath = NodePath.join(botsDir, "bots.sqlite");
-  let store: BotStore | null = NodeFS.existsSync(storePath) ? new BotStore(storePath) : null;
+  const scope = yield* Scope.Scope;
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const files = yield* BotFiles.BotFiles;
+  const botsDir = path.join(config.stateDir, "bots");
+  const storePath = path.join(botsDir, "bots.sqlite");
+  let store: BotStore | null = null;
+  let closed = false;
+  const resourceLock = yield* Semaphore.make(1);
+  yield* Effect.addFinalizer(() =>
+    resourceLock.withPermit(
+      Effect.sync(() => {
+        closed = true;
+        store?.close();
+        store = null;
+      }),
+    ),
+  );
+  const getStore = resourceLock.withPermit(
+    Effect.try({
+      try: () => {
+        if (closed) throw new Error("The bot runtime is closed.");
+        store ??= new BotStore(storePath);
+        return store;
+      },
+      catch: (cause) => new BotRuntimeError({ cause }),
+    }),
+  );
+  if (yield* fs.exists(storePath).pipe(Effect.orElseSucceed(() => false))) yield* getStore;
+  const restored = yield* Effect.try({
+    try: () => ({ bots: store?.listBots() ?? [], threads: store?.listThreads() ?? [] }),
+    catch: (cause) => new BotRuntimeError({ cause }),
+  });
   const workThreads = new Map<string, string>();
-  for (const bot of store?.listBots() ?? []) {
+  for (const bot of restored.bots) {
     if (bot.workThreadId !== null) workThreads.set(bot.workThreadId, bot.id);
   }
   const ownedThreads = new Map(
-    (store?.listThreads() ?? []).map((thread) => [thread.threadId, thread.botId] as const),
+    restored.threads.map((thread) => [thread.threadId, thread.botId] as const),
   );
-  const active = yield* Latch.make((store?.listBots().length ?? 0) > 0);
+  const active = yield* Latch.make(restored.bots.length > 0);
   const turnLock = yield* Semaphore.make(1);
   const threadStartLock = yield* Semaphore.make(1);
   const listeners = new Set<(event: BotEvent) => void>();
   const activity = new Map<string, Activity>();
   let cliWritten = false;
 
-  yield* Effect.addFinalizer(() => Effect.sync(() => store?.close()));
-
   return {
     botsDir,
-    cliPath: NodePath.join(botsDir, "bin", "t3bot"),
+    files,
+    cliPath: path.join(botsDir, "bin", "t3bot"),
     ensureCli: Effect.suspend(() =>
-      cliWritten
-        ? Effect.void
-        : Effect.promise(() => writeCli(botsDir, config.stateDir)).pipe(
-            Effect.tap(() => Effect.sync(() => (cliWritten = true))),
-            Effect.asVoid,
-          ),
+      closed
+        ? Effect.fail(new BotRuntimeError({ cause: new Error("The bot runtime is closed.") }))
+        : resourceLock
+            .withPermit(
+              Effect.gen(function* () {
+                if (closed)
+                  return yield* new BotRuntimeError({
+                    cause: new Error("The bot runtime is closed."),
+                  });
+                if (cliWritten) return;
+                yield* files.writeCli(botsDir, config.stateDir);
+                cliWritten = true;
+              }),
+            )
+            .pipe(Effect.forkIn(scope), Effect.flatMap(Fiber.join)),
     ),
     existingStore: () => store,
-    store: () => {
-      store ??= new BotStore(storePath);
-      return store;
-    },
+    store: getStore,
     active,
     turnLock,
     threadStartLock,
@@ -131,7 +177,7 @@ const make = Effect.gen(function* () {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
-  } satisfies BotRuntimeShape;
+  } satisfies BotRuntime["Service"];
 });
 
 export const layer = Layer.effect(BotRuntime, make);

@@ -439,8 +439,13 @@ export class BotStore {
   constructor(filePath: string) {
     if (filePath !== ":memory:") NodeFS.mkdirSync(NodePath.dirname(filePath), { recursive: true });
     this.db = new NodeSqlite.DatabaseSync(filePath);
-    this.db.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;");
-    this.migrate();
+    try {
+      this.db.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;");
+      this.migrate();
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
   }
 
   private migrate() {

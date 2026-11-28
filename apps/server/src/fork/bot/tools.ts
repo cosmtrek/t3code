@@ -4,7 +4,6 @@
  * happen here, so every action a bot takes passes the same place.
  */
 import * as NodeCrypto from "node:crypto";
-import * as NodeFSP from "node:fs/promises";
 
 import {
   CommandId,
@@ -35,12 +34,9 @@ import {
   notify,
   nowIso,
   readNotebook,
-  readRole,
-  rolePath,
   runtimeModeFor,
   modelFlags,
   threadModelFor,
-  tokenPath,
   withShown,
   ROLE_CHARS,
   appendRule,
@@ -176,14 +172,7 @@ export const authenticateTool = Effect.fn("ForkBot.authenticateTool")(function* 
   const given = authorization?.replace(/^Bearer\s+/i, "").trim() ?? "";
   // Only a stored bot's id becomes a path, so the request cannot point the read elsewhere.
   const known = runtime.existingStore()?.getBot(request.bot) != null;
-  const expected = known
-    ? yield* Effect.promise(() =>
-        NodeFSP.readFile(tokenPath(runtime.botsDir, request.bot), "utf8").then(
-          (value) => value.trim(),
-          () => null,
-        ),
-      )
-    : null;
+  const expected = known ? yield* runtime.files.readToken(runtime.botsDir, request.bot) : null;
   const ok =
     expected !== null &&
     given.length === expected.length &&
@@ -235,7 +224,7 @@ const gate = Effect.fn("ForkBot.gate")(function* (
 ) {
   if (call.approved === true) return null;
   const runtime = yield* BotRuntime;
-  const store = runtime.store();
+  const store = yield* runtime.store;
   if (decide({ permission, overBudget }) === "allow") return null;
   const now = yield* Clock.currentTimeMillis;
   const id = store.addQuestion({
@@ -258,7 +247,7 @@ export const runTool = Effect.fn("ForkBot.runTool")(function* (input: ToolCall) 
   const [command, sub, ...rest] = positional;
   const botId = input.bot;
   const runtime = yield* BotRuntime;
-  const store = runtime.store();
+  const store = yield* runtime.store;
   const at = yield* nowIso;
   const touched = (output: string) => {
     runtime.publish(botId);
@@ -289,7 +278,7 @@ export const runTool = Effect.fn("ForkBot.runTool")(function* (input: ToolCall) 
     case "notebook":
       return renderNotebook(yield* readNotebook(botId));
     case "role": {
-      const current = yield* readRole(runtime.botsDir, botId);
+      const current = yield* runtime.files.readRole(runtime.botsDir, botId);
       if (sub === undefined) return current || "(no role yet)";
       if (sub !== "edit" && sub !== "add")
         return yield* fail("role | role add <rule> | role edit -");
@@ -312,7 +301,7 @@ export const runTool = Effect.fn("ForkBot.runTool")(function* (input: ToolCall) 
         sub === "add" ? text : roleChanges(current, role),
       );
       if (asked !== null) return asked;
-      yield* Effect.promise(() => NodeFSP.writeFile(rolePath(runtime.botsDir, botId), role));
+      yield* runtime.files.writeRole(runtime.botsDir, botId, role);
       return touched(sub === "add" ? "Rule added to your role." : "Role replaced.");
     }
     case "item": {
@@ -408,7 +397,7 @@ const routineCommand = Effect.fn("ForkBot.routineCommand")(function* (
   stdin: string,
 ) {
   const runtime = yield* BotRuntime;
-  const store = runtime.store();
+  const store = yield* runtime.store;
   const now = DateTime.toDateUtc(yield* DateTime.now);
   if (sub === "list") {
     const routines = store.listRoutines(botId);
@@ -578,7 +567,7 @@ const threadCommand = Effect.fn("ForkBot.threadCommand")(function* (
   const stdin = call.stdin;
   const runtime = yield* BotRuntime;
   const threads = yield* ThreadManagement.ThreadManagementService;
-  const store = runtime.store();
+  const store = yield* runtime.store;
   const bot = store.getBot(botId)!;
 
   if (sub === "list") {
@@ -764,7 +753,7 @@ const threadCommand = Effect.fn("ForkBot.threadCommand")(function* (
 
 /** Earlier builds had one `chat` command for every channel; each channel is its own now. */
 const chatMoved = Effect.fn("ForkBot.chatMoved")(function* (botId: string) {
-  const bot = (yield* BotRuntime).store().getBot(botId)!;
+  const bot = (yield* (yield* BotRuntime).store).getBot(botId)!;
   const chats = (yield* enabledFor(bot)).filter((entry) => entry.instance.kind === "chat");
   return yield* fail(
     chats.length === 0
@@ -779,7 +768,7 @@ const chatMoved = Effect.fn("ForkBot.chatMoved")(function* (botId: string) {
  */
 const connectorCommand = Effect.fn("ForkBot.connectorCommand")(function* (call: ToolCall) {
   const [command, operation] = call.argv;
-  const bot = (yield* BotRuntime).store().getBot(call.bot)!;
+  const bot = (yield* (yield* BotRuntime).store).getBot(call.bot)!;
   const entry = (yield* listInstances()).find(
     (candidate) => candidate.callable && candidate.instance.id === command,
   );
