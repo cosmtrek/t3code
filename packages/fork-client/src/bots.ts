@@ -1,4 +1,3 @@
-// @effect-diagnostics globalDate:off - Chat breaks compare local calendar days of ISO timestamps.
 import type { ModelSelection, RuntimeMode } from "@t3tools/contracts";
 import type { HtmlRenderReference } from "@t3tools/shared/htmlRender";
 
@@ -220,6 +219,7 @@ export function botWorkThreadKeys(
 /** Posts made together, such as a reply and the pages it showed, read as one. */
 const SAME_POST_MS = 5_000;
 const LONG_GAP_MS = 10 * 60_000;
+const localDay = new Intl.DateTimeFormat("en-CA");
 
 /**
  * Whether the chat marks the time above `message`: when the bot posts again without the user
@@ -228,12 +228,13 @@ const LONG_GAP_MS = 10 * 60_000;
 export function startsChatBreak(
   previous: Pick<BotChatMessage, "role" | "createdAt"> | undefined,
   message: Pick<BotChatMessage, "role" | "createdAt">,
+  dayOf: (epochMs: number) => string = localDay.format,
 ): boolean {
   if (previous === undefined) return false;
-  const before = new Date(previous.createdAt);
-  const at = new Date(message.createdAt);
-  const gap = at.getTime() - before.getTime();
+  const before = Date.parse(previous.createdAt);
+  const at = Date.parse(message.createdAt);
+  const gap = at - before;
   if (Number.isNaN(gap)) return false;
-  if (gap >= LONG_GAP_MS || at.toDateString() !== before.toDateString()) return true;
+  if (gap >= LONG_GAP_MS || dayOf(at) !== dayOf(before)) return true;
   return previous.role !== "user" && message.role !== "user" && gap >= SAME_POST_MS;
 }

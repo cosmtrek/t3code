@@ -1,4 +1,3 @@
-// @effect-diagnostics globalDate:off - Fixed local wall-clock instants test the day break.
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -92,9 +91,10 @@ describe("startsChatBreak", () => {
     expect(
       startsChatBreak(at("bot", "2026-11-28T06:00:00Z"), at("user", "2026-11-28T06:30:00Z")),
     ).toBe(true);
-    const evening = new Date(2026, 10, 27, 23, 58).toISOString();
-    const morning = new Date(2026, 10, 28, 0, 1).toISOString();
-    expect(startsChatBreak(at("bot", evening), at("user", morning))).toBe(true);
+    const utcDay = new Intl.DateTimeFormat("en-CA", { timeZone: "UTC" }).format;
+    const evening = at("bot", "2026-11-27T23:58:00Z");
+    const morning = at("user", "2026-11-28T00:01:00Z");
+    expect(startsChatBreak(evening, morning, utcDay)).toBe(true);
     expect(
       startsChatBreak(at("user", "2026-11-28T06:00:00Z"), at("bot", "2026-11-28T06:02:00Z")),
     ).toBe(false);
