@@ -57,6 +57,14 @@ if (
     // Single executables host the launcher here; other builds start process-launcher.mjs directly.
     const { runProcessLauncher } = await import("./process/processLauncherWorker.ts");
     runProcessLauncher();
+  } else if (process.argv[2] === "__bot-tool") {
+    // Single executables run `t3bot` here; other builds run the written t3bot.mjs.
+    const [{ readFileSync }, { runBotTool }] = await Promise.all([
+      import("node:fs"),
+      import("./fork/bot/toolCli.ts"),
+    ]);
+    const [botsDir, stateDir, ...args] = process.argv.slice(3);
+    await runBotTool(botsDir ?? "", stateDir ?? "", args, readFileSync);
   } else {
     const { runCliCommand } = await loadCliMain();
     await runCliCommand();
