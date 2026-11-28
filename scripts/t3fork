@@ -99,6 +99,7 @@ def dispatch(workflow, fields):
 def cmd_release(a):
     head = check_pushed()
     version, last = (a.version, latest_release()) if a.version else next_version()
+    apk = None
     plan = [("fork-cli-release.yml", {"version": version, "desktop": str(not a.no_desktop).lower()})]
     if a.android is not None:
         prev = last_android()
@@ -111,9 +112,12 @@ def cmd_release(a):
         else:
             mv = f"{prev[0]}.{prev[1]}.{prev[2] + 1}"
         plan.append(("fork-android-apk.yml", {"version": mv, "variant": "production", "abi": "arm64-v8a"}))
+        apk = f"{BASE_URL}/android-v{mv}/t3code-production-{mv}-arm64-v8a.apk"
     print(f"origin/{BRANCH} {head}; last fork release {last or '-'} -> {version}")
     for wf, f in plan:
         print(f"  {wf} {f}  (typically ~{typical_minutes(wf) or '?'} min)")
+    if apk:
+        print(f"  android apk once built: {apk}")
     if a.dry_run:
         return
     runs = [(wf, dispatch(wf, f)) for wf, f in plan]
@@ -130,6 +134,8 @@ def cmd_release(a):
         failed |= rc != 0
     if not failed:
         print(f"release: https://github.com/{REPO}/releases/tag/v{version}")
+        if apk:
+            print(f"android apk (open on the phone to install): {apk}")
     sys.exit(1 if failed else 0)
 
 

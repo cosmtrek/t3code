@@ -136,6 +136,10 @@ gh run watch                        # wait for the build
 gh run download --name t3code-production-1.0.0-arm64-v8a
 ```
 
+Each `arm64-v8a` build is also published as release `android-v<version>` (`android-preview-v<version>`
+for preview), not marked latest. Open its APK link on the phone to install; Actions artifacts need a
+GitHub sign-in and arrive zipped. `t3fork release --android` prints that link.
+
 Install `production` for daily use. Android cannot downgrade without uninstalling, which drops the
 app's data, so try a risky build (native changes, a MINOR bump) as `-f variant=preview` first: it
 installs beside production and leaves it untouched.

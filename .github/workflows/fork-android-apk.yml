@@ -26,8 +26,9 @@ on:
           - arm64-v8a
           - x86_64
 
+# write: phone builds are published as a release, whose APK link installs straight from a phone.
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: fork-android-apk-${{ inputs.variant }}
@@ -152,3 +153,21 @@ jobs:
           name: t3code-${{ inputs.variant }}-${{ inputs.version }}-${{ inputs.abi }}
           path: ${{ env.APK_PATH }}
           if-no-files-found: error
+
+      # Actions artifacts need a GitHub sign-in and arrive zipped; a release asset does not.
+      # Not marked latest, so the server releases keep that spot.
+      - name: Publish release
+        if: inputs.abi == 'arm64-v8a'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$APP_VARIANT" = production ]; then tag="android-v$T3CODE_MOBILE_VERSION"; else tag="android-$APP_VARIANT-v$T3CODE_MOBILE_VERSION"; fi
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" "$APK_PATH" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$tag" "$APK_PATH" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest=false \
+              --title "Android $APP_VARIANT $T3CODE_MOBILE_VERSION" \
+              --notes "$T3CODE_ANDROID_PACKAGE, versionCode ${{ github.run_number }}. Open the APK link on the phone to install."
+          fi
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/$(basename "$APK_PATH")"
+          echo "- APK: $url" >> "$GITHUB_STEP_SUMMARY"
