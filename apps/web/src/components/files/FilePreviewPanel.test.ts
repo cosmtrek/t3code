@@ -135,6 +135,17 @@ describe("workspaceAssetResource", () => {
     });
   });
 
+  it("uses workspace assets for a bot's binary downloads without a thread", () => {
+    expect(
+      workspaceAssetResource({
+        ...input,
+        kind: "media-file",
+        draft: true,
+        absolutePath: "/repo/report.bin",
+      }),
+    ).toEqual({ _tag: "draft-workspace-file", cwd: "/repo", path: "/repo/report.bin" });
+  });
+
   it("names the workspace root for a draft, which the server cannot resolve from a thread", () => {
     expect(workspaceAssetResource({ ...input, draft: true })).toEqual({
       _tag: "draft-workspace-file",

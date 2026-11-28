@@ -21,7 +21,6 @@ import {
   PlayIcon,
   SettingsIcon,
   Trash2Icon,
-  XIcon,
 } from "lucide-react";
 import {
   useEffect,
@@ -29,7 +28,6 @@ import {
   useId,
   useRef,
   useState,
-  type CSSProperties,
   type MouseEvent,
   type ReactNode,
 } from "react";
@@ -43,7 +41,7 @@ import ChatMarkdown from "../../components/ChatMarkdown";
 import { MessageCopyButton } from "../../components/chat/MessageCopyButton";
 import { MESSAGE_HEADING_LEVEL } from "../../components/chat/TimelineRowParts";
 import { HtmlRenderFrame } from "../../components/chat/HtmlRenderFrame";
-import { RightPanelResizeHandle } from "../../components/preview/RightPanelResizeHandle";
+import { BotFilePanel, useBotFiles } from "./BotFilePanel";
 import { Alert, AlertAction, AlertDescription } from "../../components/ui/alert";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
@@ -96,7 +94,6 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../../components/ui/toolt
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { useEnvironmentSettings } from "../../hooks/useSettings";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
-import { RESIZABLE_WIDTH_PROPERTY, useResizableWidth } from "../../hooks/useResizableWidth";
 import { cn } from "../../lib/utils";
 import { providerInstanceEntriesFor } from "../../providerInstances";
 import { useEnvironments } from "../../state/environments";
@@ -469,6 +466,14 @@ function BotChat({
     return () => document.removeEventListener("visibilitychange", markSeen);
   }, [environmentId, botId, lastPostId]);
   const workThreadId = data?.bot.workThreadId ?? null;
+  const cwd = data?.workspacePath;
+  const files = useBotFiles(environmentId, botId, workThreadId, cwd);
+  const [fileOpenedOverlay, setFileOpenedOverlay] = useState(false);
+  const openFileInPanel = (path: string, line?: number) => {
+    if (!wide && !notebookOpen) setFileOpenedOverlay(true);
+    files.open(path, line);
+    setNotebookOpen(true);
+  };
   // Pushed between reads; a newer read carries the line too, so it wins.
   const [pushed, setPushed] = useState<{
     readonly read: BotDetail | null;
@@ -555,7 +560,14 @@ function BotChat({
               <EllipsisIcon />
             </MenuTrigger>
             <MenuPopup align="end">
-              <MenuItem disabled={notebookOpen} onClick={() => setNotebookOpen(true)}>
+              <MenuItem
+                disabled={notebookOpen && files.selected === null}
+                onClick={() => {
+                  files.showProfile();
+                  setFileOpenedOverlay(false);
+                  setNotebookOpen(true);
+                }}
+              >
                 <IdCardIcon />
                 Profile
               </MenuItem>
@@ -603,6 +615,8 @@ function BotChat({
                 environmentId={environmentId}
                 botId={botId}
                 workThreadId={workThreadId}
+                cwd={cwd}
+                onOpenFileInPanel={openFileInPanel}
               />
             ))}
             {data?.questions.map((question) => (
@@ -648,13 +662,29 @@ function BotChat({
         </div>
       </section>
       {data && notebookOpen ? (
-        <NotebookPanel
-          environmentId={environmentId}
-          detail={data}
+        <BotFilePanel
+          files={files}
+          cwd={cwd}
+          name={data.bot.name}
+          hasThread={workThreadId !== null}
           overlay={!wide}
-          onHide={() => setNotebookOpen(false)}
-          onOpenSettings={() => setEditingSettings(true)}
-        />
+          onHide={() => {
+            setNotebookOpen(false);
+            setFileOpenedOverlay(false);
+          }}
+          onCloseFile={(id) => {
+            if (files.close(id) === 0 && !wide && fileOpenedOverlay) {
+              setNotebookOpen(false);
+              setFileOpenedOverlay(false);
+            }
+          }}
+        >
+          <NotebookPanel
+            environmentId={environmentId}
+            detail={data}
+            onOpenSettings={() => setEditingSettings(true)}
+          />
+        </BotFilePanel>
       ) : null}
       {editingSettings && data ? (
         <SettingsDialog
@@ -746,12 +776,16 @@ function ChatLine({
   environmentId,
   botId,
   workThreadId,
+  cwd,
+  onOpenFileInPanel,
 }: {
   readonly message: BotChatMessage;
   readonly environmentId: EnvironmentId;
   readonly botId: string;
   /** Where the bot wrote its replies: images and files they name load through it. */
   readonly workThreadId: string | null;
+  readonly cwd: string | undefined;
+  readonly onOpenFileInPanel: (path: string, line?: number) => void;
 }) {
   if (message.role === "user") {
     const waiting = message.turnRunId === null;
@@ -761,7 +795,8 @@ function ChatLine({
           {/* As a thread draws a user message, so citations show as their cards. */}
           <ChatMarkdown
             text={message.text}
-            cwd={undefined}
+            cwd={cwd}
+            onOpenFileInPanel={onOpenFileInPanel}
             environmentId={environmentId}
             className="text-message-foreground user-message-markdown"
             lineBreaks
@@ -800,7 +835,8 @@ function ChatLine({
           >
             <ChatMarkdown
               text={message.text}
-              cwd={undefined}
+              cwd={cwd}
+              onOpenFileInPanel={onOpenFileInPanel}
               environmentId={environmentId}
               threadRef={
                 workThreadId === null
@@ -1025,25 +1061,13 @@ function CopyPathButton({ path }: { readonly path: string }) {
 function NotebookPanel({
   environmentId,
   detail,
-  overlay,
-  onHide,
   onOpenSettings,
 }: {
   readonly environmentId: EnvironmentId;
   readonly detail: BotDetail;
-  /** Narrow screens: float over the chat instead of taking a column. */
-  readonly overlay: boolean;
-  readonly onHide: () => void;
   readonly onOpenSettings: () => void;
 }) {
   const navigate = useNavigate();
-  const width = useResizableWidth({
-    storageKey: "t3code:bots-profile-width",
-    defaultWidth: 320,
-    minWidth: 280,
-    maxWidth: 560,
-    edge: "left",
-  });
   const { notebook, role } = detail;
   const botId = detail.bot.id;
   const [error, setError] = useState<string | null>(null);
@@ -1098,20 +1122,7 @@ function NotebookPanel({
   ].filter((label) => label !== false);
 
   return (
-    <aside
-      className={cn(
-        "relative flex w-(--resizable-width) max-w-full min-w-70 flex-col border-l bg-background",
-        overlay && "absolute inset-y-0 right-0 z-20 shadow-lg",
-      )}
-      style={{ [RESIZABLE_WIDTH_PROPERTY]: `${width.width}px` } as CSSProperties}
-    >
-      <RightPanelResizeHandle handlers={width.handlers} label="Resize the profile" />
-      <PaneHeader edge="detail">
-        <h2 className="min-w-0 flex-1 truncate px-1 text-sm font-medium">Profile</h2>
-        <IconAction label="Close profile" onClick={onHide}>
-          <XIcon />
-        </IconAction>
-      </PaneHeader>
+    <>
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
         {error ? <p className="px-3 pt-2 text-xs text-destructive-foreground">{error}</p> : null}
         <RoleEditor key={botId} environmentId={environmentId} botId={botId} role={role} />
@@ -1308,7 +1319,7 @@ function NotebookPanel({
           onClose={() => setOpenFile(null)}
         />
       ) : null}
-    </aside>
+    </>
   );
 }
 

@@ -312,6 +312,7 @@ export const readBot = Effect.fn("ForkBot.readBot")(function* (params: URLSearch
     chat: store.recentChat(bot.id, CHAT_PAGE),
     notebook: yield* readNotebook(bot.id),
     questions: store.openQuestions(bot.id),
+    workspacePath: workspacePath(runtime.botsDir, bot.id),
     notesPath: notesPath(runtime.botsDir, bot.id),
     notes: yield* listNotes(runtime.botsDir, bot.id),
     skills: yield* Effect.promise(() => listSkills(runtime.botsDir, bot.id)),

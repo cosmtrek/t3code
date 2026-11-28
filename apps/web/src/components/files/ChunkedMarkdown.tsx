@@ -27,7 +27,7 @@ export function ChunkedMarkdown(props: {
   readonly loading?: boolean;
   readonly cwd: string;
   readonly relativePath: string;
-  readonly threadRef: ScopedThreadRef;
+  readonly threadRef: ScopedThreadRef | undefined;
   readonly workspaceMutationId: string | null;
   readonly onKeyDown?: KeyboardEventHandler<HTMLDivElement>;
   readonly onTaskListChange?:

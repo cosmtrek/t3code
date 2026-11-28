@@ -529,19 +529,19 @@ function WorkspaceDocumentPreview(props: {
   readonly workspaceMutationId: string | null;
   readonly refreshRevision: number;
 }) {
-  const resource =
-    props.draft && props.document
-      ? {
-          _tag: "draft-workspace-file" as const,
-          cwd: props.workspaceRoot,
-          path: props.absolutePath,
-        }
-      : {
-          _tag: "media-file" as const,
-          threadId: props.threadRef.threadId,
-          path: props.absolutePath,
-          ...(props.document ? {} : { disposition: "attachment" as const }),
-        };
+  const resource = props.draft
+    ? {
+        _tag: "draft-workspace-file" as const,
+        cwd: props.workspaceRoot,
+        path: props.absolutePath,
+        ...(props.document ? {} : { disposition: "attachment" as const }),
+      }
+    : {
+        _tag: "media-file" as const,
+        threadId: props.threadRef.threadId,
+        path: props.absolutePath,
+        ...(props.document ? {} : { disposition: "attachment" as const }),
+      };
   const gt = useGT();
   // Drafts keep reloading on every workspace mutation, as before.
   const revisioned = resource._tag === "media-file";
@@ -1179,7 +1179,7 @@ function RenderedMarkdownSurface({
   | "onPostRender"
   | "onEditorChange"
 > & {
-  threadRef: ScopedThreadRef;
+  threadRef: ScopedThreadRef | undefined;
   readOnly: boolean;
   workspaceMutationId: string | null;
 }) {
@@ -1477,6 +1477,7 @@ export default function FilePreviewPanel({
         ? setRenderTablePreferred
         : setRenderBrowserFilePreferred;
   const canOpenInBrowser =
+    !draft &&
     canOperatePreview &&
     previewPath !== null &&
     attachment === undefined &&
@@ -1857,7 +1858,7 @@ export default function FilePreviewPanel({
                 environmentId={environmentId}
                 cwd={cwd}
                 relativePath={relativePath}
-                threadRef={threadRef}
+                threadRef={draft ? undefined : threadRef}
                 contents={file.data.contents}
                 workspaceMutationId={workspaceMutationId}
                 readOnly={file.data.truncated || isHostFile || !canWriteFiles}
@@ -2100,7 +2101,7 @@ export function WorkspaceLargeTextPreview(props: {
       sizeBytes={props.sizeBytes}
       delimiter={props.delimiter}
       markdownCwd={props.markdownCwd}
-      threadRef={props.threadRef}
+      threadRef={props.draftCwd === null ? props.threadRef : undefined}
       workspaceMutationId={props.workspaceMutationId}
       copyContents={props.copyContents}
       onRetry={retry}

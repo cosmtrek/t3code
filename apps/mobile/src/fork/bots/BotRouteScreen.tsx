@@ -1,3 +1,5 @@
+import { useResolveClassNames } from "uniwind";
+import { themeColorWithContrast } from "../../lib/mobileTheme";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import type {
@@ -8,7 +10,7 @@ import type {
 } from "@t3tools/fork-client/bots";
 import type { ForkEvent } from "@t3tools/fork-client/sse";
 import { parseThreadLinkHref } from "@t3tools/shared/threadLinks";
-import type { StaticScreenProps } from "@react-navigation/native";
+import { useIsFocused, useNavigation, type StaticScreenProps } from "@react-navigation/native";
 import type * as React from "react";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { AppState, Platform, Pressable, ScrollView, View } from "react-native";
@@ -29,8 +31,8 @@ import { useAndroidWorkspaceBack } from "../../features/layout/workspace/useAndr
 import { useOpenThreadLink } from "../../features/threads/useOpenThreadLink";
 import { ANDROID_READING_MAX_WIDTH, CHAT_CONTENT_MAX_WIDTH } from "../../lib/layout";
 import { tryOpenWebLink } from "../../lib/openExternalUrl";
-import { deriveBottomControlInsets, type NativeLayoutMetrics } from "../../lib/reserved-regions";
 import { relativeTime } from "../../lib/time";
+import { deriveBottomControlInsets, type NativeLayoutMetrics } from "../../lib/reserved-regions";
 import { NativeLayoutObserver } from "../../native/NativeLayoutObserver";
 import { useNativeWorkspaceColumnsSupported } from "../../native/NativeWorkspaceColumns";
 import { useDeviceType, useNativeColumnLayoutMetrics } from "../../native/native-layout-metrics";
@@ -38,6 +40,7 @@ import { NativeScrollView } from "../../native/NativeScrollViewMarker";
 import { SelectableMarkdownText } from "../../native/SelectableMarkdownText";
 import { asForkError, forkRequest, subscribeToForkEvents } from "../forkApi";
 import { useForkResource } from "../useForkResource";
+import { botFileLink } from "./botFileLink";
 
 export type BotParams = {
   readonly environmentId: string;
@@ -60,6 +63,7 @@ export function BotRouteScreen({ route }: StaticScreenProps<BotParams>) {
 /** A bot's chat, as the desktop bot page shows it: its posts, its questions, and a composer. */
 function BotRoute(props: { readonly environmentId: EnvironmentId; readonly botId: string }) {
   const { environmentId, botId } = props;
+  const navigation = useNavigation();
   const returnToList = useAndroidWorkspaceBack();
   const { layout } = useAdaptiveWorkspaceLayout();
   const openThreadRef = useOpenThreadLink(environmentId);
@@ -94,6 +98,21 @@ function BotRoute(props: { readonly environmentId: EnvironmentId; readonly botId
     const link = parseThreadLinkHref(href);
     if (link) {
       openThreadRef(scopeThreadRef(link.environmentId ?? environmentId, link.threadId));
+      return;
+    }
+    const file = data
+      ? botFileLink(href, {
+          environmentId,
+          workThreadId: data.bot.workThreadId,
+          workspacePath: data.workspacePath,
+        })
+      : null;
+    if (file?.screen === "ThreadFile") {
+      navigation.navigate(file.screen, file.params);
+      return;
+    }
+    if (file?.screen === "NewTaskFile") {
+      navigation.navigate(file.screen, file.params);
       return;
     }
     void tryOpenWebLink(href, "markdown-link");
@@ -343,10 +362,11 @@ function usePushedActivity(
 
 /** Tells the server the user has seen the bot's latest post, here or when the app comes back. */
 function useMarkSeen(environmentId: EnvironmentId, botId: string, data: BotDetail | null) {
+  const focused = useIsFocused();
   const lastPostId = data?.chat.findLast((message) => message.role !== "user")?.id ?? null;
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reports the seen post to the server while the screen shows it
   useEffect(() => {
-    if (lastPostId === null) return;
+    if (!focused || lastPostId === null) return;
     const markSeen = () => {
       if (AppState.currentState !== "active") return;
       void forkRequest(environmentId, "/bots/seen", { method: "POST", body: { botId } }).catch(
@@ -358,7 +378,7 @@ function useMarkSeen(environmentId: EnvironmentId, botId: string, data: BotDetai
       if (state === "active") markSeen();
     });
     return () => subscription.remove();
-  }, [environmentId, botId, lastPostId]);
+  }, [environmentId, botId, lastPostId, focused]);
 }
 
 function ChatLine(props: {
@@ -367,13 +387,39 @@ function ChatLine(props: {
   readonly onLinkPress: (href: string) => void;
 }) {
   const { message } = props;
+  const userStyle = useResolveClassNames("text-sm text-user-bubble-foreground bg-user-bubble");
+  const userCodeStyle = useResolveClassNames("text-md-user-code-text bg-md-user-code-bg");
+  const userFenceStyle = useResolveClassNames("bg-md-user-fence-bg");
+  const userInlineCodeStyle = useResolveClassNames("text-user-bubble-foreground-muted");
+  const userLinkStyle = useResolveClassNames("text-md-link");
+  const userColor = String(userStyle.color);
   if (message.role === "user") {
     return (
       <View className="max-w-[88%] gap-1 self-end">
         <View className="rounded-2xl bg-user-bubble px-3.5 py-2.5">
-          <Text selectable className="text-sm text-user-bubble-foreground">
-            {message.text}
-          </Text>
+          <SelectableMarkdownText
+            markdown={message.text}
+            textStyle={{
+              ...props.textStyle,
+              color: userColor,
+              strongColor: userColor,
+              mutedColor: userColor,
+              fileTextColor: userColor,
+              quoteMarkerColor: userColor,
+              dividerColor: userColor,
+              linkColor: themeColorWithContrast(
+                String(userLinkStyle.color),
+                String(userStyle.backgroundColor),
+              ),
+              inlineCodeColor: String(userInlineCodeStyle.color),
+              codeColor: String(userCodeStyle.color),
+              codeBackgroundColor: String(userCodeStyle.backgroundColor),
+              codeBlockBackgroundColor: String(userFenceStyle.backgroundColor),
+              fontSize: Number(userStyle.fontSize),
+              lineHeight: Number(userStyle.lineHeight),
+            }}
+            onLinkPress={props.onLinkPress}
+          />
         </View>
         {message.turnRunId === null ? (
           <Text className="self-end pe-1 text-xs text-foreground-muted">Waiting for the bot</Text>

@@ -8,6 +8,7 @@ import { writeFileAtomically } from "../lib/atomic-file";
  */
 const file = () => new File(Paths.document, "fork-preferences.json");
 let values: Record<string, unknown> | null = null;
+const listeners = new Map<string, Set<() => void>>();
 
 function load(): Record<string, unknown> {
   if (values !== null) return values;
@@ -25,11 +26,26 @@ export function readForkPreference(key: string): unknown {
   return load()[key];
 }
 
+export function subscribeForkPreference(key: string, listener: () => void): () => void {
+  let subscribers = listeners.get(key);
+  if (!subscribers) {
+    subscribers = new Set();
+    listeners.set(key, subscribers);
+  }
+  subscribers.add(listener);
+  return () => {
+    subscribers.delete(listener);
+    if (subscribers.size === 0 && listeners.get(key) === subscribers) listeners.delete(key);
+  };
+}
+
 /** `undefined` removes the key. Writes are best effort: a lost choice is only a choice. */
 export function writeForkPreference(key: string, value: unknown): void {
+  if (Object.is(readForkPreference(key), value)) return;
   const next = { ...load() };
   if (value === undefined) delete next[key];
   else next[key] = value;
   values = next;
+  for (const listener of listeners.get(key) ?? []) listener();
   void writeFileAtomically(file(), JSON.stringify(next)).catch(() => undefined);
 }

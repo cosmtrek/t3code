@@ -688,6 +688,18 @@ describe("bot turns", () => {
       ),
   );
 
+  it.effect("returns the workspace before a bot has a work thread", () =>
+    withHarness((h) =>
+      Effect.gen(function* () {
+        const { botId } = yield* Bots.createBot({ name: "Files", modelSelection: MODEL });
+        const detail = yield* Bots.readBot(new URLSearchParams({ botId }));
+        expect(detail.bot.workThreadId).toBeNull();
+        expect(detail.workspacePath).toBe(NodePath.join(h.runtime.botsDir, botId, "workspace"));
+        expect(detail.notesPath).toBe(NodePath.join(detail.workspacePath, "notes"));
+      }),
+    ),
+  );
+
   it.effect("holds turns while paused and past the day's budget, saying so once", () =>
     withHarness((h) =>
       Effect.gen(function* () {

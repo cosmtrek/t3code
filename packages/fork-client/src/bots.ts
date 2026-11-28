@@ -80,6 +80,7 @@ export interface BotActivity {
 }
 
 export interface BotDetail {
+  readonly workspacePath: string;
   readonly bot: {
     readonly id: string;
     readonly name: string;

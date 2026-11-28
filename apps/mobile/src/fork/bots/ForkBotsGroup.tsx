@@ -3,7 +3,7 @@ import { botRowStatus, type BotRowStatus, type BotSummary } from "@t3tools/fork-
 import { plainPreview } from "@t3tools/fork-client/text";
 import { useNavigationState } from "@react-navigation/native";
 import { useMessages } from "gt-react-native";
-import { useState } from "react";
+import { useSyncExternalStore } from "react";
 import { View } from "react-native";
 
 import { RelativeTime } from "../../components/RelativeTime";
@@ -29,7 +29,11 @@ import {
 import { cn } from "../../lib/cn";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import { steadyNavigationThreadShellsAtom } from "../../state/threads";
-import { readForkPreference, writeForkPreference } from "../forkPreferences";
+import {
+  readForkPreference,
+  subscribeForkPreference,
+  writeForkPreference,
+} from "../forkPreferences";
 import { useBotListings, type BotListing } from "./botListings";
 
 /** The work thread's statuses that wait on the user; any other shows the bot's own status. */
@@ -42,6 +46,9 @@ const BLOCKED: ReadonlySet<ThreadListV2Status> = new Set([
 ]);
 
 const COLLAPSED_KEY = "botsGroupCollapsed";
+const subscribeCollapsed = (listener: () => void) =>
+  subscribeForkPreference(COLLAPSED_KEY, listener);
+const readCollapsed = () => readForkPreference(COLLAPSED_KEY) === true;
 
 /**
  * The bots of every connected environment, pinned above the thread list as on desktop. It hides
@@ -50,7 +57,7 @@ const COLLAPSED_KEY = "botsGroupCollapsed";
 export function ForkBotsGroup(props: { readonly searching: boolean }) {
   const listings = useBotListings();
   const pane = usePaneRole() === "sidebar" ? "sidebar" : "screen";
-  const [collapsed, setCollapsed] = useState(() => readForkPreference(COLLAPSED_KEY) === true);
+  const collapsed = useSyncExternalStore(subscribeCollapsed, readCollapsed);
   const blocked = useBlockedWorkThreads(listings);
   const selected = useNavigationState((state) => {
     const route = state?.routes[state.index];
@@ -72,8 +79,7 @@ export function ForkBotsGroup(props: { readonly searching: boolean }) {
     })),
   );
   const toggle = () => {
-    writeForkPreference(COLLAPSED_KEY, !collapsed);
-    setCollapsed(!collapsed);
+    writeForkPreference(COLLAPSED_KEY, !readCollapsed());
   };
   return (
     <View>
@@ -93,6 +99,7 @@ export function ForkBotsGroup(props: { readonly searching: boolean }) {
             <BotRow
               key={`${listing.environmentId}:${bot.id}`}
               listing={listing}
+              environmentLabel={listings.length > 1 ? listing.label : null}
               bot={bot}
               status={status}
               pane={pane}
@@ -138,6 +145,7 @@ function useBlockedWorkThreads(
 
 function BotRow(props: {
   readonly listing: BotListing;
+  readonly environmentLabel: string | null;
   readonly bot: BotSummary;
   readonly status: BotRowStatus<ThreadListV2Status>;
   readonly pane: "screen" | "sidebar";
@@ -200,7 +208,7 @@ function BotRow(props: {
         )}
         numberOfLines={1}
       >
-        {preview}
+        {props.environmentLabel ? `${props.environmentLabel} · ${preview}` : preview}
       </Text>
     </View>
   );
@@ -212,7 +220,9 @@ function BotRow(props: {
     >
       <RowPressable
         accessibilityRole="button"
-        accessibilityLabel={[bot.name, statusText(status, m), preview].filter(Boolean).join(", ")}
+        accessibilityLabel={[bot.name, props.environmentLabel, statusText(status, m), preview]
+          .filter(Boolean)
+          .join(", ")}
         accessibilityState={{ selected }}
         className={appearance.className}
         interactionClassName={appearance.interactionClassName}
